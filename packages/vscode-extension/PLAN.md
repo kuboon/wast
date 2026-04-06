@@ -25,4 +25,13 @@ VS Code extension providing TreeView navigation, virtual document editing, LSP d
 
 ## Status
 
-Not started.
+Core features implemented (direct file access, no wasm runtime):
+- TreeView panel listing wast.db components and their functions
+- Virtual documents (`wast://` scheme) for viewing component functions
+- fs.watch for external wast.db change detection with TreeView refresh
+- Settings for symsLanguage and syntaxPlugin
+
+Not yet implemented (requires wasm component runtime):
+- Real-time LSP diagnostics via syntax-plugin from-text
+- Save flow: from-text -> merge -> write to wast.db
+- Session conflict handling
