@@ -19,7 +19,7 @@ text <──syntax plugin──> partial WastComponent <──partial manager─
 | ruby-like syntax | `crates/syntax-plugin/ruby-like/` | **Partial** | 9 | `from_text` body parsing, body roundtrip tests |
 | ts-like syntax | `crates/syntax-plugin/ts-like/` | **Done** | 21 | — |
 | rust-like syntax | `crates/syntax-plugin/rust-like/` | **Partial** | 9 | `from_text` body parsing, body roundtrip tests |
-| CLI | `packages/cli/` | **Partial** | 20 | other syntax plugins WASM integration |
+| CLI | `packages/cli/` | **Done** (ts-like) | 27 | Other syntax plugins (ruby-like, rust-like) |
 | VS Code extension | `packages/vscode-extension/` | **Partial** | 0 | Body rendering, save flow, LSP, session conflicts |
 
 ## Detailed TODO
@@ -43,17 +43,17 @@ text <──syntax plugin──> partial WastComponent <──partial manager─
 
 ### CLI (`packages/cli/`)
 
-> **Note**: `bindgen` uses the file-manager WASM component. Other commands still use standalone JS. The bridge module (`wasm-plugin.ts`) converts between wast-db JSON and WASM tagged-union formats.
+> All commands use WASM components (file-manager, partial-manager, ts-like syntax-plugin) via jco transpile. Bridge module (`wasm-plugin.ts`) converts between wast-db JSON and WASM tagged-union formats. 27 integration tests in `packages/cli/test/`.
 
-- [x] Load ts-like syntax-plugin WASM via jco transpile (`packages/cli/src/wasm-plugin.ts`). 10 integration tests
+- [x] Load ts-like syntax-plugin WASM via jco transpile. 10 integration tests
 - [x] Load file-manager WASM component — `bindgen`, `read`, `write`, `merge` bridge APIs. 5 integration tests
 - [x] Load partial-manager WASM component — `extract`, `merge` bridge APIs. 5 integration tests
 - [ ] Load other syntax plugins (ruby-like, rust-like) via same jco pattern
-- [x] `bindgen` — calls file-manager WASM `bindgen()` which parses `world.wit`, populates funcs/types, and writes `wast.db` + `syms.en.yaml` to disk
-- [x] `extract` — reads wast.db JSON + syms files, resolves UIDs, formats text output. Has `--include-caller` with heuristic body scanning (JS regex, not full instruction deserialization)
-- [x] `merge` — parses func text blocks from stdin via regex, merges into wast.db JSON. Preserves existing bodies. Has `--dry-run` mode
-- [x] `fmt` — reads stdin, validates func/type definitions exist, normalizes trailing whitespace. No actual syntax formatting (passthrough)
-- [x] `diff` — compares two wast.db directories (funcs, types, syms). Detects added/removed/changed with detailed output
+- [x] `bindgen` — calls file-manager WASM `bindgen()`: parses `world.wit`, populates funcs/types, writes `wast.db` + `syms.en.yaml`
+- [x] `extract` — FileManager.read → PartialManager.extract (call-graph analysis, type refs, include_caller) → SyntaxPlugin.toText
+- [x] `merge` — SyntaxPlugin.fromText (parses ts-like text into WastComponent) → FileManager.merge (validates against world.wit, writes to disk). Supports `--dry-run`
+- [x] `fmt` — SyntaxPlugin.fromText → toText roundtrip (normalizes text, validates syntax). Reports errors on invalid input
+- [x] `diff` — FileManager.read × 2 → SyntaxPlugin.toText × 2 → text comparison with per-function block diff
 - [x] `syms` — reads/writes syms YAML files, classifies UIDs (wit/internal/local), updates display names
 - [x] `setup-git` — configures git diff driver and .gitattributes
 

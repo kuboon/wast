@@ -143,16 +143,16 @@ async function main() {
       await bindgen(positionals, options);
       break;
     case "extract":
-      extract(positionals, options);
+      await extract(positionals, options);
       break;
     case "merge":
-      merge(positionals, options);
+      await merge(positionals, options);
       break;
     case "fmt":
-      fmt(positionals, options);
+      await fmt(positionals, options);
       break;
     case "diff":
-      diff(positionals, options);
+      await diff(positionals, options);
       break;
     case "syms":
       syms(positionals, options);
