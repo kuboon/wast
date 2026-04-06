@@ -120,8 +120,9 @@ fn type_source_from_serde(s: &serde_types::TypeSource) -> TypeSource {
     }
 }
 
-fn component_to_serde(c: &WastComponent) -> serde_types::WastComponent {
-    serde_types::WastComponent {
+/// Convert WastComponent to on-disk format (no syms — those go in syms.*.yaml).
+fn component_to_db(c: &WastComponent) -> serde_types::WastDb {
+    serde_types::WastDb {
         funcs: c
             .funcs
             .iter()
@@ -150,33 +151,13 @@ fn component_to_serde(c: &WastComponent) -> serde_types::WastComponent {
                 )
             })
             .collect(),
-        syms: serde_types::Syms {
-            wit_syms: c.syms.wit_syms.clone(),
-            internal: c
-                .syms
-                .internal
-                .iter()
-                .map(|e| serde_types::SymEntry {
-                    uid: e.uid.clone(),
-                    display_name: e.display_name.clone(),
-                })
-                .collect(),
-            local: c
-                .syms
-                .local
-                .iter()
-                .map(|e| serde_types::SymEntry {
-                    uid: e.uid.clone(),
-                    display_name: e.display_name.clone(),
-                })
-                .collect(),
-        },
     }
 }
 
-fn component_from_serde(c: &serde_types::WastComponent) -> WastComponent {
+/// Convert on-disk format to WastComponent (syms empty — loaded separately from YAML).
+fn component_from_db(db: &serde_types::WastDb) -> WastComponent {
     WastComponent {
-        funcs: c
+        funcs: db
             .funcs
             .iter()
             .map(|(uid, f)| {
@@ -191,7 +172,7 @@ fn component_from_serde(c: &serde_types::WastComponent) -> WastComponent {
                 )
             })
             .collect(),
-        types: c
+        types: db
             .types
             .iter()
             .map(|(uid, td)| {
@@ -205,25 +186,9 @@ fn component_from_serde(c: &serde_types::WastComponent) -> WastComponent {
             })
             .collect(),
         syms: Syms {
-            wit_syms: c.syms.wit_syms.clone(),
-            internal: c
-                .syms
-                .internal
-                .iter()
-                .map(|e| SymEntry {
-                    uid: e.uid.clone(),
-                    display_name: e.display_name.clone(),
-                })
-                .collect(),
-            local: c
-                .syms
-                .local
-                .iter()
-                .map(|e| SymEntry {
-                    uid: e.uid.clone(),
-                    display_name: e.display_name.clone(),
-                })
-                .collect(),
+            wit_syms: vec![],
+            internal: vec![],
+            local: vec![],
         },
     }
 }
@@ -350,9 +315,9 @@ fn read_component_from_disk(path: &str) -> Result<WastComponent, WastError> {
 
     let data = std::fs::read_to_string(&db)
         .map_err(|e| err_at(format!("failed to read {}: {}", db, e), db.clone()))?;
-    let sc: serde_types::WastComponent = serde_json::from_str(&data)
+    let sc: serde_types::WastDb = serde_json::from_str(&data)
         .map_err(|e| err_at(format!("invalid JSON in {}: {}", db, e), db))?;
-    let mut component = component_from_serde(&sc);
+    let mut component = component_from_db(&sc);
 
     // Read syms from YAML and merge into the component's syms
     let file_syms = read_syms(path, DEFAULT_LANG);
@@ -405,7 +370,7 @@ fn write_component_to_disk(path: &str, component: &WastComponent) -> Result<(), 
         .map_err(|e| err(format!("failed to create directory {}: {}", path, e)))?;
 
     let db = db_path(path);
-    let sc = component_to_serde(component);
+    let sc = component_to_db(component);
     let json = serde_json::to_string_pretty(&sc)
         .map_err(|e| err(format!("JSON serialization error: {}", e)))?;
     std::fs::write(&db, json.as_bytes())

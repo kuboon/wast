@@ -14,11 +14,11 @@ text <──syntax plugin──> partial WastComponent <──partial manager─
 |---|---|---|---|---|
 | WIT contract | `wit/wast-core.wit` | **Done** | — | — |
 | partial-manager | `crates/partial-manager/` | **Done** | 21 | — |
-| file-manager | `crates/file-manager/` | **Partial** | 2 | world.wit parsing for bindgen, SQLite migration |
+| file-manager | `crates/file-manager/` | **Partial** | 11 | SQLite migration |
 | pattern-analyzer | `crates/syntax-plugin/internal/pattern-analyzer/` | **Done** | 17 | — |
-| ruby-like syntax | `crates/syntax-plugin/ruby-like/` | **Partial** | 0 | Body rendering/parsing, tests |
-| ts-like syntax | `crates/syntax-plugin/ts-like/` | **Partial** | 0 | Body rendering/parsing, tests |
-| rust-like syntax | `crates/syntax-plugin/rust-like/` | **Partial** | 0 | Body rendering/parsing, tests |
+| ruby-like syntax | `crates/syntax-plugin/ruby-like/` | **Partial** | 9 | Body rendering/parsing |
+| ts-like syntax | `crates/syntax-plugin/ts-like/` | **Partial** | 9 | Body rendering/parsing |
+| rust-like syntax | `crates/syntax-plugin/rust-like/` | **Partial** | 9 | Body rendering/parsing |
 | CLI | `packages/cli/` | **Partial** | 0 | 4 commands need wasm runtime (extract, merge, fmt, diff) |
 | VS Code extension | `packages/vscode-extension/` | **Stub** | 0 | Everything |
 
@@ -30,14 +30,14 @@ text <──syntax plugin──> partial WastComponent <──partial manager─
 - [x] **merge**: Validate that all func references in partial's internal funcs exist in full (missing_dependency check)
 
 ### file-manager (`crates/file-manager/src/lib.rs`)
-- [ ] **bindgen**: Parse `world.wit` and populate exported/imported funcs and types into initial wast.db
+- [x] **bindgen**: Parse `world.wit` and populate exported/imported funcs and types into initial wast.db
 - [ ] **write/merge**: Deeper world.wit validation (currently only checks file exists)
 - [ ] Migrate storage from JSON to SQLite (spec requirement)
 
 ### syntax plugins (ruby-like, ts-like, rust-like)
 - [ ] **to_text**: Render actual body instructions (currently placeholder `[body: N bytes]`)
 - [ ] **from_text**: Parse body expressions back to instructions
-- [ ] Add unit tests for to_text/from_text roundtrips
+- [x] Add unit tests for to_text/from_text roundtrips
 
 ### CLI (`packages/cli/`)
 - [ ] Load wasm components at runtime (wasmtime/jco integration)
@@ -74,7 +74,7 @@ text <──syntax plugin──> partial WastComponent <──partial manager─
 ```bash
 # Rust
 cargo component build --workspace   # Build all wasm components
-cargo test --workspace               # Run all Rust tests (36 tests)
+cargo test --workspace               # Run all Rust tests (76 tests)
 cargo fmt                            # Format source code
 
 # TypeScript

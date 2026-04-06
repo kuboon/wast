@@ -57,22 +57,24 @@ pub struct WastTypeDef {
     pub definition: WitType,
 }
 
-#[derive(Serialize, Deserialize, Clone, Debug)]
+/// Sym entry used by syms YAML files.
+#[derive(Clone, Debug)]
 pub struct SymEntry {
     pub uid: String,
     pub display_name: String,
 }
 
-#[derive(Serialize, Deserialize, Clone, Debug)]
+/// Syms structure used by syms YAML files (NOT stored in wast.db).
+#[derive(Clone, Debug)]
 pub struct Syms {
     pub wit_syms: Vec<(String, String)>,
     pub internal: Vec<SymEntry>,
     pub local: Vec<SymEntry>,
 }
 
+/// On-disk format for wast.db — syms are NOT stored here (they go in syms.*.yaml).
 #[derive(Serialize, Deserialize, Clone, Debug)]
-pub struct WastComponent {
+pub struct WastDb {
     pub funcs: Vec<(String, WastFunc)>,
     pub types: Vec<(String, WastTypeDef)>,
-    pub syms: Syms,
 }
