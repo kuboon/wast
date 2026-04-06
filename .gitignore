@@ -20,3 +20,6 @@ Thumbs.db
 # IDE
 .idea/
 *.code-workspace
+
+# Claude Code worktrees
+.claude/worktrees/
