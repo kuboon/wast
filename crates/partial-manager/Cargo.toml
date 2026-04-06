@@ -7,6 +7,8 @@ license.workspace = true
 [dependencies]
 wit-bindgen = { workspace = true }
 wit-bindgen-rt = { workspace = true }
+wast-pattern-analyzer = { path = "../syntax-plugin/internal/pattern-analyzer" }
+postcard = { version = "1", features = ["alloc"] }
 
 [lib]
 crate-type = ["cdylib"]

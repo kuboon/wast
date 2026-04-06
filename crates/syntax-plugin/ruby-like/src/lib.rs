@@ -677,3 +677,205 @@ fn ensure_func_sym(source_uid: &str, name: &str, syms_internal: &mut Vec<SymEntr
 }
 
 bindings::export!(Component with_types_in bindings);
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bindings::exports::wast::core::syntax_plugin::Guest;
+
+    fn make_test_component() -> WastComponent {
+        WastComponent {
+            funcs: vec![
+                (
+                    "f1".to_string(),
+                    WastFunc {
+                        source: FuncSource::Internal("f1".to_string()),
+                        params: vec![("p1".to_string(), "t1".to_string())],
+                        result: Some("t1".to_string()),
+                        body: Some(vec![1, 2, 3]),
+                    },
+                ),
+                (
+                    "f2".to_string(),
+                    WastFunc {
+                        source: FuncSource::Imported("f2".to_string()),
+                        params: vec![("p2".to_string(), "t1".to_string())],
+                        result: None,
+                        body: None,
+                    },
+                ),
+                (
+                    "f3".to_string(),
+                    WastFunc {
+                        source: FuncSource::Exported("f3".to_string()),
+                        params: vec![],
+                        result: Some("t1".to_string()),
+                        body: Some(vec![10, 20]),
+                    },
+                ),
+            ],
+            types: vec![(
+                "t1".to_string(),
+                WastTypeDef {
+                    source: TypeSource::Internal("t1".to_string()),
+                    definition: WitType::Primitive(PrimitiveType::U32),
+                },
+            )],
+            syms: Syms {
+                wit_syms: vec![("f2".to_string(), "imported_fn".to_string())],
+                internal: vec![
+                    SymEntry {
+                        uid: "f1".to_string(),
+                        display_name: "my_func".to_string(),
+                    },
+                    SymEntry {
+                        uid: "f3".to_string(),
+                        display_name: "exported_fn".to_string(),
+                    },
+                    SymEntry {
+                        uid: "t1".to_string(),
+                        display_name: "u32".to_string(),
+                    },
+                ],
+                local: vec![
+                    SymEntry {
+                        uid: "p1".to_string(),
+                        display_name: "param_one".to_string(),
+                    },
+                    SymEntry {
+                        uid: "p2".to_string(),
+                        display_name: "param_two".to_string(),
+                    },
+                ],
+            },
+        }
+    }
+
+    #[test]
+    fn test_to_text_contains_display_names() {
+        let comp = make_test_component();
+        let text = Component::to_text(comp);
+        assert!(text.contains("my_func"), "should contain func name");
+        assert!(text.contains("param_one"), "should contain param name");
+        assert!(text.contains("imported_fn"), "should contain import name");
+        assert!(text.contains("exported_fn"), "should contain export name");
+        assert!(text.contains("# import"), "should have import marker");
+        assert!(text.contains("# export"), "should have export marker");
+        assert!(text.contains("def "), "should have def keyword");
+        assert!(text.contains("end"), "should have end keyword");
+    }
+
+    #[test]
+    fn test_to_text_internal_func_format() {
+        let comp = make_test_component();
+        let text = Component::to_text(comp);
+        assert!(
+            text.contains("def my_func(param_one: u32) -> u32"),
+            "internal func signature: {}",
+            text
+        );
+    }
+
+    #[test]
+    fn test_to_text_import_format() {
+        let comp = make_test_component();
+        let text = Component::to_text(comp);
+        assert!(
+            text.contains("# import imported_fn(param_two: u32)"),
+            "import signature: {}",
+            text
+        );
+    }
+
+    #[test]
+    fn test_to_text_export_format() {
+        let comp = make_test_component();
+        let text = Component::to_text(comp);
+        assert!(
+            text.contains("# export\ndef exported_fn() -> u32"),
+            "export signature: {}",
+            text
+        );
+    }
+
+    #[test]
+    fn test_roundtrip_to_text_from_text_to_text() {
+        let comp = make_test_component();
+        let text1 = Component::to_text(comp.clone());
+
+        let parsed = Component::from_text(text1.clone(), comp.clone());
+        assert!(parsed.is_ok(), "from_text failed: {:?}", parsed.err());
+        let parsed = parsed.unwrap();
+
+        assert_eq!(parsed.funcs.len(), comp.funcs.len(), "func count mismatch");
+
+        let text2 = Component::to_text(parsed);
+        assert_eq!(text1, text2, "roundtrip text mismatch");
+    }
+
+    #[test]
+    fn test_from_text_preserves_body() {
+        let comp = make_test_component();
+        let text = Component::to_text(comp.clone());
+        let parsed = Component::from_text(text, comp).unwrap();
+
+        // Internal func f1 should preserve body
+        let f1 = parsed.funcs.iter().find(|(uid, _)| uid == "f1");
+        assert!(f1.is_some(), "f1 should exist");
+        assert_eq!(
+            f1.unwrap().1.body,
+            Some(vec![1, 2, 3]),
+            "body should be preserved"
+        );
+    }
+
+    #[test]
+    fn test_from_text_preserves_func_source_kinds() {
+        let comp = make_test_component();
+        let text = Component::to_text(comp.clone());
+        let parsed = Component::from_text(text, comp).unwrap();
+
+        let has_internal = parsed
+            .funcs
+            .iter()
+            .any(|(_, f)| matches!(f.source, FuncSource::Internal(_)));
+        let has_imported = parsed
+            .funcs
+            .iter()
+            .any(|(_, f)| matches!(f.source, FuncSource::Imported(_)));
+        let has_exported = parsed
+            .funcs
+            .iter()
+            .any(|(_, f)| matches!(f.source, FuncSource::Exported(_)));
+
+        assert!(has_internal, "should have internal func");
+        assert!(has_imported, "should have imported func");
+        assert!(has_exported, "should have exported func");
+    }
+
+    #[test]
+    fn test_from_text_error_on_invalid_input() {
+        let comp = make_test_component();
+        let result = Component::from_text("this is not valid syntax".to_string(), comp);
+        assert!(result.is_err(), "should return error for invalid input");
+    }
+
+    #[test]
+    fn test_empty_component_roundtrip() {
+        let comp = WastComponent {
+            funcs: vec![],
+            types: vec![],
+            syms: Syms {
+                wit_syms: vec![],
+                internal: vec![],
+                local: vec![],
+            },
+        };
+        let text = Component::to_text(comp.clone());
+        assert_eq!(text, "", "empty component should produce empty text");
+
+        let parsed = Component::from_text(text, comp);
+        assert!(parsed.is_ok());
+        assert_eq!(parsed.unwrap().funcs.len(), 0);
+    }
+}

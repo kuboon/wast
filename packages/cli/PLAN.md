@@ -30,4 +30,4 @@ TypeScript CLI for interacting with wast components. Designed for use by coding 
 
 ## Status
 
-Not started.
+Partial — setup-git, syms, and bindgen (scaffold) are implemented. extract, merge, fmt, and diff stub with clear messages about needing wasm runtime.

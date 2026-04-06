@@ -379,6 +379,8 @@ dependencies = [
 name = "wast-partial-manager"
 version = "0.1.0"
 dependencies = [
+ "postcard",
+ "wast-pattern-analyzer",
  "wit-bindgen",
  "wit-bindgen-rt",
 ]

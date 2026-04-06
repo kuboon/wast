@@ -6,6 +6,7 @@ use bindings::wast::core::types::{
     WastTypeDef, WitType,
 };
 use std::collections::HashSet;
+use wast_pattern_analyzer::Instruction;
 
 struct Component;
 
@@ -76,6 +77,96 @@ fn type_defs_match(a: &WastTypeDef, b: &WastTypeDef) -> bool {
     format!("{:?}", a.definition) == format!("{:?}", b.definition)
 }
 
+/// Deserialize a function body and collect all directly-called func UIDs.
+fn extract_call_refs(body: &[u8]) -> Vec<String> {
+    match wast_pattern_analyzer::deserialize_body(body) {
+        Ok(instructions) => {
+            let mut refs = Vec::new();
+            for instr in &instructions {
+                collect_calls(instr, &mut refs);
+            }
+            refs
+        }
+        Err(_) => vec![],
+    }
+}
+
+/// Recursively walk an instruction tree and collect Call func_uid values.
+fn collect_calls(instr: &Instruction, out: &mut Vec<String>) {
+    match instr {
+        Instruction::Call { func_uid, args } => {
+            out.push(func_uid.clone());
+            for (_, arg) in args {
+                collect_calls(arg, out);
+            }
+        }
+        Instruction::Block { body, .. } | Instruction::Loop { body, .. } => {
+            for child in body {
+                collect_calls(child, out);
+            }
+        }
+        Instruction::If {
+            condition,
+            then_body,
+            else_body,
+        } => {
+            collect_calls(condition, out);
+            for child in then_body {
+                collect_calls(child, out);
+            }
+            for child in else_body {
+                collect_calls(child, out);
+            }
+        }
+        Instruction::BrIf { condition, .. } => {
+            collect_calls(condition, out);
+        }
+        Instruction::LocalSet { value, .. } => {
+            collect_calls(value, out);
+        }
+        Instruction::Compare { lhs, rhs, .. } | Instruction::Arithmetic { lhs, rhs, .. } => {
+            collect_calls(lhs, out);
+            collect_calls(rhs, out);
+        }
+        Instruction::Some { value }
+        | Instruction::Ok { value }
+        | Instruction::Err { value }
+        | Instruction::IsErr { value } => {
+            collect_calls(value, out);
+        }
+        Instruction::MatchOption {
+            value,
+            some_body,
+            none_body,
+            ..
+        } => {
+            collect_calls(value, out);
+            for child in some_body {
+                collect_calls(child, out);
+            }
+            for child in none_body {
+                collect_calls(child, out);
+            }
+        }
+        Instruction::MatchResult {
+            value,
+            ok_body,
+            err_body,
+            ..
+        } => {
+            collect_calls(value, out);
+            for child in ok_body {
+                collect_calls(child, out);
+            }
+            for child in err_body {
+                collect_calls(child, out);
+            }
+        }
+        // Leaf nodes: Br, Return, LocalGet, Const, None, Nop
+        _ => {}
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Extract
 // ---------------------------------------------------------------------------
@@ -91,8 +182,49 @@ fn extract_impl(full: WastComponent, targets: Vec<ExtractTarget>) -> WastCompone
         }
     }
 
-    // TODO: walk bodies to find call references and add called funcs
-    // TODO: if include_caller, scan bodies of all funcs for calls to targets
+    // Walk bodies of included funcs to find call references; add called funcs
+    // as imported (only direct calls, no recursion).
+    let mut called_uids: HashSet<String> = HashSet::new();
+    for (uid, func) in &full.funcs {
+        if included_func_uids.contains(uid.as_str()) {
+            if let Some(ref body) = func.body {
+                for called in extract_call_refs(body) {
+                    if !included_func_uids.contains(called.as_str()) {
+                        called_uids.insert(called);
+                    }
+                }
+            }
+        }
+    }
+    // Add called funcs as imported
+    for called in &called_uids {
+        if full.funcs.iter().any(|(id, _)| id == called) {
+            included_func_uids.insert(called.clone());
+        }
+    }
+
+    // If include_caller, scan ALL funcs for calls to any target; include callers
+    let include_caller_targets: HashSet<&str> = targets
+        .iter()
+        .filter(|t| t.include_caller)
+        .map(|t| t.sym.as_str())
+        .collect();
+    if !include_caller_targets.is_empty() {
+        for (uid, func) in &full.funcs {
+            if included_func_uids.contains(uid.as_str()) {
+                continue;
+            }
+            if let Some(ref body) = func.body {
+                let calls = extract_call_refs(body);
+                if calls
+                    .iter()
+                    .any(|c| include_caller_targets.contains(c.as_str()))
+                {
+                    included_func_uids.insert(uid.clone());
+                }
+            }
+        }
+    }
 
     // Step 2: Collect type refs from all included funcs, then transitively
     let mut type_seeds: Vec<String> = Vec::new();
@@ -103,12 +235,23 @@ fn extract_impl(full: WastComponent, targets: Vec<ExtractTarget>) -> WastCompone
     }
     let needed_types = collect_types_transitively(&type_seeds, &full.types);
 
-    // Step 3: Build output funcs — targets keep their source as-is
+    // Step 3: Build output funcs — targets keep their source as-is,
+    // called funcs and callers become imported(uid)
     let out_funcs: Vec<(String, WastFunc)> = full
         .funcs
         .iter()
         .filter(|(uid, _)| included_func_uids.contains(uid.as_str()))
-        .map(|(uid, func)| (uid.clone(), func.clone()))
+        .map(|(uid, func)| {
+            if target_uids.contains(uid.as_str()) {
+                (uid.clone(), func.clone())
+            } else {
+                // This func was pulled in as a callee or caller — mark as imported
+                let mut imported_func = func.clone();
+                imported_func.source = FuncSource::Imported(uid.clone());
+                imported_func.body = None;
+                (uid.clone(), imported_func)
+            }
+        })
         .collect();
 
     // Step 4: Build output types
@@ -254,8 +397,32 @@ fn merge_impl(
         }
     }
 
-    // TODO: Check that all func references in partial's internal funcs exist
-    // in either partial or full. Skipped since we can't analyze bodies yet.
+    // Check that all func references in partial's internal funcs exist
+    // in either partial or full (missing_dependency check).
+    let all_func_uids: HashSet<&str> = full
+        .funcs
+        .iter()
+        .map(|(uid, _)| uid.as_str())
+        .chain(partial.funcs.iter().map(|(uid, _)| uid.as_str()))
+        .collect();
+    for (uid, pfunc) in &partial.funcs {
+        if !matches!(&pfunc.source, FuncSource::Internal(_)) {
+            continue;
+        }
+        if let Some(ref body) = pfunc.body {
+            for called in extract_call_refs(body) {
+                if !all_func_uids.contains(called.as_str()) {
+                    errors.push(err(
+                        format!(
+                            "missing_dependency: func '{}' calls '{}' which is not found",
+                            uid, called
+                        ),
+                        Some(uid.clone()),
+                    ));
+                }
+            }
+        }
+    }
 
     if !errors.is_empty() {
         return Err(errors);
@@ -806,6 +973,147 @@ mod tests {
         let result = merge_impl(partial, full).unwrap();
         assert_eq!(result.types.len(), 1);
         assert_eq!(result.types[0].0, "t_new");
+    }
+
+    // ── extract: body analysis (call refs) ──
+
+    fn mk_body_calling(targets: &[&str]) -> Vec<u8> {
+        let instrs: Vec<Instruction> = targets
+            .iter()
+            .map(|uid| Instruction::Call {
+                func_uid: uid.to_string(),
+                args: vec![],
+            })
+            .collect();
+        wast_pattern_analyzer::serialize_body(&instrs)
+    }
+
+    #[test]
+    fn extract_finds_called_funcs_as_imported() {
+        let body = mk_body_calling(&["f2"]);
+        let mut f1 = mk_func("f1", FuncSource::Internal("f1".into()), &[], None);
+        f1.1.body = Some(body);
+        let full = WastComponent {
+            funcs: vec![
+                f1,
+                mk_func(
+                    "f2",
+                    FuncSource::Internal("f2".into()),
+                    &[("x", "i32")],
+                    None,
+                ),
+                mk_func("f3", FuncSource::Internal("f3".into()), &[], None),
+            ],
+            types: vec![],
+            syms: empty_syms(),
+        };
+        let result = extract_impl(
+            full,
+            vec![ExtractTarget {
+                sym: "f1".into(),
+                include_caller: false,
+            }],
+        );
+        let uids: HashSet<String> = result.funcs.iter().map(|(u, _)| u.clone()).collect();
+        assert!(uids.contains("f1"), "target func should be included");
+        assert!(uids.contains("f2"), "called func should be included");
+        assert!(
+            !uids.contains("f3"),
+            "unrelated func should NOT be included"
+        );
+        // f2 should be imported, not internal with body
+        let f2_entry = result.funcs.iter().find(|(u, _)| u == "f2").unwrap();
+        assert!(
+            matches!(&f2_entry.1.source, FuncSource::Imported(_)),
+            "called func should become imported"
+        );
+        assert!(
+            f2_entry.1.body.is_none(),
+            "imported func body should be stripped"
+        );
+    }
+
+    #[test]
+    fn extract_with_include_caller_finds_callers() {
+        let body_calls_f1 = mk_body_calling(&["f1"]);
+        let mut f2 = mk_func("f2", FuncSource::Internal("f2".into()), &[], None);
+        f2.1.body = Some(body_calls_f1);
+        let full = WastComponent {
+            funcs: vec![
+                mk_func("f1", FuncSource::Internal("f1".into()), &[], None),
+                f2,
+                mk_func("f3", FuncSource::Internal("f3".into()), &[], None),
+            ],
+            types: vec![],
+            syms: empty_syms(),
+        };
+        let result = extract_impl(
+            full,
+            vec![ExtractTarget {
+                sym: "f1".into(),
+                include_caller: true,
+            }],
+        );
+        let uids: HashSet<String> = result.funcs.iter().map(|(u, _)| u.clone()).collect();
+        assert!(uids.contains("f1"), "target should be included");
+        assert!(uids.contains("f2"), "caller of target should be included");
+        assert!(!uids.contains("f3"), "non-caller should NOT be included");
+    }
+
+    // ── merge: missing_dependency ──
+
+    #[test]
+    fn merge_detects_missing_dependency() {
+        let body = mk_body_calling(&["f_missing"]);
+        let mut f1 = mk_func("f1", FuncSource::Internal("f1".into()), &[], None);
+        f1.1.body = Some(body);
+        let partial = WastComponent {
+            funcs: vec![f1],
+            types: vec![],
+            syms: empty_syms(),
+        };
+        let full = WastComponent {
+            funcs: vec![],
+            types: vec![],
+            syms: empty_syms(),
+        };
+        let errs = merge_impl(partial, full).unwrap_err();
+        assert!(
+            errs.iter()
+                .any(|e| e.message.contains("missing_dependency")),
+            "should report missing_dependency error"
+        );
+        assert!(
+            errs.iter().any(|e| e.message.contains("f_missing")),
+            "error should mention the missing func uid"
+        );
+    }
+
+    #[test]
+    fn merge_no_missing_dependency_when_ref_exists() {
+        let body = mk_body_calling(&["f_existing"]);
+        let mut f1 = mk_func("f1", FuncSource::Internal("f1".into()), &[], None);
+        f1.1.body = Some(body);
+        let partial = WastComponent {
+            funcs: vec![f1],
+            types: vec![],
+            syms: empty_syms(),
+        };
+        let full = WastComponent {
+            funcs: vec![mk_func(
+                "f_existing",
+                FuncSource::Internal("f_existing".into()),
+                &[],
+                None,
+            )],
+            types: vec![],
+            syms: empty_syms(),
+        };
+        let result = merge_impl(partial, full);
+        assert!(
+            result.is_ok(),
+            "should not error when called func exists in full"
+        );
     }
 
     #[test]

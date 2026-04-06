@@ -13,21 +13,21 @@ text <──syntax plugin──> partial WastComponent <──partial manager─
 | Module | Path | Status | Tests | Remaining |
 |---|---|---|---|---|
 | WIT contract | `wit/wast-core.wit` | **Done** | — | — |
-| partial-manager | `crates/partial-manager/` | **Partial** | 17 | Body analysis (call graph walking, caller detection) |
+| partial-manager | `crates/partial-manager/` | **Done** | 21 | — |
 | file-manager | `crates/file-manager/` | **Partial** | 2 | world.wit parsing for bindgen, SQLite migration |
 | pattern-analyzer | `crates/syntax-plugin/internal/pattern-analyzer/` | **Done** | 17 | — |
 | ruby-like syntax | `crates/syntax-plugin/ruby-like/` | **Partial** | 0 | Body rendering/parsing, tests |
 | ts-like syntax | `crates/syntax-plugin/ts-like/` | **Partial** | 0 | Body rendering/parsing, tests |
 | rust-like syntax | `crates/syntax-plugin/rust-like/` | **Partial** | 0 | Body rendering/parsing, tests |
-| CLI | `packages/cli/` | **Stub** | 0 | All 7 commands (wasm runtime integration) |
+| CLI | `packages/cli/` | **Partial** | 0 | 4 commands need wasm runtime (extract, merge, fmt, diff) |
 | VS Code extension | `packages/vscode-extension/` | **Stub** | 0 | Everything |
 
 ## Detailed TODO
 
 ### partial-manager (`crates/partial-manager/src/lib.rs`)
-- [ ] **extract**: Walk function bodies to find call references and include called funcs
-- [ ] **extract**: `include_caller` — scan all func bodies for calls to target, include callers
-- [ ] **merge**: Validate that all func references in partial's internal funcs exist in full (missing_dependency check)
+- [x] **extract**: Walk function bodies to find call references and include called funcs
+- [x] **extract**: `include_caller` — scan all func bodies for calls to target, include callers
+- [x] **merge**: Validate that all func references in partial's internal funcs exist in full (missing_dependency check)
 
 ### file-manager (`crates/file-manager/src/lib.rs`)
 - [ ] **bindgen**: Parse `world.wit` and populate exported/imported funcs and types into initial wast.db
@@ -41,13 +41,13 @@ text <──syntax plugin──> partial WastComponent <──partial manager─
 
 ### CLI (`packages/cli/`)
 - [ ] Load wasm components at runtime (wasmtime/jco integration)
-- [ ] `bindgen` — call file-manager.bindgen
+- [x] `bindgen` — creates empty wast.db scaffold (TODO: parse world.wit via file-manager)
 - [ ] `extract` — call file-manager.read + partial-manager.extract + syntax-plugin.to_text
 - [ ] `merge` — call syntax-plugin.from_text + file-manager.merge
 - [ ] `fmt` — call syntax-plugin.from_text + syntax-plugin.to_text
 - [ ] `diff` — call syntax-plugin.to_text on both + difftastic
-- [ ] `syms` — write display name to syms file
-- [ ] `setup-git` — configure git diff driver
+- [x] `syms` — write display name to syms file
+- [x] `setup-git` — configure git diff driver
 
 ### VS Code extension (`packages/vscode-extension/`)
 - [ ] TreeView panel (list wast.db components and functions)

@@ -3,6 +3,7 @@ mod bindings;
 
 mod serde_types;
 mod syms_yaml;
+mod wit_parser;
 
 use bindings::wast::core::types::{
     ExtractTarget, FuncSource, PrimitiveType, SymEntry, Syms, TypeSource, WastComponent, WastError,
@@ -535,19 +536,97 @@ impl bindings::exports::wast::core::file_manager::Guest for Component {
             return Err(err("db_exists: wast.db already exists"));
         }
 
-        // Create empty WastComponent and write it
-        let empty = WastComponent {
-            funcs: vec![],
-            types: vec![],
+        // Parse world.wit
+        let wit_src = std::fs::read_to_string(&wit)
+            .map_err(|e| err_at(format!("failed to read {}: {}", wit, e), wit.clone()))?;
+        let parsed = wit_parser::parse_world(&wit_src)
+            .map_err(|e| err_at(format!("wit parse error: {}", e), wit))?;
+
+        // Build funcs, types, and wit_syms from parsed world
+        let mut funcs: Vec<(String, WastFunc)> = Vec::new();
+        let mut types: Vec<(String, WastTypeDef)> = Vec::new();
+        let mut wit_syms: Vec<(String, String)> = Vec::new();
+        let mut seen_types: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+        // Helper closure: ensure a primitive type entry exists for a given WIT type name.
+        let ensure_type = |type_name: &str,
+                           types: &mut Vec<(String, WastTypeDef)>,
+                           seen: &mut std::collections::HashSet<String>| {
+            if !seen.contains(type_name) {
+                if let Some(prim) = wit_parser::to_primitive_type(type_name) {
+                    seen.insert(type_name.to_string());
+                    types.push((
+                        type_name.to_string(),
+                        WastTypeDef {
+                            source: TypeSource::Imported(type_name.to_string()),
+                            definition: WitType::Primitive(prim),
+                        },
+                    ));
+                }
+            }
+        };
+
+        // Process imported funcs
+        for f in &parsed.imports {
+            for (_, tname) in &f.params {
+                ensure_type(tname, &mut types, &mut seen_types);
+            }
+            if let Some(ref ret) = f.result {
+                ensure_type(ret, &mut types, &mut seen_types);
+            }
+
+            funcs.push((
+                f.wit_path.clone(),
+                WastFunc {
+                    source: FuncSource::Imported(f.wit_path.clone()),
+                    params: f
+                        .params
+                        .iter()
+                        .map(|(pname, ptype)| (pname.clone(), ptype.clone()))
+                        .collect(),
+                    result: f.result.clone(),
+                    body: None,
+                },
+            ));
+            wit_syms.push((f.wit_path.clone(), f.name.clone()));
+        }
+
+        // Process exported funcs
+        for f in &parsed.exports {
+            for (_, tname) in &f.params {
+                ensure_type(tname, &mut types, &mut seen_types);
+            }
+            if let Some(ref ret) = f.result {
+                ensure_type(ret, &mut types, &mut seen_types);
+            }
+
+            funcs.push((
+                f.wit_path.clone(),
+                WastFunc {
+                    source: FuncSource::Exported(f.wit_path.clone()),
+                    params: f
+                        .params
+                        .iter()
+                        .map(|(pname, ptype)| (pname.clone(), ptype.clone()))
+                        .collect(),
+                    result: f.result.clone(),
+                    body: None,
+                },
+            ));
+            wit_syms.push((f.wit_path.clone(), f.name.clone()));
+        }
+
+        let component = WastComponent {
+            funcs,
+            types,
             syms: Syms {
-                wit_syms: vec![],
+                wit_syms,
                 internal: vec![],
                 local: vec![],
             },
         };
 
-        // TODO: parse world.wit and populate exported/imported funcs and types
-        write_component_to_disk(&path, &empty)?;
+        write_component_to_disk(&path, &component)?;
         Ok(())
     }
 
