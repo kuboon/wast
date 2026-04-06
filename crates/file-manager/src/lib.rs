@@ -285,16 +285,75 @@ fn syms_from_serde(s: &serde_types::Syms) -> Syms {
 // world.wit validation
 // ---------------------------------------------------------------------------
 
-/// Basic world.wit validation: ensure the file exists.
-/// More detailed WIT parsing is a TODO.
-fn validate_wit_exists(path: &str) -> Result<(), WastError> {
+/// Validate that the WastComponent's exported and imported funcs are consistent
+/// with what `world.wit` declares. Internal funcs are not checked.
+fn validate_against_wit(path: &str, component: &WastComponent) -> Result<(), WastError> {
     let wp = wit_path(path);
     if !std::path::Path::new(&wp).exists() {
         return Err(WastError {
             message: "wit_not_found".to_string(),
-            location: Some(wp),
+            location: Some(wp.clone()),
         });
     }
+
+    let wit_src = std::fs::read_to_string(&wp)
+        .map_err(|e| err_at(format!("failed to read {}: {}", wp, e), wp.clone()))?;
+    let parsed = wit_parser::parse_world(&wit_src)
+        .map_err(|e| err_at(format!("wit parse error: {}", e), wp))?;
+
+    // Build lookup maps: wit_path -> param count
+    let wit_exports: std::collections::HashMap<&str, usize> = parsed
+        .exports
+        .iter()
+        .map(|f| (f.wit_path.as_str(), f.params.len()))
+        .collect();
+
+    let wit_imports: std::collections::HashMap<&str, usize> = parsed
+        .imports
+        .iter()
+        .map(|f| (f.wit_path.as_str(), f.params.len()))
+        .collect();
+
+    for (uid, func) in &component.funcs {
+        match &func.source {
+            FuncSource::Exported(wit_id) => match wit_exports.get(wit_id.as_str()) {
+                None => {
+                    return Err(err(format!(
+                        "wit_inconsistency: exported func {} not found in world.wit",
+                        uid
+                    )));
+                }
+                Some(&expected_params) => {
+                    if func.params.len() != expected_params {
+                        return Err(err(format!(
+                            "wit_inconsistency: func {} param count mismatch",
+                            uid
+                        )));
+                    }
+                }
+            },
+            FuncSource::Imported(wit_id) => match wit_imports.get(wit_id.as_str()) {
+                None => {
+                    return Err(err(format!(
+                        "wit_inconsistency: imported func {} not found in world.wit",
+                        uid
+                    )));
+                }
+                Some(&expected_params) => {
+                    if func.params.len() != expected_params {
+                        return Err(err(format!(
+                            "wit_inconsistency: func {} param count mismatch",
+                            uid
+                        )));
+                    }
+                }
+            },
+            FuncSource::Internal(_) => {
+                // Internal funcs are not in WIT — skip validation
+            }
+        }
+    }
+
     Ok(())
 }
 
@@ -605,16 +664,16 @@ impl bindings::exports::wast::core::file_manager::Guest for Component {
     }
 
     fn write(path: String, component: WastComponent) -> Result<(), WastError> {
-        // Validate that world.wit exists
-        validate_wit_exists(&path)?;
+        // Validate component against world.wit
+        validate_against_wit(&path, &component)?;
 
         write_component_to_disk(&path, &component)?;
         Ok(())
     }
 
     fn merge(path: String, partial: WastComponent) -> Result<(), WastError> {
-        // Validate that world.wit exists
-        validate_wit_exists(&path)?;
+        // Validate partial component against world.wit
+        validate_against_wit(&path, &partial)?;
 
         let full = read_component_from_disk(&path)?;
         let merged = merge_components(full, partial);
@@ -624,3 +683,179 @@ impl bindings::exports::wast::core::file_manager::Guest for Component {
 }
 
 bindings::export!(Component with_types_in bindings);
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Helper: create a temp directory with a world.wit file and return its path.
+    fn setup_dir(wit_content: &str) -> String {
+        let dir = std::env::temp_dir().join(format!("wast_fm_test_{}", std::process::id()));
+        // Use a unique sub-dir per test to avoid collisions
+        let dir = dir.join(format!(
+            "{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("world.wit"), wit_content).unwrap();
+        dir.to_string_lossy().to_string()
+    }
+
+    fn cleanup_dir(path: &str) {
+        let _ = std::fs::remove_dir_all(path);
+    }
+
+    fn make_component(funcs: Vec<(String, WastFunc)>) -> WastComponent {
+        WastComponent {
+            funcs,
+            types: vec![],
+            syms: Syms {
+                wit_syms: vec![],
+                internal: vec![],
+                local: vec![],
+            },
+        }
+    }
+
+    const SAMPLE_WIT: &str = r#"
+package test:pkg;
+
+world bot {
+  import log: func(msg: string);
+  export handle-event: func(event-id: u32) -> bool;
+}
+"#;
+
+    #[test]
+    fn validate_matching_wit_passes() {
+        let dir = setup_dir(SAMPLE_WIT);
+        let component = make_component(vec![
+            (
+                "handle-event".to_string(),
+                WastFunc {
+                    source: FuncSource::Exported("handle-event".to_string()),
+                    params: vec![("event-id".to_string(), "u32".to_string())],
+                    result: Some("bool".to_string()),
+                    body: None,
+                },
+            ),
+            (
+                "log".to_string(),
+                WastFunc {
+                    source: FuncSource::Imported("log".to_string()),
+                    params: vec![("msg".to_string(), "string".to_string())],
+                    result: None,
+                    body: None,
+                },
+            ),
+            (
+                "helper".to_string(),
+                WastFunc {
+                    source: FuncSource::Internal("helper".to_string()),
+                    params: vec![],
+                    result: None,
+                    body: None,
+                },
+            ),
+        ]);
+
+        let result = validate_against_wit(&dir, &component);
+        assert!(result.is_ok(), "expected Ok, got {:?}", result);
+        cleanup_dir(&dir);
+    }
+
+    #[test]
+    fn validate_mismatched_export_fails() {
+        let dir = setup_dir(SAMPLE_WIT);
+        // Export func not declared in world.wit
+        let component = make_component(vec![(
+            "unknown-export".to_string(),
+            WastFunc {
+                source: FuncSource::Exported("unknown-export".to_string()),
+                params: vec![],
+                result: None,
+                body: None,
+            },
+        )]);
+
+        let result = validate_against_wit(&dir, &component);
+        assert!(result.is_err());
+        let msg = result.unwrap_err().message;
+        assert!(
+            msg.contains("wit_inconsistency") && msg.contains("not found in world.wit"),
+            "unexpected error message: {}",
+            msg
+        );
+        cleanup_dir(&dir);
+    }
+
+    #[test]
+    fn validate_missing_import_fails() {
+        let dir = setup_dir(SAMPLE_WIT);
+        // Import func not declared in world.wit
+        let component = make_component(vec![(
+            "missing-import".to_string(),
+            WastFunc {
+                source: FuncSource::Imported("missing-import".to_string()),
+                params: vec![],
+                result: None,
+                body: None,
+            },
+        )]);
+
+        let result = validate_against_wit(&dir, &component);
+        assert!(result.is_err());
+        let msg = result.unwrap_err().message;
+        assert!(
+            msg.contains("wit_inconsistency") && msg.contains("not found in world.wit"),
+            "unexpected error message: {}",
+            msg
+        );
+        cleanup_dir(&dir);
+    }
+
+    #[test]
+    fn validate_param_count_mismatch_fails() {
+        let dir = setup_dir(SAMPLE_WIT);
+        // Export with wrong param count (handle-event expects 1 param)
+        let component = make_component(vec![(
+            "handle-event".to_string(),
+            WastFunc {
+                source: FuncSource::Exported("handle-event".to_string()),
+                params: vec![
+                    ("a".to_string(), "u32".to_string()),
+                    ("b".to_string(), "u32".to_string()),
+                ],
+                result: Some("bool".to_string()),
+                body: None,
+            },
+        )]);
+
+        let result = validate_against_wit(&dir, &component);
+        assert!(result.is_err());
+        let msg = result.unwrap_err().message;
+        assert!(
+            msg.contains("wit_inconsistency") && msg.contains("param count mismatch"),
+            "unexpected error message: {}",
+            msg
+        );
+        cleanup_dir(&dir);
+    }
+
+    #[test]
+    fn validate_wit_not_found() {
+        let dir = std::env::temp_dir().join(format!("wast_fm_noexist_{}", std::process::id()));
+        let path = dir.to_string_lossy().to_string();
+        let component = make_component(vec![]);
+        let result = validate_against_wit(&path, &component);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().message.contains("wit_not_found"));
+    }
+}

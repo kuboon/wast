@@ -3,6 +3,7 @@ mod bindings;
 
 use bindings::wast::core::types::*;
 use std::collections::HashMap;
+use wast_pattern_analyzer::{ArithOp, CompareOp, Instruction};
 
 struct Component;
 
@@ -149,6 +150,280 @@ fn parse_primitive(s: &str) -> Option<PrimitiveType> {
 }
 
 // ---------------------------------------------------------------------------
+// Body rendering
+// ---------------------------------------------------------------------------
+
+fn render_body(
+    body: &[u8],
+    indent: &str,
+    local_names: &HashMap<String, String>,
+    func_names: &HashMap<String, String>,
+) -> String {
+    match wast_pattern_analyzer::deserialize_body(body) {
+        Ok(instructions) => render_instructions(&instructions, indent, local_names, func_names),
+        Err(_) => format!("{}# [body: {} bytes]", indent, body.len()),
+    }
+}
+
+fn render_instructions(
+    instructions: &[Instruction],
+    indent: &str,
+    local_names: &HashMap<String, String>,
+    func_names: &HashMap<String, String>,
+) -> String {
+    let mut lines = Vec::new();
+    for instr in instructions {
+        let rendered = render_instruction(instr, indent, local_names, func_names);
+        if !rendered.is_empty() {
+            lines.push(rendered);
+        }
+    }
+    lines.join("\n")
+}
+
+fn resolve_local_name(uid: &str, local_names: &HashMap<String, String>) -> String {
+    local_names
+        .get(uid)
+        .cloned()
+        .unwrap_or_else(|| uid.to_string())
+}
+
+fn resolve_func_name(uid: &str, func_names: &HashMap<String, String>) -> String {
+    func_names
+        .get(uid)
+        .cloned()
+        .unwrap_or_else(|| uid.to_string())
+}
+
+fn render_instruction(
+    instr: &Instruction,
+    indent: &str,
+    local_names: &HashMap<String, String>,
+    func_names: &HashMap<String, String>,
+) -> String {
+    let inner = format!("{}  ", indent);
+    match instr {
+        Instruction::Nop => String::new(),
+        Instruction::Return => format!("{}return", indent),
+        Instruction::Const { value } => format!("{}{}", indent, value),
+        Instruction::LocalGet { uid } => {
+            format!("{}{}", indent, resolve_local_name(uid, local_names))
+        }
+        Instruction::LocalSet { uid, value } => {
+            let name = resolve_local_name(uid, local_names);
+            let val = render_expr(value, local_names, func_names);
+            format!("{}{} = {}", indent, name, val)
+        }
+        Instruction::Call { func_uid, args } => {
+            let name = resolve_func_name(func_uid, func_names);
+            let args_str = args
+                .iter()
+                .map(|(param_name, arg)| {
+                    let pname = resolve_local_name(param_name, local_names);
+                    let val = render_expr(arg, local_names, func_names);
+                    format!("{}: {}", pname, val)
+                })
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("{}{}({})", indent, name, args_str)
+        }
+        Instruction::Compare { op, lhs, rhs } => {
+            let l = render_expr(lhs, local_names, func_names);
+            let r = render_expr(rhs, local_names, func_names);
+            let op_str = match op {
+                CompareOp::Eq => "==",
+                CompareOp::Ne => "!=",
+                CompareOp::Lt => "<",
+                CompareOp::Le => "<=",
+                CompareOp::Gt => ">",
+                CompareOp::Ge => ">=",
+            };
+            format!("{}{} {} {}", indent, l, op_str, r)
+        }
+        Instruction::Arithmetic { op, lhs, rhs } => {
+            let l = render_expr(lhs, local_names, func_names);
+            let r = render_expr(rhs, local_names, func_names);
+            let op_str = match op {
+                ArithOp::Add => "+",
+                ArithOp::Sub => "-",
+                ArithOp::Mul => "*",
+                ArithOp::Div => "/",
+            };
+            format!("{}{} {} {}", indent, l, op_str, r)
+        }
+        Instruction::If {
+            condition,
+            then_body,
+            else_body,
+        } => {
+            let cond = render_expr(condition, local_names, func_names);
+            let then_str = render_instructions(then_body, &inner, local_names, func_names);
+            if else_body.is_empty() {
+                format!("{}if {}\n{}\n{}end", indent, cond, then_str, indent)
+            } else {
+                let else_str = render_instructions(else_body, &inner, local_names, func_names);
+                format!(
+                    "{}if {}\n{}\n{}else\n{}\n{}end",
+                    indent, cond, then_str, indent, else_str, indent
+                )
+            }
+        }
+        Instruction::Loop { label, body } => {
+            let body_str = render_instructions(body, &inner, local_names, func_names);
+            let label_comment = match label {
+                Some(l) => format!(" # {}", l),
+                None => String::new(),
+            };
+            format!(
+                "{}loop do{}\n{}\n{}end",
+                indent, label_comment, body_str, indent
+            )
+        }
+        Instruction::Block { label, body } => {
+            let body_str = render_instructions(body, &inner, local_names, func_names);
+            let label_comment = match label {
+                Some(l) => format!(" # {}", l),
+                None => String::new(),
+            };
+            format!(
+                "{}begin{}\n{}\n{}end",
+                indent, label_comment, body_str, indent
+            )
+        }
+        Instruction::BrIf { label, condition } => {
+            let cond = render_expr(condition, local_names, func_names);
+            format!("{}break {} if {}", indent, label, cond)
+        }
+        Instruction::Br { label } => format!("{}break {}", indent, label),
+        Instruction::Some { value } => {
+            let val = render_expr(value, local_names, func_names);
+            format!("{}some({})", indent, val)
+        }
+        Instruction::None => format!("{}none", indent),
+        Instruction::Ok { value } => {
+            let val = render_expr(value, local_names, func_names);
+            format!("{}ok({})", indent, val)
+        }
+        Instruction::Err { value } => {
+            let val = render_expr(value, local_names, func_names);
+            format!("{}err({})", indent, val)
+        }
+        Instruction::IsErr { value } => {
+            let val = render_expr(value, local_names, func_names);
+            format!("{}is_err({})", indent, val)
+        }
+        Instruction::MatchOption {
+            value,
+            some_binding,
+            some_body,
+            none_body,
+        } => {
+            let val = render_expr(value, local_names, func_names);
+            let binding = resolve_local_name(some_binding, local_names);
+            let some_str = render_instructions(some_body, &inner, local_names, func_names);
+            let none_str = render_instructions(none_body, &inner, local_names, func_names);
+            format!(
+                "{}case {}\n{}when some({})\n{}\n{}when none\n{}\n{}end",
+                indent, val, indent, binding, some_str, indent, none_str, indent
+            )
+        }
+        Instruction::MatchResult {
+            value,
+            ok_binding,
+            ok_body,
+            err_binding,
+            err_body,
+        } => {
+            let val = render_expr(value, local_names, func_names);
+            let ok_bind = resolve_local_name(ok_binding, local_names);
+            let err_bind = resolve_local_name(err_binding, local_names);
+            let ok_str = render_instructions(ok_body, &inner, local_names, func_names);
+            let err_str = render_instructions(err_body, &inner, local_names, func_names);
+            format!(
+                "{}case {}\n{}when ok({})\n{}\n{}when err({})\n{}\n{}end",
+                indent, val, indent, ok_bind, ok_str, indent, err_bind, err_str, indent
+            )
+        }
+    }
+}
+
+/// Render an instruction as an inline expression (no leading indent).
+fn render_expr(
+    instr: &Instruction,
+    local_names: &HashMap<String, String>,
+    func_names: &HashMap<String, String>,
+) -> String {
+    match instr {
+        Instruction::Nop => String::new(),
+        Instruction::Return => "return".to_string(),
+        Instruction::Const { value } => format!("{}", value),
+        Instruction::LocalGet { uid } => resolve_local_name(uid, local_names),
+        Instruction::LocalSet { uid, value } => {
+            let name = resolve_local_name(uid, local_names);
+            let val = render_expr(value, local_names, func_names);
+            format!("{} = {}", name, val)
+        }
+        Instruction::Call { func_uid, args } => {
+            let name = resolve_func_name(func_uid, func_names);
+            let args_str = args
+                .iter()
+                .map(|(param_name, arg)| {
+                    let pname = resolve_local_name(param_name, local_names);
+                    let val = render_expr(arg, local_names, func_names);
+                    format!("{}: {}", pname, val)
+                })
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("{}({})", name, args_str)
+        }
+        Instruction::Compare { op, lhs, rhs } => {
+            let l = render_expr(lhs, local_names, func_names);
+            let r = render_expr(rhs, local_names, func_names);
+            let op_str = match op {
+                CompareOp::Eq => "==",
+                CompareOp::Ne => "!=",
+                CompareOp::Lt => "<",
+                CompareOp::Le => "<=",
+                CompareOp::Gt => ">",
+                CompareOp::Ge => ">=",
+            };
+            format!("{} {} {}", l, op_str, r)
+        }
+        Instruction::Arithmetic { op, lhs, rhs } => {
+            let l = render_expr(lhs, local_names, func_names);
+            let r = render_expr(rhs, local_names, func_names);
+            let op_str = match op {
+                ArithOp::Add => "+",
+                ArithOp::Sub => "-",
+                ArithOp::Mul => "*",
+                ArithOp::Div => "/",
+            };
+            format!("{} {} {}", l, op_str, r)
+        }
+        Instruction::Some { value } => {
+            let val = render_expr(value, local_names, func_names);
+            format!("some({})", val)
+        }
+        Instruction::None => "none".to_string(),
+        Instruction::Ok { value } => {
+            let val = render_expr(value, local_names, func_names);
+            format!("ok({})", val)
+        }
+        Instruction::Err { value } => {
+            let val = render_expr(value, local_names, func_names);
+            format!("err({})", val)
+        }
+        Instruction::IsErr { value } => {
+            let val = render_expr(value, local_names, func_names);
+            format!("is_err({})", val)
+        }
+        // Complex expressions that shouldn't appear inline normally,
+        // but we handle them for completeness.
+        _ => format!("(...)"),
+    }
+}
+
+// ---------------------------------------------------------------------------
 // to_text
 // ---------------------------------------------------------------------------
 
@@ -196,18 +471,18 @@ fn func_to_text(
             format!("# import {}", signature)
         }
         FuncSource::Exported(_) => {
-            let body_line = match &func.body {
-                Some(b) => format!("  # [body: {} bytes]", b.len()),
+            let body_str = match &func.body {
+                Some(b) => render_body(b, "  ", local_names, func_names),
                 None => "  # [no body]".to_string(),
             };
-            format!("# export\ndef {}\n{}\nend", signature, body_line)
+            format!("# export\ndef {}\n{}\nend", signature, body_str)
         }
         FuncSource::Internal(_) => {
-            let body_line = match &func.body {
-                Some(b) => format!("  # [body: {} bytes]", b.len()),
+            let body_str = match &func.body {
+                Some(b) => render_body(b, "  ", local_names, func_names),
                 None => "  # [no body]".to_string(),
             };
-            format!("def {}\n{}\nend", signature, body_line)
+            format!("def {}\n{}\nend", signature, body_str)
         }
     }
 }

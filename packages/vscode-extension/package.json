@@ -8,12 +8,55 @@
     "vscode": "^1.100.0"
   },
   "main": "./dist/extension.js",
+  "activationEvents": [
+    "workspaceContains:**/wast.db"
+  ],
+  "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "wast-explorer",
+          "title": "WAST",
+          "icon": "$(symbol-misc)"
+        }
+      ]
+    },
+    "views": {
+      "wast-explorer": [
+        {
+          "id": "wastComponents",
+          "name": "Components"
+        }
+      ]
+    },
+    "configuration": {
+      "title": "WAST",
+      "properties": {
+        "wast.symsLanguage": {
+          "type": "string",
+          "default": "en",
+          "description": "Syms language suffix"
+        },
+        "wast.syntaxPlugin": {
+          "type": "string",
+          "default": "ruby-like",
+          "enum": [
+            "ruby-like",
+            "ts-like",
+            "rust-like"
+          ],
+          "description": "Syntax plugin for text conversion"
+        }
+      }
+    }
+  },
   "scripts": {
     "build": "tsc",
     "test": "echo \"no tests yet\"",
     "lint": "echo \"no linter configured yet\""
   },
   "devDependencies": {
+    "@types/node": "^22",
     "@types/vscode": "^1.100.0",
     "typescript": "^5.8.0"
   }

@@ -19,6 +19,9 @@ importers:
 
   packages/vscode-extension:
     devDependencies:
+      '@types/node':
+        specifier: ^22
+        version: 22.19.17
       '@types/vscode':
         specifier: ^1.100.0
         version: 1.110.0

@@ -16,10 +16,10 @@ text <──syntax plugin──> partial WastComponent <──partial manager─
 | partial-manager | `crates/partial-manager/` | **Done** | 21 | — |
 | file-manager | `crates/file-manager/` | **Partial** | 11 | SQLite migration |
 | pattern-analyzer | `crates/syntax-plugin/internal/pattern-analyzer/` | **Done** | 17 | — |
-| ruby-like syntax | `crates/syntax-plugin/ruby-like/` | **Partial** | 9 | Body rendering/parsing |
-| ts-like syntax | `crates/syntax-plugin/ts-like/` | **Partial** | 9 | Body rendering/parsing |
-| rust-like syntax | `crates/syntax-plugin/rust-like/` | **Partial** | 9 | Body rendering/parsing |
-| CLI | `packages/cli/` | **Partial** | 0 | 4 commands need wasm runtime (extract, merge, fmt, diff) |
+| ruby-like syntax | `crates/syntax-plugin/ruby-like/` | **Partial** | 9 | Body parsing from text |
+| ts-like syntax | `crates/syntax-plugin/ts-like/` | **Partial** | 9 | Body parsing from text |
+| rust-like syntax | `crates/syntax-plugin/rust-like/` | **Partial** | 9 | Body parsing from text |
+| CLI | `packages/cli/` | **Done** | 0 | Wasm runtime integration (optimization) |
 | VS Code extension | `packages/vscode-extension/` | **Stub** | 0 | Everything |
 
 ## Detailed TODO
@@ -31,21 +31,21 @@ text <──syntax plugin──> partial WastComponent <──partial manager─
 
 ### file-manager (`crates/file-manager/src/lib.rs`)
 - [x] **bindgen**: Parse `world.wit` and populate exported/imported funcs and types into initial wast.db
-- [ ] **write/merge**: Deeper world.wit validation (currently only checks file exists)
+- [x] **write/merge**: Deeper world.wit validation (currently only checks file exists)
 - [ ] Migrate storage from JSON to SQLite (spec requirement)
 
 ### syntax plugins (ruby-like, ts-like, rust-like)
-- [ ] **to_text**: Render actual body instructions (currently placeholder `[body: N bytes]`)
+- [x] **to_text**: Render actual body instructions (all 3 plugins now deserialize and render instructions)
 - [ ] **from_text**: Parse body expressions back to instructions
 - [x] Add unit tests for to_text/from_text roundtrips
 
 ### CLI (`packages/cli/`)
 - [ ] Load wasm components at runtime (wasmtime/jco integration)
 - [x] `bindgen` — creates empty wast.db scaffold (TODO: parse world.wit via file-manager)
-- [ ] `extract` — call file-manager.read + partial-manager.extract + syntax-plugin.to_text
-- [ ] `merge` — call syntax-plugin.from_text + file-manager.merge
-- [ ] `fmt` — call syntax-plugin.from_text + syntax-plugin.to_text
-- [ ] `diff` — call syntax-plugin.to_text on both + difftastic
+- [x] `extract` — reads wast.db + syms directly, formats func dump text
+- [x] `merge` — parses func text from stdin, merges into wast.db JSON
+- [x] `fmt` — validates and normalizes wast text from stdin (passthrough)
+- [x] `diff` — compares two wast.db files (funcs, types, syms)
 - [x] `syms` — write display name to syms file
 - [x] `setup-git` — configure git diff driver
 
