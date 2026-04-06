@@ -96,6 +96,7 @@ interface partial-manager {
 interface file-manager {
   use types.{wast-component, wast-error, extract-target};
 
+  bindgen: func(path: string) -> result<_, wast-error>;
   read: func(path: string, targets: option<list<extract-target>>) -> result<wast-component, wast-error>;
   write: func(path: string, component: wast-component) -> result<_, wast-error>;
   merge: func(path: string, partial: wast-component) -> result<_, wast-error>;

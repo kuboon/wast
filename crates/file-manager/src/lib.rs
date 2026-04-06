@@ -522,6 +522,35 @@ fn merge_sym_entries(mut base: Vec<SymEntry>, overlay: Vec<SymEntry>) -> Vec<Sym
 // ---------------------------------------------------------------------------
 
 impl bindings::exports::wast::core::file_manager::Guest for Component {
+    fn bindgen(path: String) -> Result<(), WastError> {
+        // Check world.wit exists
+        let wit = wit_path(&path);
+        if !std::path::Path::new(&wit).exists() {
+            return Err(err("wit_not_found: world.wit does not exist"));
+        }
+
+        // Check wast.db does NOT exist
+        let db = db_path(&path);
+        if std::path::Path::new(&db).exists() {
+            return Err(err("db_exists: wast.db already exists"));
+        }
+
+        // Create empty WastComponent and write it
+        let empty = WastComponent {
+            funcs: vec![],
+            types: vec![],
+            syms: Syms {
+                wit_syms: vec![],
+                internal: vec![],
+                local: vec![],
+            },
+        };
+
+        // TODO: parse world.wit and populate exported/imported funcs and types
+        write_component_to_disk(&path, &empty)?;
+        Ok(())
+    }
+
     fn read(path: String, targets: Option<Vec<ExtractTarget>>) -> Result<WastComponent, WastError> {
         let component = read_component_from_disk(&path)?;
 
