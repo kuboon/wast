@@ -176,3 +176,95 @@ export async function loadTsLikePlugin(): Promise<SyntaxPlugin> {
     },
   };
 }
+
+// ---------------------------------------------------------------------------
+// File-manager WASM loader
+// ---------------------------------------------------------------------------
+
+export interface FileManager {
+  /** Parse world.wit, populate funcs/types, and write wast.db + syms to disk. */
+  bindgen(dirPath: string): void;
+  /** Read a WastComponent from disk (wast.db + syms). */
+  read(dirPath: string, targets?: Array<{ sym: string; includeCaller: boolean }>): { db: WastDb; syms: SymsData };
+  /** Validate against world.wit and write a WastComponent to disk. */
+  write(dirPath: string, db: WastDb, syms: SymsData): void;
+  /** Validate partial component and merge into existing wast.db on disk. */
+  merge(dirPath: string, partialDb: WastDb, partialSyms: SymsData): void;
+}
+
+export async function loadFileManager(): Promise<FileManager> {
+  const mod = await import("./generated/file-manager/file-manager.js");
+  const fm = mod.fileManager;
+
+  return {
+    bindgen(dirPath: string): void {
+      fm.bindgen(dirPath);
+    },
+
+    read(dirPath: string, targets?: Array<{ sym: string; includeCaller: boolean }>): { db: WastDb; syms: SymsData } {
+      const wasmTargets = targets?.map((t) => ({ sym: t.sym, includeCaller: t.includeCaller }));
+      const comp = fm.read(dirPath, wasmTargets);
+      return wasmComponentToDb(comp);
+    },
+
+    write(dirPath: string, db: WastDb, syms: SymsData): void {
+      const comp = dbToWasmComponent(db, syms);
+      fm.write(dirPath, comp);
+    },
+
+    merge(dirPath: string, partialDb: WastDb, partialSyms: SymsData): void {
+      const partial = dbToWasmComponent(partialDb, partialSyms);
+      fm.merge(dirPath, partial);
+    },
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Partial-manager WASM loader
+// ---------------------------------------------------------------------------
+
+export interface PartialManager {
+  /** Extract a subset of functions from a full component. */
+  extract(
+    fullDb: WastDb,
+    fullSyms: SymsData,
+    targets: Array<{ sym: string; includeCaller: boolean }>,
+  ): { db: WastDb; syms: SymsData };
+  /** Merge a partial component into a full component. */
+  merge(
+    partialDb: WastDb,
+    partialSyms: SymsData,
+    fullDb: WastDb,
+    fullSyms: SymsData,
+  ): { db: WastDb; syms: SymsData };
+}
+
+export async function loadPartialManager(): Promise<PartialManager> {
+  const mod = await import("./generated/partial-manager/partial-manager.js");
+  const pm = mod.partialManager;
+
+  return {
+    extract(
+      fullDb: WastDb,
+      fullSyms: SymsData,
+      targets: Array<{ sym: string; includeCaller: boolean }>,
+    ): { db: WastDb; syms: SymsData } {
+      const full = dbToWasmComponent(fullDb, fullSyms);
+      const wasmTargets = targets.map((t) => ({ sym: t.sym, includeCaller: t.includeCaller }));
+      const result = pm.extract(full, wasmTargets);
+      return wasmComponentToDb(result);
+    },
+
+    merge(
+      partialDb: WastDb,
+      partialSyms: SymsData,
+      fullDb: WastDb,
+      fullSyms: SymsData,
+    ): { db: WastDb; syms: SymsData } {
+      const partial = dbToWasmComponent(partialDb, partialSyms);
+      const full = dbToWasmComponent(fullDb, fullSyms);
+      const result = pm.merge(partial, full);
+      return wasmComponentToDb(result);
+    },
+  };
+}

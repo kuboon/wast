@@ -7,7 +7,7 @@
     "wast": "./dist/index.js"
   },
   "scripts": {
-    "prebuild": "npx @bytecodealliance/jco transpile ../../target/wasm32-wasip1/debug/wast_syntax_ts_like.wasm -o src/generated/ts-like --name ts-like",
+    "prebuild": "npx @bytecodealliance/jco transpile ../../target/wasm32-wasip1/debug/wast_syntax_ts_like.wasm -o src/generated/ts-like --name ts-like && npx @bytecodealliance/jco transpile ../../target/wasm32-wasip1/debug/wast_file_manager.wasm -o src/generated/file-manager --name file-manager && npx @bytecodealliance/jco transpile ../../target/wasm32-wasip1/debug/wast_partial_manager.wasm -o src/generated/partial-manager --name partial-manager",
     "build": "tsc",
     "test": "node --import tsx --test test/*.test.ts",
     "lint": "echo \"no linter configured yet\""

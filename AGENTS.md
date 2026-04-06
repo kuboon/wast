@@ -19,7 +19,7 @@ text <──syntax plugin──> partial WastComponent <──partial manager─
 | ruby-like syntax | `crates/syntax-plugin/ruby-like/` | **Partial** | 9 | `from_text` body parsing, body roundtrip tests |
 | ts-like syntax | `crates/syntax-plugin/ts-like/` | **Done** | 21 | — |
 | rust-like syntax | `crates/syntax-plugin/rust-like/` | **Partial** | 9 | `from_text` body parsing, body roundtrip tests |
-| CLI | `packages/cli/` | **Partial** | 10 | bindgen world.wit parsing, other plugins WASM integration |
+| CLI | `packages/cli/` | **Partial** | 20 | other syntax plugins WASM integration |
 | VS Code extension | `packages/vscode-extension/` | **Partial** | 0 | Body rendering, save flow, LSP, session conflicts |
 
 ## Detailed TODO
@@ -43,12 +43,13 @@ text <──syntax plugin──> partial WastComponent <──partial manager─
 
 ### CLI (`packages/cli/`)
 
-> **Note**: All CLI commands currently use standalone JS implementations that read/write wast.db JSON directly. They do NOT load WASM components. This means the Rust crate logic (validation, body deserialization, etc.) is not used at runtime.
+> **Note**: `bindgen` uses the file-manager WASM component. Other commands still use standalone JS. The bridge module (`wasm-plugin.ts`) converts between wast-db JSON and WASM tagged-union formats.
 
-- [x] Load ts-like syntax-plugin WASM via jco transpile (`packages/cli/src/wasm-plugin.ts`). Bridge module converts between wast-db JSON format and WASM component tagged-union format. 10 integration tests in `packages/cli/test/`
+- [x] Load ts-like syntax-plugin WASM via jco transpile (`packages/cli/src/wasm-plugin.ts`). 10 integration tests
+- [x] Load file-manager WASM component — `bindgen`, `read`, `write`, `merge` bridge APIs. 5 integration tests
+- [x] Load partial-manager WASM component — `extract`, `merge` bridge APIs. 5 integration tests
 - [ ] Load other syntax plugins (ruby-like, rust-like) via same jco pattern
-- [ ] Load file-manager and partial-manager WASM components
-- [ ] `bindgen` — currently writes empty scaffold `{funcs:[], types:[]}` only. Does NOT call file-manager's bindgen or parse world.wit. Needs to invoke file-manager WASM component (or reimplement WIT parsing in JS)
+- [x] `bindgen` — calls file-manager WASM `bindgen()` which parses `world.wit`, populates funcs/types, and writes `wast.db` + `syms.en.yaml` to disk
 - [x] `extract` — reads wast.db JSON + syms files, resolves UIDs, formats text output. Has `--include-caller` with heuristic body scanning (JS regex, not full instruction deserialization)
 - [x] `merge` — parses func text blocks from stdin via regex, merges into wast.db JSON. Preserves existing bodies. Has `--dry-run` mode
 - [x] `fmt` — reads stdin, validates func/type definitions exist, normalizes trailing whitespace. No actual syntax formatting (passthrough)

@@ -137,28 +137,31 @@ if (options.help || command === null) {
   process.exit(0);
 }
 
-switch (command) {
-  case "bindgen":
-    bindgen(positionals, options);
-    break;
-  case "extract":
-    extract(positionals, options);
-    break;
-  case "merge":
-    merge(positionals, options);
-    break;
-  case "fmt":
-    fmt(positionals, options);
-    break;
-  case "diff":
-    diff(positionals, options);
-    break;
-  case "syms":
-    syms(positionals, options);
-    break;
-  case "setup-git":
-    setupGit(positionals, options);
-    break;
-  default:
-    errorExit(`unknown command: ${command}`, options.json);
+async function main() {
+  switch (command) {
+    case "bindgen":
+      await bindgen(positionals, options);
+      break;
+    case "extract":
+      extract(positionals, options);
+      break;
+    case "merge":
+      merge(positionals, options);
+      break;
+    case "fmt":
+      fmt(positionals, options);
+      break;
+    case "diff":
+      diff(positionals, options);
+      break;
+    case "syms":
+      syms(positionals, options);
+      break;
+    case "setup-git":
+      setupGit(positionals, options);
+      break;
+    default:
+      errorExit(`unknown command: ${command}`, options.json);
+  }
 }
+main();
