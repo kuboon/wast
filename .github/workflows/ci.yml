@@ -43,8 +43,10 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
-      - name: Generate bindings
-        run: cargo component build --workspace
+      - name: Generate and format bindings
+        run: |
+          cargo component build --workspace
+          cargo fmt
 
       - name: Check formatting
         run: cargo fmt --check
