@@ -1,0 +1,15 @@
+// For format details, see https://aka.ms/devcontainer.json. For config options, see the
+// README at: https://github.com/devcontainers/templates/tree/main/src/debian
+{
+	"name": "wast devcontainer",
+	// "image": "ghcr.io/kuboon/wast-dev-container:latest"
+	"build": {
+		"dockerfile": "Dockerfile",
+		"context": ".."
+	},
+	"containerUser": "vscode",
+	"remoteUser": "vscode",
+	// for podman
+	"runArgs": ["--userns=keep-id"],
+	"workspaceMount": "source=${localWorkspaceFolder},target=/workspaces/wast,type=bind,Z"
+}
