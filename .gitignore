@@ -10,6 +10,9 @@ dist/
 # WASM artifacts
 *.wasm
 
+# Auto-generated cargo-component bindings
+**/src/bindings.rs
+
 # OS
 .DS_Store
 Thumbs.db

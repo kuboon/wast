@@ -6,6 +6,7 @@ license.workspace = true
 
 [dependencies]
 wit-bindgen = { workspace = true }
+wit-bindgen-rt = { workspace = true }
 
 [lib]
 crate-type = ["cdylib"]
