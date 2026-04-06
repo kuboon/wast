@@ -1,5 +1,5 @@
 import type { GlobalOptions } from "../index.js";
-import { errorExit } from "../index.js";
+import { loadTsLikePlugin, loadFileManager } from "../wasm-plugin.js";
 
 function readStdin(): Promise<string> {
   return new Promise((resolve, reject) => {
@@ -10,62 +10,46 @@ function readStdin(): Promise<string> {
   });
 }
 
-/**
- * Basic validation that the text looks like wast text format.
- * Returns list of warnings (empty = valid).
- */
-function validate(text: string): string[] {
-  const warnings: string[] = [];
-  const lines = text.split("\n");
-
-  // Check for at least one func or type or comment
-  const hasFuncOrType = lines.some((l) => /^\s*(func|type)\s/.test(l));
-  const hasComment = lines.some((l) => /^\s*#/.test(l));
-  const isEmpty = text.trim().length === 0;
-
-  if (isEmpty) {
-    // Empty input is valid (no-op)
-    return [];
-  }
-
-  if (!hasFuncOrType && !hasComment) {
-    warnings.push("input does not contain any func or type definitions");
-  }
-
-  return warnings;
-}
-
 export async function fmt(_positionals: string[], options: GlobalOptions): Promise<void> {
   const input = await readStdin();
 
   if (input.trim().length === 0) {
-    // Empty input -> empty output
     if (options.json) {
       console.log(JSON.stringify({ ok: true, command: "fmt", text: "" }));
     }
     return;
   }
 
-  const warnings = validate(input);
+  const plugin = await loadTsLikePlugin();
+  // Use file-manager to get an empty component as the "existing" base
+  // so fromText can generate new UIDs for unknown names.
+  const emptyDb = { funcs: [], types: [] };
+  const emptySyms = { wit: [] as [string, string][], internal: [] as [string, string][], local: [] as [string, string][] };
 
-  if (warnings.length > 0 && !options.json) {
-    for (const w of warnings) {
-      console.error(`warning: ${w}`);
+  let formatted: string;
+  const errors: string[] = [];
+
+  try {
+    // Parse text → WastComponent → render back to text (normalized form)
+    const result = plugin.fromText(input, emptyDb, emptySyms);
+    formatted = plugin.toText(result.db, result.syms);
+  } catch (err: any) {
+    // fromText might throw on invalid syntax — report errors
+    const msg = err?.message ?? String(err);
+    if (options.json) {
+      console.log(JSON.stringify({ ok: false, command: "fmt", errors: [{ message: msg }] }));
+    } else {
+      console.error(`error: ${msg}`);
     }
+    process.exit(1);
   }
 
-  // Passthrough for now — normalize trailing newline
-  const formatted = input.trimEnd() + "\n";
+  if (!formatted.endsWith("\n")) {
+    formatted += "\n";
+  }
 
   if (options.json) {
-    console.log(
-      JSON.stringify({
-        ok: true,
-        command: "fmt",
-        warnings,
-        text: formatted,
-      }),
-    );
+    console.log(JSON.stringify({ ok: true, command: "fmt", errors, text: formatted }));
   } else {
     process.stdout.write(formatted);
   }

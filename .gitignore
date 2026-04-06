@@ -13,6 +13,9 @@ dist/
 # Auto-generated cargo-component bindings
 **/src/bindings.rs
 
+# jco-transpiled WASM components
+**/src/generated/
+
 # OS
 .DS_Store
 Thumbs.db

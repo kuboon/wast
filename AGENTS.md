@@ -14,13 +14,13 @@ text <──syntax plugin──> partial WastComponent <──partial manager─
 |---|---|---|---|---|
 | WIT contract | `wit/wast-core.wit` | **Done** | — | — |
 | partial-manager | `crates/partial-manager/` | **Done** | 21 | — |
-| file-manager | `crates/file-manager/` | **Done** | 16 | SQLite migration (future) |
+| file-manager | `crates/file-manager/` | **Done** (JSON) | 16 | SQLite migration |
 | pattern-analyzer | `crates/syntax-plugin/internal/pattern-analyzer/` | **Done** | 17 | — |
-| ruby-like syntax | `crates/syntax-plugin/ruby-like/` | **Done** | 9 | Body text→instructions parsing (future) |
-| ts-like syntax | `crates/syntax-plugin/ts-like/` | **Done** | 9 | Body text→instructions parsing (future) |
-| rust-like syntax | `crates/syntax-plugin/rust-like/` | **Done** | 9 | Body text→instructions parsing (future) |
-| CLI | `packages/cli/` | **Done** | 0 | Wasm runtime integration (future) |
-| VS Code extension | `packages/vscode-extension/` | **Done** | 0 | LSP, save flow, session conflicts (future) |
+| ruby-like syntax | `crates/syntax-plugin/ruby-like/` | **Partial** | 9 | `from_text` body parsing, body roundtrip tests |
+| ts-like syntax | `crates/syntax-plugin/ts-like/` | **Done** | 21 | — |
+| rust-like syntax | `crates/syntax-plugin/rust-like/` | **Partial** | 9 | `from_text` body parsing, body roundtrip tests |
+| CLI | `packages/cli/` | **Done** (ts-like) | 27 | Other syntax plugins (ruby-like, rust-like) |
+| VS Code extension | `packages/vscode-extension/` | **Partial** | 0 | Body rendering, save flow, LSP, session conflicts |
 
 ## Detailed TODO
 
@@ -31,30 +31,39 @@ text <──syntax plugin──> partial WastComponent <──partial manager─
 
 ### file-manager (`crates/file-manager/src/lib.rs`)
 - [x] **bindgen**: Parse `world.wit` and populate exported/imported funcs and types into initial wast.db
-- [x] **write/merge**: Deeper world.wit validation (currently only checks file exists)
-- [ ] Migrate storage from JSON to SQLite (spec requirement)
+- [x] **write/merge**: Deeper world.wit validation (wit_path existence + param count matching for exported/imported funcs)
+- [ ] Migrate storage from JSON to SQLite (spec requirement — currently serializes as JSON despite `.db` extension)
 
 ### syntax plugins (ruby-like, ts-like, rust-like)
-- [x] **to_text**: Render actual body instructions (all 3 plugins now deserialize and render instructions)
-- [ ] **from_text**: Parse body expressions back to instructions
-- [x] Add unit tests for to_text/from_text roundtrips
+- [x] **to_text**: Render actual body instructions (all 3 plugins deserialize via pattern-analyzer and render real instructions with language-specific syntax)
+- [x] **from_text (ts-like)**: Full body expression parser — recursive descent parser handles all instruction types (if/else, while, block, switch/match, calls, arithmetic, comparisons, WIT types). Parses TS-like text back to `Vec<Instruction>` and serializes via pattern-analyzer
+- [ ] **from_text (ruby-like, rust-like)**: Still signature-only — skips body lines, preserves existing binary body unchanged
+- [x] **Body roundtrip tests (ts-like)**: 12 tests covering simple instructions, calls, arithmetic, comparisons, if/else, loops, blocks, WIT types (some/ok/err/isErr), match-option, match-result, nested constructs
+- [ ] Body roundtrip tests (ruby-like, rust-like)
 
 ### CLI (`packages/cli/`)
-- [ ] Load wasm components at runtime (wasmtime/jco integration)
-- [x] `bindgen` — creates empty wast.db scaffold (TODO: parse world.wit via file-manager)
-- [x] `extract` — reads wast.db + syms directly, formats func dump text
-- [x] `merge` — parses func text from stdin, merges into wast.db JSON
-- [x] `fmt` — validates and normalizes wast text from stdin (passthrough)
-- [x] `diff` — compares two wast.db files (funcs, types, syms)
-- [x] `syms` — write display name to syms file
-- [x] `setup-git` — configure git diff driver
+
+> All commands use WASM components (file-manager, partial-manager, ts-like syntax-plugin) via jco transpile. Bridge module (`wasm-plugin.ts`) converts between wast-db JSON and WASM tagged-union formats. 27 integration tests in `packages/cli/test/`.
+
+- [x] Load ts-like syntax-plugin WASM via jco transpile. 10 integration tests
+- [x] Load file-manager WASM component — `bindgen`, `read`, `write`, `merge` bridge APIs. 5 integration tests
+- [x] Load partial-manager WASM component — `extract`, `merge` bridge APIs. 5 integration tests
+- [ ] Load other syntax plugins (ruby-like, rust-like) via same jco pattern
+- [x] `bindgen` — calls file-manager WASM `bindgen()`: parses `world.wit`, populates funcs/types, writes `wast.db` + `syms.en.yaml`
+- [x] `extract` — FileManager.read → PartialManager.extract (call-graph analysis, type refs, include_caller) → SyntaxPlugin.toText
+- [x] `merge` — SyntaxPlugin.fromText (parses ts-like text into WastComponent) → FileManager.merge (validates against world.wit, writes to disk). Supports `--dry-run`
+- [x] `fmt` — SyntaxPlugin.fromText → toText roundtrip (normalizes text, validates syntax). Reports errors on invalid input
+- [x] `diff` — FileManager.read × 2 → SyntaxPlugin.toText × 2 → text comparison with per-function block diff
+- [x] `syms` — reads/writes syms YAML files, classifies UIDs (wit/internal/local), updates display names
+- [x] `setup-git` — configures git diff driver and .gitattributes
 
 ### VS Code extension (`packages/vscode-extension/`)
-- [x] TreeView panel (list wast.db components and functions)
-- [x] Virtual document provider (`wast://` scheme)
-- [ ] Save flow (from_text → merge → write)
-- [ ] LSP diagnostics (real-time from_text validation)
-- [x] fs.watch for external wast.db changes
+- [x] TreeView panel — scans workspace recursively for wast.db files, lists components and functions with display names from syms. Properly filters .git/node_modules, supports depth limit
+- [x] Virtual document provider (`wast://` scheme) — opens function metadata and signatures. **BUT**: function bodies show placeholder `"# [body not available — requires syntax plugin]"` because wast.db body is opaque `number[]` not decodable in JS without syntax plugin WASM
+- [ ] Virtual document body rendering — requires loading syntax-plugin WASM component in extension to call `to_text` for body display
+- [ ] Save flow (`from_text` → merge → write) — requires syntax-plugin + file-manager WASM integration
+- [ ] LSP diagnostics (real-time `from_text` validation)
+- [x] fs.watch for external wast.db changes — detects changes, refreshes tree, notifies open virtual documents
 - [ ] Session conflict handling
 
 ## Responsibility Boundaries
@@ -74,7 +83,7 @@ text <──syntax plugin──> partial WastComponent <──partial manager─
 ```bash
 # Rust
 cargo component build --workspace   # Build all wasm components
-cargo test --workspace               # Run all Rust tests (76 tests)
+cargo test --workspace               # Run all Rust tests (93 tests)
 cargo fmt                            # Format source code
 
 # TypeScript
@@ -87,7 +96,8 @@ cargo component build --workspace && \
   find . -name bindings.rs -path '*/src/*' | xargs rustfmt && \
   cargo fmt --check && \
   cargo test --workspace && \
-  pnpm build
+  pnpm build && \
+  pnpm test
 ```
 
 ## Key Design Principles

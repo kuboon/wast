@@ -7,12 +7,17 @@
     "wast": "./dist/index.js"
   },
   "scripts": {
+    "prebuild": "npx @bytecodealliance/jco transpile ../../target/wasm32-wasip1/debug/wast_syntax_ts_like.wasm -o src/generated/ts-like --name ts-like && npx @bytecodealliance/jco transpile ../../target/wasm32-wasip1/debug/wast_file_manager.wasm -o src/generated/file-manager --name file-manager && npx @bytecodealliance/jco transpile ../../target/wasm32-wasip1/debug/wast_partial_manager.wasm -o src/generated/partial-manager --name partial-manager",
     "build": "tsc",
-    "test": "echo \"no tests yet\"",
+    "test": "node --import tsx --test test/*.test.ts",
     "lint": "echo \"no linter configured yet\""
   },
   "devDependencies": {
     "@types/node": "^22",
+    "tsx": "^4.21.0",
     "typescript": "^5.8.0"
+  },
+  "dependencies": {
+    "@bytecodealliance/preview2-shim": "^0.17.8"
   }
 }
