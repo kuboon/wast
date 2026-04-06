@@ -22,9 +22,6 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
-      - name: Check (native)
-        run: cargo check --workspace
-
       - name: Build components
         run: cargo component build --workspace
 
