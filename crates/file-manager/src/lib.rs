@@ -2,6 +2,7 @@
 mod bindings;
 
 mod serde_types;
+mod syms_yaml;
 
 use bindings::wast::core::types::{
     ExtractTarget, FuncSource, PrimitiveType, SymEntry, Syms, TypeSource, WastComponent, WastError,
@@ -9,6 +10,9 @@ use bindings::wast::core::types::{
 };
 
 struct Component;
+
+/// Default language for syms files.
+const DEFAULT_LANG: &str = "en";
 
 // ---------------------------------------------------------------------------
 // Helper: create a WastError from a message string
@@ -231,13 +235,167 @@ fn db_path(path: &str) -> String {
     format!("{}/wast.db", path)
 }
 
+fn wit_path(path: &str) -> String {
+    format!("{}/world.wit", path)
+}
+
+fn syms_path(path: &str, lang: &str) -> String {
+    format!("{}/syms.{}.yaml", path, lang)
+}
+
+// ---------------------------------------------------------------------------
+// Syms file I/O
+// ---------------------------------------------------------------------------
+
+fn read_syms(path: &str, lang: &str) -> serde_types::Syms {
+    let p = syms_path(path, lang);
+    match std::fs::read_to_string(&p) {
+        Ok(data) => syms_yaml::parse_syms_yaml(&data).unwrap_or_else(|_| serde_types::Syms {
+            wit_syms: Vec::new(),
+            internal: Vec::new(),
+            local: Vec::new(),
+        }),
+        Err(_) => serde_types::Syms {
+            wit_syms: Vec::new(),
+            internal: Vec::new(),
+            local: Vec::new(),
+        },
+    }
+}
+
+fn write_syms(path: &str, lang: &str, syms: &serde_types::Syms) -> Result<(), WastError> {
+    let p = syms_path(path, lang);
+    let yaml = syms_yaml::write_syms_yaml(syms);
+    std::fs::write(&p, yaml.as_bytes())
+        .map_err(|e| err_at(format!("failed to write {}: {}", p, e), p))?;
+    Ok(())
+}
+
+fn syms_to_serde(syms: &Syms) -> serde_types::Syms {
+    serde_types::Syms {
+        wit_syms: syms.wit_syms.clone(),
+        internal: syms
+            .internal
+            .iter()
+            .map(|e| serde_types::SymEntry {
+                uid: e.uid.clone(),
+                display_name: e.display_name.clone(),
+            })
+            .collect(),
+        local: syms
+            .local
+            .iter()
+            .map(|e| serde_types::SymEntry {
+                uid: e.uid.clone(),
+                display_name: e.display_name.clone(),
+            })
+            .collect(),
+    }
+}
+
+fn syms_from_serde(s: &serde_types::Syms) -> Syms {
+    Syms {
+        wit_syms: s.wit_syms.clone(),
+        internal: s
+            .internal
+            .iter()
+            .map(|e| SymEntry {
+                uid: e.uid.clone(),
+                display_name: e.display_name.clone(),
+            })
+            .collect(),
+        local: s
+            .local
+            .iter()
+            .map(|e| SymEntry {
+                uid: e.uid.clone(),
+                display_name: e.display_name.clone(),
+            })
+            .collect(),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// world.wit validation
+// ---------------------------------------------------------------------------
+
+/// Basic world.wit validation: ensure the file exists.
+/// More detailed WIT parsing is a TODO.
+fn validate_wit_exists(path: &str) -> Result<(), WastError> {
+    let wp = wit_path(path);
+    if !std::path::Path::new(&wp).exists() {
+        return Err(WastError {
+            message: "wit_not_found".to_string(),
+            location: Some(wp),
+        });
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Component file I/O (wast.db + syms)
+// ---------------------------------------------------------------------------
+
 fn read_component_from_disk(path: &str) -> Result<WastComponent, WastError> {
     let db = db_path(path);
+
+    // Check if wast.db exists; if not, report db_not_found
+    if !std::path::Path::new(&db).exists() {
+        return Err(WastError {
+            message: "db_not_found".to_string(),
+            location: Some(db),
+        });
+    }
+
     let data = std::fs::read_to_string(&db)
         .map_err(|e| err_at(format!("failed to read {}: {}", db, e), db.clone()))?;
     let sc: serde_types::WastComponent = serde_json::from_str(&data)
         .map_err(|e| err_at(format!("invalid JSON in {}: {}", db, e), db))?;
-    Ok(component_from_serde(&sc))
+    let mut component = component_from_serde(&sc);
+
+    // Read syms from YAML and merge into the component's syms
+    let file_syms = read_syms(path, DEFAULT_LANG);
+    let file_syms_binding = syms_from_serde(&file_syms);
+    merge_syms_into(&mut component.syms, &file_syms_binding);
+
+    Ok(component)
+}
+
+/// Merge file-based syms into a component's syms. File syms take precedence for
+/// matching keys/uids.
+fn merge_syms_into(target: &mut Syms, source: &Syms) {
+    // Merge wit_syms
+    for (k, v) in &source.wit_syms {
+        if let Some(existing) = target.wit_syms.iter_mut().find(|(ek, _)| ek == k) {
+            existing.1 = v.clone();
+        } else {
+            target.wit_syms.push((k.clone(), v.clone()));
+        }
+    }
+
+    // Merge internal
+    for e in &source.internal {
+        if let Some(existing) = target.internal.iter_mut().find(|x| x.uid == e.uid) {
+            existing.display_name = e.display_name.clone();
+        } else {
+            target.internal.push(SymEntry {
+                uid: e.uid.clone(),
+                display_name: e.display_name.clone(),
+            });
+        }
+    }
+
+    // Merge local
+    for e in &source.local {
+        if let Some(existing) = target.local.iter_mut().find(|x| x.uid == e.uid) {
+            existing.display_name = e.display_name.clone();
+        } else {
+            target.local.push(SymEntry {
+                uid: e.uid.clone(),
+                display_name: e.display_name.clone(),
+            });
+        }
+    }
 }
 
 fn write_component_to_disk(path: &str, component: &WastComponent) -> Result<(), WastError> {
@@ -251,6 +409,11 @@ fn write_component_to_disk(path: &str, component: &WastComponent) -> Result<(), 
         .map_err(|e| err(format!("JSON serialization error: {}", e)))?;
     std::fs::write(&db, json.as_bytes())
         .map_err(|e| err_at(format!("failed to write {}: {}", db, e), db))?;
+
+    // Write syms YAML file
+    let serde_syms = syms_to_serde(&component.syms);
+    write_syms(path, DEFAULT_LANG, &serde_syms)?;
+
     Ok(())
 }
 
@@ -369,12 +532,17 @@ impl bindings::exports::wast::core::file_manager::Guest for Component {
     }
 
     fn write(path: String, component: WastComponent) -> Result<(), WastError> {
-        // TODO: validate against {path}/world.wit (stub: always OK)
+        // Validate that world.wit exists
+        validate_wit_exists(&path)?;
+
         write_component_to_disk(&path, &component)?;
         Ok(())
     }
 
     fn merge(path: String, partial: WastComponent) -> Result<(), WastError> {
+        // Validate that world.wit exists
+        validate_wit_exists(&path)?;
+
         let full = read_component_from_disk(&path)?;
         let merged = merge_components(full, partial);
         write_component_to_disk(&path, &merged)?;
