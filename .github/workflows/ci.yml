@@ -15,6 +15,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: wasm32-wasip1
+          components: rustfmt
 
       - name: Install cargo-component
         run: cargo install cargo-component --locked
@@ -24,32 +25,11 @@ jobs:
       - name: Build components
         run: cargo component build --workspace
 
-      - name: Test
-        run: cargo test --workspace
-
-  rust-fmt:
-    name: Rust Format
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: wasm32-wasip1
-          components: rustfmt
-
-      - name: Install cargo-component
-        run: cargo install cargo-component --locked
-
-      - uses: Swatinem/rust-cache@v2
-
-      - name: Generate and format bindings
-        run: |
-          cargo component build --workspace
-          cargo fmt
-
       - name: Check formatting
         run: cargo fmt --check
+
+      - name: Test
+        run: cargo test --workspace
 
   typescript:
     name: TypeScript
