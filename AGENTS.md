@@ -14,13 +14,13 @@ text <──syntax plugin──> partial WastComponent <──partial manager─
 |---|---|---|---|---|
 | WIT contract | `wit/wast-core.wit` | **Done** | — | — |
 | partial-manager | `crates/partial-manager/` | **Done** | 21 | — |
-| file-manager | `crates/file-manager/` | **Partial** | 11 | SQLite migration |
+| file-manager | `crates/file-manager/` | **Done** | 16 | SQLite migration (future) |
 | pattern-analyzer | `crates/syntax-plugin/internal/pattern-analyzer/` | **Done** | 17 | — |
-| ruby-like syntax | `crates/syntax-plugin/ruby-like/` | **Partial** | 9 | Body parsing from text |
-| ts-like syntax | `crates/syntax-plugin/ts-like/` | **Partial** | 9 | Body parsing from text |
-| rust-like syntax | `crates/syntax-plugin/rust-like/` | **Partial** | 9 | Body parsing from text |
-| CLI | `packages/cli/` | **Done** | 0 | Wasm runtime integration (optimization) |
-| VS Code extension | `packages/vscode-extension/` | **Stub** | 0 | Everything |
+| ruby-like syntax | `crates/syntax-plugin/ruby-like/` | **Done** | 9 | Body text→instructions parsing (future) |
+| ts-like syntax | `crates/syntax-plugin/ts-like/` | **Done** | 9 | Body text→instructions parsing (future) |
+| rust-like syntax | `crates/syntax-plugin/rust-like/` | **Done** | 9 | Body text→instructions parsing (future) |
+| CLI | `packages/cli/` | **Done** | 0 | Wasm runtime integration (future) |
+| VS Code extension | `packages/vscode-extension/` | **Done** | 0 | LSP, save flow, session conflicts (future) |
 
 ## Detailed TODO
 
@@ -50,11 +50,11 @@ text <──syntax plugin──> partial WastComponent <──partial manager─
 - [x] `setup-git` — configure git diff driver
 
 ### VS Code extension (`packages/vscode-extension/`)
-- [ ] TreeView panel (list wast.db components and functions)
-- [ ] Virtual document provider (`wast://` scheme)
+- [x] TreeView panel (list wast.db components and functions)
+- [x] Virtual document provider (`wast://` scheme)
 - [ ] Save flow (from_text → merge → write)
 - [ ] LSP diagnostics (real-time from_text validation)
-- [ ] fs.watch for external wast.db changes
+- [x] fs.watch for external wast.db changes
 - [ ] Session conflict handling
 
 ## Responsibility Boundaries
