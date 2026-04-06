@@ -26,7 +26,9 @@ jobs:
         run: cargo component build --workspace
 
       - name: Check formatting
-        run: cargo fmt --check
+        run: |
+          find . -name bindings.rs -path '*/src/*' | xargs rustfmt
+          cargo fmt --check
 
       - name: Test
         run: cargo test --workspace
