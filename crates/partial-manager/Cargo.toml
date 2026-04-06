@@ -1,0 +1,18 @@
+[package]
+name = "wast-partial-manager"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+wit-bindgen = { workspace = true }
+
+[lib]
+crate-type = ["cdylib"]
+
+[package.metadata.component]
+package = "wast:core"
+
+[package.metadata.component.target]
+path = "../../wit"
+world = "partial-manager-world"

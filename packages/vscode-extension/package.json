@@ -1,0 +1,20 @@
+{
+  "name": "@wast/vscode-extension",
+  "version": "0.1.0",
+  "private": true,
+  "displayName": "WAST",
+  "description": "WAST language support for VS Code",
+  "engines": {
+    "vscode": "^1.100.0"
+  },
+  "main": "./dist/extension.js",
+  "scripts": {
+    "build": "tsc",
+    "test": "echo \"no tests yet\"",
+    "lint": "echo \"no linter configured yet\""
+  },
+  "devDependencies": {
+    "@types/vscode": "^1.100.0",
+    "typescript": "^5.8.0"
+  }
+}
