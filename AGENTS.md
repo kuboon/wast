@@ -17,9 +17,9 @@ text <──syntax plugin──> partial WastComponent <──partial manager─
 | file-manager | `crates/file-manager/` | **Done** (JSON) | 16 | SQLite migration |
 | pattern-analyzer | `crates/syntax-plugin/internal/pattern-analyzer/` | **Done** | 17 | — |
 | ruby-like syntax | `crates/syntax-plugin/ruby-like/` | **Partial** | 9 | `from_text` body parsing, body roundtrip tests |
-| ts-like syntax | `crates/syntax-plugin/ts-like/` | **Partial** | 9 | `from_text` body parsing, body roundtrip tests |
+| ts-like syntax | `crates/syntax-plugin/ts-like/` | **Done** | 21 | — |
 | rust-like syntax | `crates/syntax-plugin/rust-like/` | **Partial** | 9 | `from_text` body parsing, body roundtrip tests |
-| CLI | `packages/cli/` | **Partial** | 0 | bindgen world.wit parsing, WASM runtime integration |
+| CLI | `packages/cli/` | **Partial** | 10 | bindgen world.wit parsing, other plugins WASM integration |
 | VS Code extension | `packages/vscode-extension/` | **Partial** | 0 | Body rendering, save flow, LSP, session conflicts |
 
 ## Detailed TODO
@@ -36,14 +36,18 @@ text <──syntax plugin──> partial WastComponent <──partial manager─
 
 ### syntax plugins (ruby-like, ts-like, rust-like)
 - [x] **to_text**: Render actual body instructions (all 3 plugins deserialize via pattern-analyzer and render real instructions with language-specific syntax)
-- [ ] **from_text**: Parse body expressions back to instructions (currently signature-only: parses func declarations, import/export markers, and param types, but **skips all body lines** — existing binary body is preserved unchanged from `existing` component)
-- [ ] Add unit tests for body instruction roundtrips (current "roundtrip" tests only validate signature/metadata preservation — bodies pass through as opaque blobs, never going through parse→serialize cycle)
+- [x] **from_text (ts-like)**: Full body expression parser — recursive descent parser handles all instruction types (if/else, while, block, switch/match, calls, arithmetic, comparisons, WIT types). Parses TS-like text back to `Vec<Instruction>` and serializes via pattern-analyzer
+- [ ] **from_text (ruby-like, rust-like)**: Still signature-only — skips body lines, preserves existing binary body unchanged
+- [x] **Body roundtrip tests (ts-like)**: 12 tests covering simple instructions, calls, arithmetic, comparisons, if/else, loops, blocks, WIT types (some/ok/err/isErr), match-option, match-result, nested constructs
+- [ ] Body roundtrip tests (ruby-like, rust-like)
 
 ### CLI (`packages/cli/`)
 
 > **Note**: All CLI commands currently use standalone JS implementations that read/write wast.db JSON directly. They do NOT load WASM components. This means the Rust crate logic (validation, body deserialization, etc.) is not used at runtime.
 
-- [ ] Load wasm components at runtime (wasmtime/jco integration)
+- [x] Load ts-like syntax-plugin WASM via jco transpile (`packages/cli/src/wasm-plugin.ts`). Bridge module converts between wast-db JSON format and WASM component tagged-union format. 10 integration tests in `packages/cli/test/`
+- [ ] Load other syntax plugins (ruby-like, rust-like) via same jco pattern
+- [ ] Load file-manager and partial-manager WASM components
 - [ ] `bindgen` — currently writes empty scaffold `{funcs:[], types:[]}` only. Does NOT call file-manager's bindgen or parse world.wit. Needs to invoke file-manager WASM component (or reimplement WIT parsing in JS)
 - [x] `extract` — reads wast.db JSON + syms files, resolves UIDs, formats text output. Has `--include-caller` with heuristic body scanning (JS regex, not full instruction deserialization)
 - [x] `merge` — parses func text blocks from stdin via regex, merges into wast.db JSON. Preserves existing bodies. Has `--dry-run` mode
@@ -78,7 +82,7 @@ text <──syntax plugin──> partial WastComponent <──partial manager─
 ```bash
 # Rust
 cargo component build --workspace   # Build all wasm components
-cargo test --workspace               # Run all Rust tests (76 tests)
+cargo test --workspace               # Run all Rust tests (93 tests)
 cargo fmt                            # Format source code
 
 # TypeScript
@@ -91,7 +95,8 @@ cargo component build --workspace && \
   find . -name bindings.rs -path '*/src/*' | xargs rustfmt && \
   cargo fmt --check && \
   cargo test --workspace && \
-  pnpm build
+  pnpm build && \
+  pnpm test
 ```
 
 ## Key Design Principles
