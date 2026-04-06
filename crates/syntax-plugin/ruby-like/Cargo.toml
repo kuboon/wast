@@ -1,0 +1,20 @@
+[package]
+name = "wast-syntax-ruby-like"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+wit-bindgen = { workspace = true }
+wit-bindgen-rt = { workspace = true }
+wast-pattern-analyzer = { path = "../internal/pattern-analyzer" }
+
+[lib]
+crate-type = ["cdylib"]
+
+[package.metadata.component]
+package = "wast:core"
+
+[package.metadata.component.target]
+path = "../../../wit"
+world = "syntax-plugin-world"

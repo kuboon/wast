@@ -1,0 +1,21 @@
+[package]
+name = "wast-file-manager"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+wit-bindgen = { workspace = true }
+wit-bindgen-rt = { workspace = true }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[lib]
+crate-type = ["cdylib"]
+
+[package.metadata.component]
+package = "wast:core"
+
+[package.metadata.component.target]
+path = "../../wit"
+world = "file-manager-world"

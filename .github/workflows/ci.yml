@@ -1,0 +1,56 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  rust-check:
+    name: Rust Check & Test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-wasip1
+          components: rustfmt
+
+      - name: Install cargo-component
+        run: cargo install cargo-component --locked
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build components
+        run: cargo component build --workspace
+
+      - name: Check formatting
+        run: |
+          find . -name bindings.rs -path '*/src/*' | xargs rustfmt
+          cargo fmt --check
+
+      - name: Test
+        run: cargo test --workspace
+
+  typescript:
+    name: TypeScript
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install
+
+      - name: Build
+        run: pnpm build
+
+      - name: Test
+        run: pnpm test

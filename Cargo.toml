@@ -1,0 +1,19 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/file-manager",
+    "crates/partial-manager",
+    "crates/syntax-plugin/ruby-like",
+    "crates/syntax-plugin/ts-like",
+    "crates/syntax-plugin/rust-like",
+    "crates/syntax-plugin/internal/pattern-analyzer",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+
+[workspace.dependencies]
+wit-bindgen = "0.55"
+wit-bindgen-rt = "0.44"

@@ -1,0 +1,25 @@
+# Rust
+/target/
+**/target/
+
+# Node
+node_modules/
+dist/
+*.tsbuildinfo
+
+# WASM artifacts
+*.wasm
+
+# Auto-generated cargo-component bindings
+**/src/bindings.rs
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.idea/
+*.code-workspace
+
+# Claude Code worktrees
+.claude/worktrees/
