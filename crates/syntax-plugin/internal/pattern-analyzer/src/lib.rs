@@ -1,5 +1,7 @@
+use serde::{Deserialize, Serialize};
+
 /// Comparison operators for `Compare` instructions.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum CompareOp {
     Eq,
     Ne,
@@ -10,7 +12,7 @@ pub enum CompareOp {
 }
 
 /// Arithmetic operators for `Arithmetic` instructions.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ArithOp {
     Add,
     Sub,
@@ -19,7 +21,7 @@ pub enum ArithOp {
 }
 
 /// Intermediate representation for wast body instructions.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Instruction {
     // Control flow (WAT-inherited)
     Block {
@@ -111,7 +113,7 @@ pub enum Instruction {
 }
 
 /// A detected pattern match in the instruction body.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PatternMatch {
     pub pattern: Pattern,
     /// Index in the body where the pattern starts.
@@ -119,7 +121,7 @@ pub struct PatternMatch {
 }
 
 /// Pattern types detected from wast bodies.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Pattern {
     /// loop + br_if with head condition -> while
     While,
@@ -339,6 +341,16 @@ fn is_try_pattern(condition: &Instruction, then_body: &[Instruction]) -> bool {
         .iter()
         .any(|instr| matches!(instr, Instruction::Return));
     is_err_condition && then_returns
+}
+
+/// Serialize a slice of instructions into a compact binary format.
+pub fn serialize_body(instructions: &[Instruction]) -> Vec<u8> {
+    postcard::to_allocvec(instructions).expect("serialization should not fail")
+}
+
+/// Deserialize instructions from the binary format produced by [`serialize_body`].
+pub fn deserialize_body(data: &[u8]) -> Result<Vec<Instruction>, String> {
+    postcard::from_bytes(data).map_err(|e| format!("deserialization failed: {e}"))
 }
 
 #[cfg(test)]
@@ -630,5 +642,119 @@ mod tests {
         assert_eq!(result[0].instruction_index, 0);
         assert_eq!(result[1].pattern, Pattern::While);
         assert_eq!(result[1].instruction_index, 1);
+    }
+
+    #[test]
+    fn test_serialize_roundtrip_empty() {
+        let body: Vec<Instruction> = vec![];
+        let bytes = serialize_body(&body);
+        let restored = deserialize_body(&bytes).unwrap();
+        assert_eq!(body, restored);
+    }
+
+    #[test]
+    fn test_serialize_roundtrip_simple_instructions() {
+        let body = vec![
+            Instruction::Nop,
+            Instruction::Return,
+            Instruction::Const { value: 42 },
+            Instruction::LocalGet { uid: "x".into() },
+            Instruction::LocalSet {
+                uid: "y".into(),
+                value: Box::new(Instruction::Const { value: -7 }),
+            },
+        ];
+        let bytes = serialize_body(&body);
+        let restored = deserialize_body(&bytes).unwrap();
+        assert_eq!(body, restored);
+    }
+
+    #[test]
+    fn test_serialize_roundtrip_nested() {
+        let body = vec![
+            Instruction::Loop {
+                label: Some("loop0".into()),
+                body: vec![
+                    Instruction::BrIf {
+                        label: "loop0".into(),
+                        condition: Box::new(Instruction::Compare {
+                            op: CompareOp::Lt,
+                            lhs: Box::new(Instruction::LocalGet { uid: "i".into() }),
+                            rhs: Box::new(Instruction::Const { value: 10 }),
+                        }),
+                    },
+                    Instruction::LocalSet {
+                        uid: "i".into(),
+                        value: Box::new(Instruction::Arithmetic {
+                            op: ArithOp::Add,
+                            lhs: Box::new(Instruction::LocalGet { uid: "i".into() }),
+                            rhs: Box::new(Instruction::Const { value: 1 }),
+                        }),
+                    },
+                ],
+            },
+            Instruction::If {
+                condition: Box::new(Instruction::IsErr {
+                    value: Box::new(Instruction::LocalGet { uid: "res".into() }),
+                }),
+                then_body: vec![Instruction::Return],
+                else_body: vec![Instruction::Nop],
+            },
+        ];
+        let bytes = serialize_body(&body);
+        let restored = deserialize_body(&bytes).unwrap();
+        assert_eq!(body, restored);
+    }
+
+    #[test]
+    fn test_serialize_roundtrip_wit_types() {
+        let body = vec![
+            Instruction::Some {
+                value: Box::new(Instruction::Const { value: 1 }),
+            },
+            Instruction::None,
+            Instruction::Ok {
+                value: Box::new(Instruction::Const { value: 2 }),
+            },
+            Instruction::Err {
+                value: Box::new(Instruction::Const { value: 3 }),
+            },
+            Instruction::MatchOption {
+                value: Box::new(Instruction::LocalGet { uid: "opt".into() }),
+                some_binding: "val".into(),
+                some_body: vec![Instruction::Return],
+                none_body: vec![Instruction::Nop],
+            },
+            Instruction::MatchResult {
+                value: Box::new(Instruction::LocalGet { uid: "res".into() }),
+                ok_binding: "ok_val".into(),
+                ok_body: vec![Instruction::Return],
+                err_binding: "err_val".into(),
+                err_body: vec![Instruction::Nop],
+            },
+        ];
+        let bytes = serialize_body(&body);
+        let restored = deserialize_body(&bytes).unwrap();
+        assert_eq!(body, restored);
+    }
+
+    #[test]
+    fn test_serialize_roundtrip_call_with_args() {
+        let body = vec![Instruction::Call {
+            func_uid: "my_func".into(),
+            args: vec![
+                ("a".into(), Instruction::Const { value: 1 }),
+                ("b".into(), Instruction::LocalGet { uid: "x".into() }),
+            ],
+        }];
+        let bytes = serialize_body(&body);
+        let restored = deserialize_body(&bytes).unwrap();
+        assert_eq!(body, restored);
+    }
+
+    #[test]
+    fn test_deserialize_invalid_data() {
+        let result = deserialize_body(&[0xFF, 0xFF, 0xFF]);
+        assert!(result.is_err());
     }
 }
