@@ -36,7 +36,16 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
         with:
+          targets: wasm32-wasip1
           components: rustfmt
+
+      - name: Install cargo-component
+        run: cargo install cargo-component --locked
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Generate bindings
+        run: cargo component build --workspace
 
       - name: Check formatting
         run: cargo fmt --check
