@@ -514,10 +514,7 @@ fn parse_stmts(
             *i += 1;
             continue;
         }
-        if trimmed == "}"
-            || trimmed.starts_with("} else")
-            || trimmed.starts_with("case ")
-        {
+        if trimmed == "}" || trimmed.starts_with("} else") || trimmed.starts_with("case ") {
             break;
         }
         let saved = *i;
@@ -584,8 +581,7 @@ fn parse_stmt(
     }
 
     // if (COND) break LABEL; // break → BrIf
-    if trimmed.starts_with("if (") && trimmed.contains(") break ") && trimmed.contains("// break")
-    {
+    if trimmed.starts_with("if (") && trimmed.contains(") break ") && trimmed.contains("// break") {
         let after = &trimmed[3..]; // skip "if "
         let cp = find_matching_paren_str(after, 0).ok_or("unmatched paren in BrIf")?;
         let cond_str = &after[1..cp];
@@ -611,13 +607,12 @@ fn parse_stmt(
         let condition = parse_expr_str(cond_str, rev_local, rev_func)?;
         *i += 1;
         let then_body = parse_stmts(lines, i, rev_local, rev_func);
-        let else_body =
-            if *i < lines.len() && lines[*i].trim().starts_with("} else {") {
-                *i += 1;
-                parse_stmts(lines, i, rev_local, rev_func)
-            } else {
-                vec![]
-            };
+        let else_body = if *i < lines.len() && lines[*i].trim().starts_with("} else {") {
+            *i += 1;
+            parse_stmts(lines, i, rev_local, rev_func)
+        } else {
+            vec![]
+        };
         if *i < lines.len() && lines[*i].trim() == "}" {
             *i += 1;
         }
@@ -631,14 +626,7 @@ fn parse_stmt(
     // while (true) { // LABEL ... }
     if trimmed.starts_with("while (true) {") {
         let label = if trimmed.contains("// ") {
-            Some(
-                trimmed
-                    .rsplit("// ")
-                    .next()
-                    .unwrap()
-                    .trim()
-                    .to_string(),
-            )
+            Some(trimmed.rsplit("// ").next().unwrap().trim().to_string())
         } else {
             None
         };
@@ -655,14 +643,7 @@ fn parse_stmt(
         && !trimmed.contains('(')
     {
         let label = if trimmed.contains("// ") {
-            Some(
-                trimmed
-                    .rsplit("// ")
-                    .next()
-                    .unwrap()
-                    .trim()
-                    .to_string(),
-            )
+            Some(trimmed.rsplit("// ").next().unwrap().trim().to_string())
         } else {
             None
         };
@@ -884,9 +865,7 @@ fn parse_atom(
     }
 
     // Variable reference
-    if s.chars()
-        .all(|c| c.is_alphanumeric() || c == '_')
-    {
+    if s.chars().all(|c| c.is_alphanumeric() || c == '_') {
         let uid = resolve_to_uid(s, rev_local);
         return Ok(Instruction::LocalGet { uid });
     }
@@ -936,8 +915,7 @@ fn build_match_instruction(
             some_body,
             none_body,
         })
-    } else if let (Some((ok_binding, ok_body)), Some((err_binding, err_body))) =
-        (ok_case, err_case)
+    } else if let (Some((ok_binding, ok_body)), Some((err_binding, err_body))) = (ok_case, err_case)
     {
         Ok(Instruction::MatchResult {
             value: Box::new(value),
@@ -1292,13 +1270,8 @@ impl bindings::exports::wast::core::syntax_plugin::Guest for Component {
                             .or_else(|| existing_funcs.get(&func_uid).and_then(|f| f.body.clone()));
 
                         i += 1;
-                        let body = parse_func_body(
-                            &lines,
-                            &mut i,
-                            &rev_local,
-                            &rev_func,
-                            existing_body,
-                        );
+                        let body =
+                            parse_func_body(&lines, &mut i, &rev_local, &rev_func, existing_body);
 
                         let params = resolve_params(
                             &parsed.params,
@@ -1350,13 +1323,8 @@ impl bindings::exports::wast::core::syntax_plugin::Guest for Component {
                             .or_else(|| existing_funcs.get(&func_uid).and_then(|f| f.body.clone()));
 
                         i += 1;
-                        let body = parse_func_body(
-                            &lines,
-                            &mut i,
-                            &rev_local,
-                            &rev_func,
-                            existing_body,
-                        );
+                        let body =
+                            parse_func_body(&lines, &mut i, &rev_local, &rev_func, existing_body);
 
                         let params = resolve_params(
                             &parsed.params,
@@ -1750,7 +1718,11 @@ mod tests {
         let parsed = Component::from_text(text1.clone(), comp);
         assert!(parsed.is_ok(), "from_text failed: {:?}", parsed.err());
         let text2 = Component::to_text(parsed.unwrap());
-        assert_eq!(text1, text2, "body roundtrip text mismatch:\n--- expected ---\n{}\n--- actual ---\n{}", text1, text2);
+        assert_eq!(
+            text1, text2,
+            "body roundtrip text mismatch:\n--- expected ---\n{}\n--- actual ---\n{}",
+            text1, text2
+        );
     }
 
     #[test]
@@ -1900,42 +1872,40 @@ mod tests {
 
     #[test]
     fn test_body_roundtrip_nested_if_in_loop() {
-        assert_body_roundtrip(vec![
-            Instruction::Loop {
-                label: Some("outer".to_string()),
-                body: vec![
-                    Instruction::BrIf {
-                        label: "outer".to_string(),
-                        condition: Box::new(Instruction::Compare {
-                            op: CompareOp::Lt,
-                            lhs: Box::new(Instruction::LocalGet {
-                                uid: "p1".to_string(),
-                            }),
-                            rhs: Box::new(Instruction::Const { value: 100 }),
+        assert_body_roundtrip(vec![Instruction::Loop {
+            label: Some("outer".to_string()),
+            body: vec![
+                Instruction::BrIf {
+                    label: "outer".to_string(),
+                    condition: Box::new(Instruction::Compare {
+                        op: CompareOp::Lt,
+                        lhs: Box::new(Instruction::LocalGet {
+                            uid: "p1".to_string(),
                         }),
-                    },
-                    Instruction::If {
-                        condition: Box::new(Instruction::IsErr {
-                            value: Box::new(Instruction::LocalGet {
-                                uid: "v3".to_string(),
-                            }),
+                        rhs: Box::new(Instruction::Const { value: 100 }),
+                    }),
+                },
+                Instruction::If {
+                    condition: Box::new(Instruction::IsErr {
+                        value: Box::new(Instruction::LocalGet {
+                            uid: "v3".to_string(),
                         }),
-                        then_body: vec![Instruction::Return],
-                        else_body: vec![],
-                    },
-                    Instruction::LocalSet {
-                        uid: "p1".to_string(),
-                        value: Box::new(Instruction::Arithmetic {
-                            op: ArithOp::Add,
-                            lhs: Box::new(Instruction::LocalGet {
-                                uid: "p1".to_string(),
-                            }),
-                            rhs: Box::new(Instruction::Const { value: 1 }),
+                    }),
+                    then_body: vec![Instruction::Return],
+                    else_body: vec![],
+                },
+                Instruction::LocalSet {
+                    uid: "p1".to_string(),
+                    value: Box::new(Instruction::Arithmetic {
+                        op: ArithOp::Add,
+                        lhs: Box::new(Instruction::LocalGet {
+                            uid: "p1".to_string(),
                         }),
-                    },
-                ],
-            },
-        ]);
+                        rhs: Box::new(Instruction::Const { value: 1 }),
+                    }),
+                },
+            ],
+        }]);
     }
 
     #[test]
