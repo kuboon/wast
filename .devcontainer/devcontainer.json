@@ -6,10 +6,5 @@
 	"build": {
 		"dockerfile": "Dockerfile",
 		"context": ".."
-	},
-	"containerUser": "vscode",
-	"remoteUser": "vscode",
-	// for podman
-	"runArgs": ["--userns=keep-id"],
-	"workspaceMount": "source=${localWorkspaceFolder},target=/workspaces/wast,type=bind,Z"
+	}
 }
