@@ -2,9 +2,9 @@
 // README at: https://github.com/devcontainers/templates/tree/main/src/debian
 {
 	"name": "wast devcontainer",
-	// "image": "ghcr.io/kuboon/wast-dev-container:latest"
-	"build": {
-		"dockerfile": "Dockerfile",
-		"context": ".."
-	}
+	"image": "ghcr.io/kuboon/wast/wast-dev-container:latest"
+	// "build": {
+	// 	"dockerfile": "Dockerfile",
+	// 	"context": ".."
+	// }
 }

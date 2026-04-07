@@ -1,26 +1,22 @@
 name: CI
 
 on:
+  workflow_dispatch:
   push:
     branches: [main]
   pull_request:
 
 jobs:
-  rust-check:
-    name: Rust Check & Test
+  check:
+    name: Check & Test
     runs-on: ubuntu-latest
+    container:
+      image: ghcr.io/kuboon/wast/wast-dev-container:latest
+      credentials:
+        username: ${{ github.actor }}
+        password: ${{ secrets.github_token }}
     steps:
-      - uses: actions/checkout@v4
-
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: wasm32-wasip1
-          components: rustfmt
-
-      - name: Install cargo-component
-        run: cargo install cargo-component --locked
-
-      - uses: Swatinem/rust-cache@v2
+      - uses: actions/checkout@v6
 
       - name: Build components
         run: cargo component build --workspace
@@ -33,38 +29,6 @@ jobs:
       - name: Test
         run: cargo test --workspace
 
-      - name: Upload WASM artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: wasm-components
-          path: target/wasm32-wasip1/debug/*.wasm
-          retention-days: 1
-
-  typescript:
-    name: TypeScript
-    runs-on: ubuntu-latest
-    needs: rust-check
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: pnpm/action-setup@v4
-
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22
-          cache: pnpm
-
-      - name: Download WASM artifacts
-        uses: actions/download-artifact@v4
-        with:
-          name: wasm-components
-          path: target/wasm32-wasip1/debug
-
-      - name: Install dependencies
-        run: pnpm install
-
-      - name: Build
-        run: pnpm build
-
-      - name: Test
-        run: pnpm test
+      - run: pnpm install
+      - run: pnpm build
+      - run: pnpm test

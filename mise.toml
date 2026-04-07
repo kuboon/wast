@@ -1,0 +1,12 @@
+[tasks.build]
+run = "cargo component build && pnpm install && pnpm build"
+
+[tasks.test-component]
+run = "cargo component test"
+
+[tasks.test-ts]
+run = "pnpm test"
+
+[tasks.ci] # only dependencies to be run
+description = 'Run CI tasks'
+depends = ['build', 'test-component', 'test-ts']
