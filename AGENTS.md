@@ -91,6 +91,11 @@ pnpm install                         # Install dependencies
 pnpm build                           # Build all packages
 pnpm test                            # Run all tests
 
+# Devcontainer image publish (split architecture)
+cd .devcontainer && ./push.sh        # Local arm64 push: arm64-<sha>, arm64-latest
+# Then run workflow: Publish Devcontainer Image
+# input source_sha=<same sha>         # Builds amd64 in GitHub Actions and publishes multi-arch manifest
+
 # CI check (same as GitHub Actions)
 cargo component build --workspace && \
   find . -name bindings.rs -path '*/src/*' | xargs rustfmt && \

@@ -1,4 +1,4 @@
-FROM --platform=$BUILDPLATFORM mcr.microsoft.com/devcontainers/base:debian
+FROM debian:stable-slim
 
 LABEL org.opencontainers.image.source=https://github.com/kuboon/wast
 LABEL org.opencontainers.image.description="WAST development container"
@@ -11,8 +11,8 @@ RUN apt-get update  \
 
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 
-USER vscode
 RUN curl https://mise.run | sh
-RUN mkdir -p ~/.config/fish && echo '$HOME/.local/bin/mise activate fish --shims | source' >> ~/.config/fish/config.fish
-RUN $HOME/.local/bin/mise use -g node pnpm rust cargo:cargo-component
+RUN mkdir -p $HOME/.config/fish && echo '$HOME/.local/bin/mise activate fish --shims | source' >> $HOME/.config/fish/config.fish
+RUN $HOME/.local/bin/mise use -g node pnpm rust
+RUN $HOME/.local/bin/mise use -g cargo:cargo-component
 RUN $HOME/.local/bin/mise exec -- rustup target add wasm32-wasip1
