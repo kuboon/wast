@@ -40,6 +40,12 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      - id: short-sha
+        run: |
+          set -euo pipefail
+          short_sha="$(echo "${SOURCE_SHA}" | cut -c1-12)"
+          echo "SHORT_SHA=${short_sha}" >> "$GITHUB_OUTPUT"
+
       - name: Build and push amd64 image
         uses: docker/build-push-action@v6
         with:
@@ -48,20 +54,25 @@ jobs:
           platforms: linux/amd64
           push: true
           tags: |
-            ${{ env.IMAGE }}:amd64-${{ env.SOURCE_SHA }}
+            ${{ env.IMAGE }}:amd64-${{ steps.short-sha.outputs.SHORT_SHA }}
             ${{ env.IMAGE }}:amd64-latest
 
+
       - name: Verify arm64 tag exists
+        env:
+          SHORT_SHA: ${{ steps.short-sha.outputs.SHORT_SHA }}
         run: |
           set -euo pipefail
-          docker buildx imagetools inspect "${IMAGE}:arm64-${SOURCE_SHA}" >/dev/null
+          docker buildx imagetools inspect "${IMAGE}:arm64-${SHORT_SHA}" >/dev/null
 
       - name: Publish multi-arch manifest
+        env:
+          SHORT_SHA: ${{ steps.short-sha.outputs.SHORT_SHA }}
         run: |
           set -euo pipefail
-          AMD64_TAG="${IMAGE}:amd64-${SOURCE_SHA}"
-          ARM64_TAG="${IMAGE}:arm64-${SOURCE_SHA}"
-          SHA_TAG="${IMAGE}:${SOURCE_SHA}"
+          AMD64_TAG="${IMAGE}:amd64-${SHORT_SHA}"
+          ARM64_TAG="${IMAGE}:arm64-${SHORT_SHA}"
+          SHA_TAG="${IMAGE}:${SHORT_SHA}"
 
           if [[ "${{ inputs.publish_latest }}" == "true" ]]; then
             docker buildx imagetools create \
@@ -77,4 +88,6 @@ jobs:
           fi
 
       - name: Inspect published manifest
-        run: docker buildx imagetools inspect "${IMAGE}:${SOURCE_SHA}"
+        env:
+          SHORT_SHA: ${{ steps.short-sha.outputs.SHORT_SHA }}
+        run: docker buildx imagetools inspect "${IMAGE}:${SHORT_SHA}"
