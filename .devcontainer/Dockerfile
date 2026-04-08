@@ -11,11 +11,13 @@ RUN apt-get update  \
 
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 
-RUN curl https://mise.run | sh
-RUN mkdir -p $HOME/.config/fish && echo '$HOME/.local/bin/mise activate fish --shims | source' >> $HOME/.config/fish/config.fish
-RUN $HOME/.local/bin/mise use -g node pnpm rust
-RUN $HOME/.local/bin/mise use -g cargo:cargo-component
-RUN $HOME/.local/bin/mise exec -- rustup target add wasm32-wasip1
+ENV HOME=/root
+RUN curl https://mise.run | MISE_INSTALL_PATH=/usr/local/bin/mise sh
+RUN mkdir -p $HOME/.config/fish && echo 'mise activate fish --shims | source' >> $HOME/.config/fish/config.fish && \
+    echo 'eval "$(mise activate bash --shims)"' >> $HOME/.bashrc
+RUN mise install --system node pnpm rust && mise use node pnpm rust
+RUN mise install --system cargo:cargo-component
+RUN mise exec -- rustup target add wasm32-wasip1
 
-COPY postCreate.sh /postCreate.sh
+COPY .devcontainer/postCreate.sh /postCreate.sh
 RUN chmod +x /postCreate.sh
