@@ -48,9 +48,10 @@ docker buildx build \
 
 echo "Pushed: ${FULL}:${ARM64_TAG}"
 
-echo "Dispatching workflow: Publish Devcontainer Image"
+set -v
 gh workflow run "Publish Devcontainer Image" \
 	--ref "${BRANCH}" \
-	-f source_sha="${SOURCE_SHA}" \
+	-f source_sha="${SHORT_SHA}" \
 	-f publish_latest=true
-echo "Dispatched with source_sha=${SOURCE_SHA}"
+set +v
+echo "Dispatched with source_sha=${SHORT_SHA}"

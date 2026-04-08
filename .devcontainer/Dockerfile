@@ -16,3 +16,6 @@ RUN mkdir -p $HOME/.config/fish && echo '$HOME/.local/bin/mise activate fish --s
 RUN $HOME/.local/bin/mise use -g node pnpm rust
 RUN $HOME/.local/bin/mise use -g cargo:cargo-component
 RUN $HOME/.local/bin/mise exec -- rustup target add wasm32-wasip1
+
+COPY postCreate.sh /postCreate.sh
+RUN chmod +x /postCreate.sh
