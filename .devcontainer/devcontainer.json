@@ -7,5 +7,7 @@
 		"dockerfile": "Dockerfile",
 		"context": ".."
 	},
-	"postCreateCommand": "/postCreate.sh"
+	"remoteUser": "vscode",
+	"updateRemoteUserUID": true,
+	"postCreateCommand": ".devcontainer/postCreate.sh"
 }

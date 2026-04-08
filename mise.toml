@@ -10,3 +10,9 @@ run = "pnpm test"
 [tasks.ci] # only dependencies to be run
 description = 'Run CI tasks'
 depends = ['build', 'test-component', 'test-ts']
+
+[tools]
+"cargo:cargo-component" = "latest"
+node = "latest"
+pnpm = "latest"
+rust = "latest"

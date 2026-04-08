@@ -46,6 +46,13 @@ jobs:
           short_sha="$(echo "${SOURCE_SHA}" | cut -c1-12)"
           echo "SHORT_SHA=${short_sha}" >> "$GITHUB_OUTPUT"
 
+      - name: Verify arm64 tag exists
+        env:
+          SHORT_SHA: ${{ steps.short-sha.outputs.SHORT_SHA }}
+        run: |
+          set -euo pipefail
+          docker buildx imagetools inspect "${IMAGE}:arm64-${SHORT_SHA}" >/dev/null
+
       - name: Build and push amd64 image
         uses: docker/build-push-action@v6
         with:
@@ -57,13 +64,6 @@ jobs:
             ${{ env.IMAGE }}:amd64-${{ steps.short-sha.outputs.SHORT_SHA }}
             ${{ env.IMAGE }}:amd64-latest
 
-
-      - name: Verify arm64 tag exists
-        env:
-          SHORT_SHA: ${{ steps.short-sha.outputs.SHORT_SHA }}
-        run: |
-          set -euo pipefail
-          docker buildx imagetools inspect "${IMAGE}:arm64-${SHORT_SHA}" >/dev/null
 
       - name: Publish multi-arch manifest
         env:
