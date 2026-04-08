@@ -10,25 +10,35 @@ jobs:
   check:
     name: Check & Test
     runs-on: ubuntu-latest
+    defaults:
+      run:
+        shell: bash
     container:
       image: ghcr.io/kuboon/wast/wast-dev-container:latest
       credentials:
         username: ${{ github.actor }}
         password: ${{ secrets.github_token }}
+      env:
+        PATH: /root/.local/bin:/root/.local/share/mise:${PATH}
     steps:
-      - uses: actions/checkout@v6
+    - uses: actions/checkout@v6
 
-      - name: Build components
-        run: cargo component build --workspace
+    - run: |
+        mise ls
+        node --version
+        cargo --version
 
-      - name: Check formatting
-        run: |
-          find . -name bindings.rs -path '*/src/*' | xargs rustfmt
-          cargo fmt --check
+    - name: Build components
+      run: cargo component build --workspace
 
-      - name: Test
-        run: cargo test --workspace
+    - name: Check formatting
+      run: |
+        find . -name bindings.rs -path '*/src/*' | xargs rustfmt
+        cargo fmt --check
 
-      - run: pnpm install
-      - run: pnpm build
-      - run: pnpm test
+    - name: Test
+      run: cargo test --workspace
+
+    - run: pnpm install
+    - run: pnpm build
+    - run: pnpm test
