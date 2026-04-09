@@ -2,9 +2,9 @@ name: CI
 
 on:
   workflow_dispatch:
-  # push:
-  #   branches: [main]
-  # pull_request:
+  push:
+    branches: [main]
+  pull_request:
 
 jobs:
   check:
@@ -23,6 +23,8 @@ jobs:
 
     - run: |
         mise ls
+        mise use node pnpm rust cargo:cargo-component
+        eval "$(mise activate bash --shims)"
         node --version
         cargo --version
 
