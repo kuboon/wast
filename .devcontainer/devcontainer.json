@@ -8,6 +8,5 @@
 		"context": ".."
 	},
 	"remoteUser": "vscode",
-	"updateRemoteUserUID": true,
-	"postCreateCommand": ".devcontainer/postCreate.sh"
+	"postCreateCommand": "/postCreate.sh"
 }

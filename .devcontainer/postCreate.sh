@@ -1,6 +1,7 @@
 #!/bin/bash
 set -e
 
+sudo chown -R vscode:vscode $HOME
 mise trust
-cargo component build --workspace
-pnpm install
+mise x -- cargo component build --workspace
+mise x -- pnpm install

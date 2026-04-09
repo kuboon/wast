@@ -2,9 +2,11 @@
 run = "cargo component build && pnpm install && pnpm build"
 
 [tasks.test-component]
+depends = ['build']
 run = "cargo component test"
 
 [tasks.test-ts]
+depends = ['build']
 run = "pnpm test"
 
 [tasks.ci] # only dependencies to be run
@@ -12,7 +14,8 @@ description = 'Run CI tasks'
 depends = ['build', 'test-component', 'test-ts']
 
 [tools]
-"cargo:cargo-component" = "latest"
+rust = "latest"
+"cargo-binstall" = { version = "latest", depends = ["rust"] }
 node = "latest"
 pnpm = "latest"
-rust = "latest"
+wasmtime = "latest"

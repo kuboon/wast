@@ -9,12 +9,16 @@ RUN apt-get update  \
         sudo curl git ca-certificates build-essential openssh-client fish \
     && rm -rf /var/lib/apt/lists/*
 
-SHELL ["/bin/bash", "-o", "pipefail", "-c"]
-
 ENV HOME=/root
-RUN curl https://mise.run | MISE_INSTALL_PATH=/usr/local/bin/mise sh
-RUN mkdir -p $HOME/.config/fish && echo 'mise activate fish --shims | source' >> $HOME/.config/fish/config.fish && \
-    echo 'eval "$(mise activate bash --shims)"' >> $HOME/.bashrc
-RUN mise install --system --before 3d node pnpm rust && mise use node pnpm rust
-RUN mise install --system --before 3d cargo:cargo-component && mise use cargo:cargo-component
-RUN mise exec -- rustup target add wasm32-wasip1
+ENV MISE_INSTALL_PATH=/usr/local/bin/mise
+RUN curl https://mise.run | sh
+RUN mkdir -p $HOME/.config/fish && echo '${MISE_INSTALL_PATH} activate fish --shims | source' >> $HOME/.config/fish/config.fish && \
+    echo 'eval "$(${MISE_INSTALL_PATH} activate bash --shims)"' >> $HOME/.bashrc
+COPY --parents mise.toml ./**/cargo.* ./**/package.json ./**/pnpm-lock.json ./
+RUN mise trust
+RUN mise install --system --before 3d
+RUN . "$HOME/.cargo/env"
+RUN mise x -- rustup update
+RUN mise x -- cargo binstall cargo-component
+COPY .devcontainer/postCreate.sh /postCreate.sh
+RUN chmod +x /postCreate.sh
