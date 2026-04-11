@@ -44,7 +44,8 @@ docker buildx build \
 	--push \
 	-t "${FULL}:${ARM64_TAG}" \
 	-t "${FULL}:arm64-latest" \
-	"${SCRIPT_DIR}"
+	-f .devcontainer/Dockerfile \
+	"${ROOT_DIR}"
 
 echo "Pushed: ${FULL}:${ARM64_TAG}"
 
