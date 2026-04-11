@@ -8,5 +8,5 @@
 		"context": ".."
 	},
 	"remoteUser": "vscode",
-	"postCreateCommand": "/bin/sh .devcontainer/postCreate.sh"
+	"postCreateCommand": ".devcontainer/postCreate.sh"
 }
