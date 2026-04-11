@@ -8,6 +8,7 @@ members = [
     "crates/syntax-plugin/ts-like",
     "crates/syntax-plugin/rust-like",
     "crates/syntax-plugin/internal/pattern-analyzer",
+    "crates/syntax-plugin/raw",
 ]
 
 [workspace.package]
