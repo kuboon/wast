@@ -3,7 +3,7 @@
 mod bindings;
 
 use bindings::wast::core::types::*;
-use std::collections::HashMap;
+use std::collections::BTreeMap as HashMap;
 use wast_pattern_analyzer::{ArithOp, CompareOp, Instruction};
 
 struct Component;

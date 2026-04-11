@@ -15,7 +15,7 @@ depends = ['build', 'test-component', 'test-ts']
 
 [tools]
 rust = "latest"
-"cargo-binstall" = { version = "latest", depends = ["rust"] }
-node = "latest"
+cargo-binstall = { version = "latest", depends = ["rust"] }
+node = "24"
 pnpm = "latest"
 wasmtime = "latest"
