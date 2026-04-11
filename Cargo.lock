@@ -2443,6 +2443,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "wast-syntax-raw"
+version = "0.1.0"
+dependencies = [
+ "wast-pattern-analyzer",
+ "wit-bindgen 0.55.0",
+ "wit-bindgen-rt",
+]
+
+[[package]]
 name = "wast-syntax-ruby-like"
 version = "0.1.0"
 dependencies = [
