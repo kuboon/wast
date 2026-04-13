@@ -15,6 +15,7 @@ text <──syntax plugin──> partial WastComponent <──partial manager─
 | WIT contract | `wit/wast-core.wit` | **Done** | — | — |
 | partial-manager | `crates/partial-manager/` | **Done** | 21 | — |
 | file-manager | `crates/file-manager/` | **Done** (JSON) | 16 | SQLite migration |
+| file-manager-hosted | `crates/file-manager-hosted/` | **Done** | 5 | — |
 | pattern-analyzer | `crates/syntax-plugin/internal/pattern-analyzer/` | **Done** | 17 | — |
 | ruby-like syntax | `crates/syntax-plugin/ruby-like/` | **Partial** | 9 | `from_text` body parsing, body roundtrip tests |
 | ts-like syntax | `crates/syntax-plugin/ts-like/` | **Done** | 21 | — |
@@ -34,6 +35,11 @@ text <──syntax plugin──> partial WastComponent <──partial manager─
 - [x] **bindgen**: Parse `world.wit` and populate exported/imported funcs and types into initial wast.db
 - [x] **write/merge**: Deeper world.wit validation (wit_path existence + param count matching for exported/imported funcs)
 - [ ] Migrate storage from JSON to SQLite (spec requirement — currently serializes as JSON despite `.db` extension)
+
+### file-manager-hosted (`crates/file-manager-hosted/src/lib.rs`)
+- [x] Content-based API: accept `world.wit` / `wast.db` / `syms.en.yaml` bytes and return serialized outputs, so web and desktop hosts can use the same component without WASI or sync fs
+- [x] `read` from serialized `wast.db` + optional `syms.en.yaml` and return `wast-component`
+- [x] `write` / `merge` parity with `crates/file-manager/`
 
 ### syntax plugins (ruby-like, ts-like, rust-like)
 - [x] **to_text**: Render actual body instructions (all 3 plugins deserialize via pattern-analyzer and render real instructions with language-specific syntax)

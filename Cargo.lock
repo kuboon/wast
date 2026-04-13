@@ -2425,6 +2425,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "wast-file-manager-hosted"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "wit-bindgen 0.55.0",
+ "wit-bindgen-rt",
+]
+
+[[package]]
 name = "wast-partial-manager"
 version = "0.1.0"
 dependencies = [

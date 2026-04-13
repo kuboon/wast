@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "crates/cli-rust",
     "crates/file-manager",
+    "crates/file-manager-hosted",
     "crates/partial-manager",
     "crates/syntax-plugin/ruby-like",
     "crates/syntax-plugin/ts-like",

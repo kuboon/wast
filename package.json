@@ -9,5 +9,8 @@
     "test:rust-cli": "pnpm run test:rust-cli:unit && pnpm run test:rust-cli:node",
     "test": "pnpm run test:rust-cli && pnpm -r test",
     "lint": "pnpm -r lint"
+  },
+  "dependencies": {
+    "@bytecodealliance/preview2-shim": "^0.17.8"
   }
 }
