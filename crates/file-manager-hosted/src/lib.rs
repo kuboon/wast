@@ -8,22 +8,30 @@ mod syms_yaml;
 mod wit_parser;
 
 use crate::wast::file_manager_hosted::types::{
-    ComponentFiles,
-    FuncSource as BindingFuncSource, PrimitiveType as BindingPrimitiveType, SymEntry as BindingSymEntry,
-    Syms as BindingSyms, TypeSource as BindingTypeSource, WastComponent, WastError,
-    WastFunc as BindingWastFunc, WastTypeDef as BindingWastTypeDef, WitType as BindingWitType,
+    ComponentFiles, FuncSource as BindingFuncSource, PrimitiveType as BindingPrimitiveType,
+    SymEntry as BindingSymEntry, Syms as BindingSyms, TypeSource as BindingTypeSource,
+    WastComponent, WastError, WastFunc as BindingWastFunc, WastTypeDef as BindingWastTypeDef,
+    WitType as BindingWitType,
 };
-use serde_types::{FuncSource, PrimitiveType, Syms, TypeSource, WastDb, WastFunc, WastTypeDef, WitType};
+use serde_types::{
+    FuncSource, PrimitiveType, Syms, TypeSource, WastDb, WastFunc, WastTypeDef, WitType,
+};
 use wit_parser::ParsedWorld;
 
 struct Component;
 
 fn err(msg: impl Into<String>) -> WastError {
-    WastError { message: msg.into(), location: None }
+    WastError {
+        message: msg.into(),
+        location: None,
+    }
 }
 
 fn err_at(msg: impl Into<String>, loc: impl Into<String>) -> WastError {
-    WastError { message: msg.into(), location: Some(loc.into()) }
+    WastError {
+        message: msg.into(),
+        location: Some(loc.into()),
+    }
 }
 
 fn parse_primitive(name: &str) -> Option<PrimitiveType> {
@@ -239,7 +247,10 @@ fn parse_utf8(bytes: &[u8], label: &str) -> Result<String, WastError> {
         .map_err(|e| err_at(format!("invalid UTF-8 in {}: {}", label, e), label))
 }
 
-fn read_db_and_syms(db_bytes: &[u8], syms_bytes: Option<&[u8]>) -> Result<(WastDb, Syms), WastError> {
+fn read_db_and_syms(
+    db_bytes: &[u8],
+    syms_bytes: Option<&[u8]>,
+) -> Result<(WastDb, Syms), WastError> {
     let db_text = parse_utf8(db_bytes, "wast.db")?;
     let db: WastDb = serde_json::from_str(&db_text)
         .map_err(|e| err_at(format!("invalid JSON in wast.db: {}", e), "wast.db"))?;
@@ -247,8 +258,12 @@ fn read_db_and_syms(db_bytes: &[u8], syms_bytes: Option<&[u8]>) -> Result<(WastD
     let syms = match syms_bytes {
         Some(bytes) => {
             let text = parse_utf8(bytes, "syms.en.yaml")?;
-            syms_yaml::parse_syms_yaml(&text)
-                .map_err(|e| err_at(format!("invalid YAML in syms.en.yaml: {}", e), "syms.en.yaml"))?
+            syms_yaml::parse_syms_yaml(&text).map_err(|e| {
+                err_at(
+                    format!("invalid YAML in syms.en.yaml: {}", e),
+                    "syms.en.yaml",
+                )
+            })?
         }
         None => Syms {
             wit_syms: vec![],
@@ -291,11 +306,22 @@ fn merge_sym_entries(
     base
 }
 
-fn merge_db_and_syms(full_db: WastDb, full_syms: Syms, partial_db: WastDb, partial_syms: Syms) -> (WastDb, Syms) {
-    let partial_func_uids: std::collections::BTreeSet<String> =
-        partial_db.funcs.iter().map(|(uid, _)| uid.clone()).collect();
-    let partial_type_uids: std::collections::BTreeSet<String> =
-        partial_db.types.iter().map(|(uid, _)| uid.clone()).collect();
+fn merge_db_and_syms(
+    full_db: WastDb,
+    full_syms: Syms,
+    partial_db: WastDb,
+    partial_syms: Syms,
+) -> (WastDb, Syms) {
+    let partial_func_uids: std::collections::BTreeSet<String> = partial_db
+        .funcs
+        .iter()
+        .map(|(uid, _)| uid.clone())
+        .collect();
+    let partial_type_uids: std::collections::BTreeSet<String> = partial_db
+        .types
+        .iter()
+        .map(|(uid, _)| uid.clone())
+        .collect();
 
     let mut funcs: Vec<(String, WastFunc)> = full_db
         .funcs
@@ -473,11 +499,16 @@ impl exports::wast::file_manager_hosted::file_manager_bindgen::Guest for Compone
         write_db_and_syms(&db, &syms)
     }
 
-    fn merge(world_wit: Vec<u8>, full: ComponentFiles, partial: WastComponent) -> Result<ComponentFiles, WastError> {
+    fn merge(
+        world_wit: Vec<u8>,
+        full: ComponentFiles,
+        partial: WastComponent,
+    ) -> Result<ComponentFiles, WastError> {
         let (full_db, full_syms) = read_db_and_syms(&full.wast_db, full.syms_en_yaml.as_deref())?;
         let (partial_db, partial_syms) = binding_to_db(&partial);
         validate_against_wit(&world_wit, &partial_db)?;
-        let (merged_db, merged_syms) = merge_db_and_syms(full_db, full_syms, partial_db, partial_syms);
+        let (merged_db, merged_syms) =
+            merge_db_and_syms(full_db, full_syms, partial_db, partial_syms);
         write_db_and_syms(&merged_db, &merged_syms)
     }
 }
@@ -560,7 +591,8 @@ world bot {
     #[test]
     fn bindgen_and_read_roundtrip() {
         let files = <Component as Guest>::bindgen(sample_world_bytes()).expect("bindgen");
-        let component = <Component as Guest>::read(files.wast_db, files.syms_en_yaml).expect("read");
+        let component =
+            <Component as Guest>::read(files.wast_db, files.syms_en_yaml).expect("read");
 
         assert_eq!(component.funcs.len(), 2);
         assert_eq!(component.types.len(), 3);
@@ -570,7 +602,9 @@ world bot {
     #[test]
     fn merge_returns_updated_serialized_files() {
         let full = <Component as Guest>::bindgen(sample_world_bytes()).expect("bindgen");
-        let mut partial = <Component as Guest>::read(full.wast_db.clone(), full.syms_en_yaml.clone()).expect("read");
+        let mut partial =
+            <Component as Guest>::read(full.wast_db.clone(), full.syms_en_yaml.clone())
+                .expect("read");
 
         partial.funcs.push((
             "internal/helper".to_string(),
@@ -586,14 +620,23 @@ world bot {
             display_name: "helper".to_string(),
         });
 
-        let merged = <Component as Guest>::merge(sample_world_bytes(), full, partial).expect("merge");
-        let reloaded = <Component as Guest>::read(merged.wast_db, merged.syms_en_yaml).expect("reload");
+        let merged =
+            <Component as Guest>::merge(sample_world_bytes(), full, partial).expect("merge");
+        let reloaded =
+            <Component as Guest>::read(merged.wast_db, merged.syms_en_yaml).expect("reload");
 
-        assert!(reloaded.funcs.iter().any(|(uid, _)| uid == "internal/helper"));
-        assert!(reloaded
-            .syms
-            .internal
-            .iter()
-            .any(|entry| entry.uid == "internal/helper" && entry.display_name == "helper"));
+        assert!(
+            reloaded
+                .funcs
+                .iter()
+                .any(|(uid, _)| uid == "internal/helper")
+        );
+        assert!(
+            reloaded
+                .syms
+                .internal
+                .iter()
+                .any(|entry| entry.uid == "internal/helper" && entry.display_name == "helper")
+        );
     }
 }

@@ -30,7 +30,11 @@ pub fn parse_syms_yaml(input: &str) -> Result<Syms, String> {
                 "internal" => current = Section::Internal,
                 "local" => current = Section::Local,
                 other => {
-                    return Err(format!("line {}: unknown section '{}'", line_num + 1, other));
+                    return Err(format!(
+                        "line {}: unknown section '{}'",
+                        line_num + 1,
+                        other
+                    ));
                 }
             }
             continue;
@@ -51,7 +55,10 @@ pub fn parse_syms_yaml(input: &str) -> Result<Syms, String> {
                     display_name: value,
                 }),
                 Section::None => {
-                    return Err(format!("line {}: entry outside of any section", line_num + 1));
+                    return Err(format!(
+                        "line {}: entry outside of any section",
+                        line_num + 1
+                    ));
                 }
             }
         } else {

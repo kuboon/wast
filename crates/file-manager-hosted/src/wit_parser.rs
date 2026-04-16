@@ -230,11 +230,11 @@ fn parse_params(s: &str) -> Vec<(String, String)> {
 
 #[cfg(test)]
 mod tests {
-        use super::*;
+    use super::*;
 
-        #[test]
-        fn parses_world_interface_reference_exports() {
-                let src = r#"
+    #[test]
+    fn parses_world_interface_reference_exports() {
+        let src = r#"
 package wast:core@0.1.0;
 
 interface file-manager {
@@ -247,10 +247,10 @@ world file-manager-world {
 }
 "#;
 
-                let parsed = parse_world(src).expect("parse world");
-                assert_eq!(parsed.world_name, "file-manager-world");
-                assert_eq!(parsed.exports.len(), 2);
-                assert_eq!(parsed.exports[0].wit_path, "file-manager/bindgen");
-                assert_eq!(parsed.exports[1].wit_path, "file-manager/read");
-        }
+        let parsed = parse_world(src).expect("parse world");
+        assert_eq!(parsed.world_name, "file-manager-world");
+        assert_eq!(parsed.exports.len(), 2);
+        assert_eq!(parsed.exports[0].wit_path, "file-manager/bindgen");
+        assert_eq!(parsed.exports[1].wit_path, "file-manager/read");
+    }
 }

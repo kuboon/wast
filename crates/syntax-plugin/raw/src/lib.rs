@@ -26,25 +26,40 @@ fn primitive_name(p: &PrimitiveType) -> &'static str {
 }
 
 fn render_wit_type(wit_type: &WitType, types: &[(TypeUid, WastTypeDef)]) -> String {
+    let mut resolving = std::collections::BTreeSet::new();
+    render_wit_type_with_guard(wit_type, types, &mut resolving)
+}
+
+fn render_wit_type_with_guard(
+    wit_type: &WitType,
+    types: &[(TypeUid, WastTypeDef)],
+    resolving: &mut std::collections::BTreeSet<String>,
+) -> String {
     match wit_type {
         WitType::Primitive(p) => primitive_name(p).to_string(),
         WitType::Option(inner) => {
-            format!("(option {})", render_type_ref(inner, types))
+            format!("(option {})", render_type_ref_with_guard(inner, types, resolving))
         }
         WitType::Result((ok, err)) => {
             format!(
                 "(result {} {})",
-                render_type_ref(ok, types),
-                render_type_ref(err, types)
+                render_type_ref_with_guard(ok, types, resolving),
+                render_type_ref_with_guard(err, types, resolving)
             )
         }
         WitType::List(inner) => {
-            format!("(list {})", render_type_ref(inner, types))
+            format!("(list {})", render_type_ref_with_guard(inner, types, resolving))
         }
         WitType::Record(fields) => {
             let parts: Vec<String> = fields
                 .iter()
-                .map(|(name, tref)| format!("(field ${} {})", name, render_type_ref(tref, types)))
+                .map(|(name, tref)| {
+                    format!(
+                        "(field ${} {})",
+                        name,
+                        render_type_ref_with_guard(tref, types, resolving)
+                    )
+                })
                 .collect();
             format!("(record {})", parts.join(" "))
         }
@@ -52,23 +67,45 @@ fn render_wit_type(wit_type: &WitType, types: &[(TypeUid, WastTypeDef)]) -> Stri
             let parts: Vec<String> = cases
                 .iter()
                 .map(|(name, tref)| match tref {
-                    Some(t) => format!("(case ${} {})", name, render_type_ref(t, types)),
+                    Some(t) => {
+                        format!("(case ${} {})", name, render_type_ref_with_guard(t, types, resolving))
+                    }
                     None => format!("(case ${})", name),
                 })
                 .collect();
             format!("(variant {})", parts.join(" "))
         }
         WitType::Tuple(refs) => {
-            let parts: Vec<String> = refs.iter().map(|r| render_type_ref(r, types)).collect();
+            let parts: Vec<String> = refs
+                .iter()
+                .map(|r| render_type_ref_with_guard(r, types, resolving))
+                .collect();
             format!("(tuple {})", parts.join(" "))
         }
     }
 }
 
 fn render_type_ref(type_ref: &WitTypeRef, types: &[(TypeUid, WastTypeDef)]) -> String {
+    let mut resolving = std::collections::BTreeSet::new();
+    render_type_ref_with_guard(type_ref, types, &mut resolving)
+}
+
+fn render_type_ref_with_guard(
+    type_ref: &WitTypeRef,
+    types: &[(TypeUid, WastTypeDef)],
+    resolving: &mut std::collections::BTreeSet<String>,
+) -> String {
+    // Break recursive type expansion (e.g. tid1 -> record(field tid1)).
+    if resolving.contains(type_ref) {
+        return format!("${}", type_ref);
+    }
+
     for (uid, typedef) in types {
         if uid == type_ref {
-            return render_wit_type(&typedef.definition, types);
+            resolving.insert(uid.clone());
+            let rendered = render_wit_type_with_guard(&typedef.definition, types, resolving);
+            resolving.remove(uid);
+            return rendered;
         }
     }
     // Not an inline type — reference by uid
