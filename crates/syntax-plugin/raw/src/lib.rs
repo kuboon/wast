@@ -38,7 +38,10 @@ fn render_wit_type_with_guard(
     match wit_type {
         WitType::Primitive(p) => primitive_name(p).to_string(),
         WitType::Option(inner) => {
-            format!("(option {})", render_type_ref_with_guard(inner, types, resolving))
+            format!(
+                "(option {})",
+                render_type_ref_with_guard(inner, types, resolving)
+            )
         }
         WitType::Result((ok, err)) => {
             format!(
@@ -48,7 +51,10 @@ fn render_wit_type_with_guard(
             )
         }
         WitType::List(inner) => {
-            format!("(list {})", render_type_ref_with_guard(inner, types, resolving))
+            format!(
+                "(list {})",
+                render_type_ref_with_guard(inner, types, resolving)
+            )
         }
         WitType::Record(fields) => {
             let parts: Vec<String> = fields
@@ -68,7 +74,11 @@ fn render_wit_type_with_guard(
                 .iter()
                 .map(|(name, tref)| match tref {
                     Some(t) => {
-                        format!("(case ${} {})", name, render_type_ref_with_guard(t, types, resolving))
+                        format!(
+                            "(case ${} {})",
+                            name,
+                            render_type_ref_with_guard(t, types, resolving)
+                        )
                     }
                     None => format!("(case ${})", name),
                 })

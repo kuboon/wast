@@ -18,4 +18,4 @@ RUN mkdir -p $HOME/.config/fish && echo '$MISE_INSTALL_PATH activate fish --shim
     echo '$MISE_INSTALL_PATH activate bash --shims | eval' >> $HOME/.bashrc
 COPY --parents mise.toml ./**/cargo.* ./**/package.json ./**/pnpm-lock.json ./
 RUN mise trust && mise install --system --before 3d
-RUN mise x -- rustup update && mise x -- cargo binstall -y cargo-component wasm-tools
+RUN mise x -- cargo binstall -y cargo-component wasm-tools
