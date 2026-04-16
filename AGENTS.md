@@ -21,7 +21,7 @@ text <──syntax plugin──> partial WastComponent <──partial manager─
 | ts-like syntax | `crates/syntax-plugin/ts-like/` | **Done** | 21 | — |
 | rust-like syntax | `crates/syntax-plugin/rust-like/` | **Partial** | 9 | `from_text` body parsing, body roundtrip tests |
 | CLI (TypeScript) | `packages/cli/` | **Removed** | — | Replaced by Rust CLI |
-| Rust CLI | `crates/cli-rust/` | **Partial** | 7 | file-manager `write`; partial-manager `merge` |
+| Rust CLI | `crates/cli-rust/` | **Removed** | — | — |
 | VS Code extension | `packages/vscode-extension/` | **Partial** | 0 | Body rendering, save flow, LSP, session conflicts |
 
 ## Detailed TODO
@@ -65,14 +65,7 @@ text <──syntax plugin──> partial WastComponent <──partial manager─
 - [x] `setup-git` — configures git diff driver and .gitattributes
 
 ### Rust CLI (`crates/cli-rust/`)
-
-- [x] Load ts-like syntax-plugin WASM component directly via Wasmtime (no jco transpile)
-- [x] `fmt` — reads stdin, runs `from-text` -> `to-text`, prints normalized text
-- [x] file-manager WASM integration (`bindgen`, `read`, `merge`)
-- [ ] file-manager WASM integration (`write`)
-- [x] partial-manager WASM integration (`extract`)
-- [ ] partial-manager WASM integration (`merge`)
-- [x] CLI parity with `packages/cli/`
+- [x] Removed (`crates/cli-rust` deleted)
 
 ### VS Code extension (`packages/vscode-extension/`)
 - [x] TreeView panel — scans workspace recursively for wast.db files, lists components and functions with display names from syms. Properly filters .git/node_modules, supports depth limit

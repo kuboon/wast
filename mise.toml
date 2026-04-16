@@ -1,9 +1,9 @@
 [tasks.build]
-run = "cargo component build --workspace --exclude wast-cli-rust && pnpm install && pnpm build"
+run = "cargo component build --workspace && pnpm install && pnpm build"
 
 [tasks.test-component]
 depends = ['build']
-run = "RUST_MIN_STACK=33554432 cargo test --workspace --exclude wast-cli-rust --exclude wast-syntax-raw"
+run = "RUST_MIN_STACK=33554432 cargo test --workspace --exclude wast-syntax-raw"
 
 [tasks.test-ts]
 depends = ['build']

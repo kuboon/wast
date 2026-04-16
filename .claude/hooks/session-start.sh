@@ -12,11 +12,8 @@ rustup update
 # Install cargo-component for building WASM components
 cargo install cargo-component
 
-# Build WASM component crates (exclude cli-rust which is a native binary using wasmtime)
-cargo component build --workspace --exclude wast-cli-rust
-
-# Build the native CLI binary
-cargo build -p wast-cli-rust
+# Build WASM component crates
+cargo component build --workspace
 
 # Install Node.js dependencies via pnpm
 pnpm install

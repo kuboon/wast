@@ -4,10 +4,7 @@
   "packageManager": "pnpm@10.33.0",
   "scripts": {
     "build": "pnpm -r build",
-    "test:rust-cli:unit": "cargo test -p wast-cli-rust",
-    "test:rust-cli:node": "cargo build -p wast-cli-rust && node --test test/cli-rust.test.mjs",
-    "test:rust-cli": "pnpm run test:rust-cli:unit && pnpm run test:rust-cli:node",
-    "test": "pnpm run test:rust-cli && pnpm -r test",
+    "test": "pnpm -r test",
     "lint": "pnpm -r lint"
   },
   "dependencies": {
