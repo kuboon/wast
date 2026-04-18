@@ -10,19 +10,18 @@ text <──syntax plugin──> partial WastComponent <──partial manager─
 
 ## Module Status
 
-| Module | Path | Status | Tests | Remaining |
-|---|---|---|---|---|
-| WIT contract | `wit/wast-core.wit` | **Done** | — | — |
-| partial-manager | `crates/partial-manager/` | **Done** | 21 | — |
-| file-manager | `crates/file-manager/` | **Done** (JSON) | 16 | SQLite migration |
-| file-manager-hosted | `crates/file-manager-hosted/` | **Done** | 5 | — |
-| pattern-analyzer | `crates/syntax-plugin/internal/pattern-analyzer/` | **Done** | 17 | — |
-| ruby-like syntax | `crates/syntax-plugin/ruby-like/` | **Partial** | 9 | `from_text` body parsing, body roundtrip tests |
-| ts-like syntax | `crates/syntax-plugin/ts-like/` | **Done** | 21 | — |
-| rust-like syntax | `crates/syntax-plugin/rust-like/` | **Partial** | 9 | `from_text` body parsing, body roundtrip tests |
-| CLI (TypeScript) | `packages/cli/` | **Removed** | — | Replaced by Rust CLI |
-| Rust CLI | `crates/cli-rust/` | **Removed** | — | — |
-| VS Code extension | `packages/vscode-extension/` | **Partial** | 0 | Body rendering, save flow, LSP, session conflicts |
+| Module | Path | Status | Remaining |
+|---|---|---|---|
+| WIT contract | `wit/wast-core.wit` | **Done** | — |
+| partial-manager | `crates/partial-manager/` | **Done** | — |
+| file-manager | `crates/file-manager/` | **Done** (JSON) | SQLite migration |
+| file-manager-hosted | `crates/file-manager-hosted/` | **Done** | — |
+| pattern-analyzer | `crates/syntax-plugin/internal/pattern-analyzer/` | **Done** | — |
+| raw syntax | `crates/syntax-plugin/raw/` | **Done** | — |
+| ruby-like syntax | `crates/syntax-plugin/ruby-like/` | **Partial** | `from_text` body parsing, body roundtrip tests |
+| ts-like syntax | `crates/syntax-plugin/ts-like/` | **Done** | — |
+| rust-like syntax | `crates/syntax-plugin/rust-like/` | **Partial** | `from_text` body parsing, body roundtrip tests |
+| VS Code extension | `packages/vscode-extension/` | **Partial** | Body rendering, save flow, LSP, session conflicts |
 
 ## Detailed TODO
 
@@ -41,31 +40,12 @@ text <──syntax plugin──> partial WastComponent <──partial manager─
 - [x] `read` from serialized `wast.db` + optional `syms.en.yaml` and return `wast-component`
 - [x] `write` / `merge` parity with `crates/file-manager/`
 
-### syntax plugins (ruby-like, ts-like, rust-like)
-- [x] **to_text**: Render actual body instructions (all 3 plugins deserialize via pattern-analyzer and render real instructions with language-specific syntax)
+### syntax plugins (ruby-like, ts-like, rust-like, raw)
+- [x] **to_text**: Render actual body instructions (all plugins deserialize via pattern-analyzer and render real instructions with language-specific syntax)
 - [x] **from_text (ts-like)**: Full body expression parser — recursive descent parser handles all instruction types (if/else, while, block, switch/match, calls, arithmetic, comparisons, WIT types). Parses TS-like text back to `Vec<Instruction>` and serializes via pattern-analyzer
 - [ ] **from_text (ruby-like, rust-like)**: Still signature-only — skips body lines, preserves existing binary body unchanged
-- [x] **Body roundtrip tests (ts-like)**: 12 tests covering simple instructions, calls, arithmetic, comparisons, if/else, loops, blocks, WIT types (some/ok/err/isErr), match-option, match-result, nested constructs
+- [x] **Body roundtrip tests (ts-like)**: simple instructions, calls, arithmetic, comparisons, if/else, loops, blocks, WIT types (some/ok/err/isErr), match-option, match-result, nested constructs
 - [ ] Body roundtrip tests (ruby-like, rust-like)
-
-### CLI (`packages/cli/`)
-
-> All commands use WASM components (file-manager, partial-manager, ts-like syntax-plugin) via jco transpile. Bridge module (`wasm-plugin.ts`) converts between wast-db JSON and WASM tagged-union formats. 27 integration tests in `packages/cli/test/`.
-
-- [x] Load ts-like syntax-plugin WASM via jco transpile. 10 integration tests
-- [x] Load file-manager WASM component — `bindgen`, `read`, `write`, `merge` bridge APIs. 5 integration tests
-- [x] Load partial-manager WASM component — `extract`, `merge` bridge APIs. 5 integration tests
-- [ ] Load other syntax plugins (ruby-like, rust-like) via same jco pattern
-- [x] `bindgen` — calls file-manager WASM `bindgen()`: parses `world.wit`, populates funcs/types, writes `wast.db` + `syms.en.yaml`
-- [x] `extract` — FileManager.read → PartialManager.extract (call-graph analysis, type refs, include_caller) → SyntaxPlugin.toText
-- [x] `merge` — SyntaxPlugin.fromText (parses ts-like text into WastComponent) → FileManager.merge (validates against world.wit, writes to disk). Supports `--dry-run`
-- [x] `fmt` — SyntaxPlugin.fromText → toText roundtrip (normalizes text, validates syntax). Reports errors on invalid input
-- [x] `diff` — FileManager.read × 2 → SyntaxPlugin.toText × 2 → text comparison with per-function block diff
-- [x] `syms` — reads/writes syms YAML files, classifies UIDs (wit/internal/local), updates display names
-- [x] `setup-git` — configures git diff driver and .gitattributes
-
-### Rust CLI (`crates/cli-rust/`)
-- [x] Removed (`crates/cli-rust` deleted)
 
 ### VS Code extension (`packages/vscode-extension/`)
 - [x] TreeView panel — scans workspace recursively for wast.db files, lists components and functions with display names from syms. Properly filters .git/node_modules, supports depth limit
@@ -93,7 +73,7 @@ text <──syntax plugin──> partial WastComponent <──partial manager─
 ```bash
 # Rust
 cargo component build --workspace   # Build all wasm components
-cargo test --workspace               # Run all Rust tests (93 tests)
+cargo test --workspace               # Run all Rust tests
 cargo fmt                            # Format source code
 
 # TypeScript
@@ -127,5 +107,5 @@ cargo component build --workspace && \
 
 **When completing a task**, update this file:
 1. Move the completed item from the TODO list (change `[ ]` to `[x]`)
-2. Update the Module Status table (tests count, remaining column)
+2. Update the Module Status table (remaining column)
 3. Commit the AGENTS.md update together with the implementation
