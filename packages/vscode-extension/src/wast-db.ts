@@ -1,15 +1,21 @@
 /**
- * Types and reader for wast.db (JSON) and syms.*.yaml files.
+ * Types and reader for wast.json and syms.*.yaml files.
  *
  * Mirrors the Rust serde_types used by file-manager, so the VS Code extension
  * can read component data directly without a wasm runtime.
+ *
+ * On-disk format today is `wast.json` (row-oriented JSON). Future migration
+ * target is `wast.db` (SQLite with the same logical schema).
  */
 
 import * as fs from "node:fs";
 import * as path from "node:path";
 
 // ---------------------------------------------------------------------------
-// wast.db JSON types (matches crates/file-manager/src/serde_types.rs)
+// wast.json types (matches crates/file-manager/src/serde_types.rs)
+//
+// Row-oriented: each func/type row inlines its uid alongside its payload
+// so the JSON maps 1:1 to SQLite rows when the `wast.db` migration lands.
 // ---------------------------------------------------------------------------
 
 export type FuncSource =
@@ -24,9 +30,12 @@ export interface WastFunc {
   body: number[] | null;
 }
 
+/** A row in the on-disk `funcs` table: `uid` flattened alongside WastFunc fields. */
+export type WastFuncRow = { uid: string } & WastFunc;
+
 export interface WastDb {
-  funcs: [string, WastFunc][];
-  types: [string, unknown][];
+  funcs: WastFuncRow[];
+  types: ({ uid: string } & Record<string, unknown>)[];
 }
 
 // ---------------------------------------------------------------------------
@@ -89,7 +98,7 @@ export function funcSourceId(source: FuncSource): string {
 }
 
 // ---------------------------------------------------------------------------
-// Loaded component (wast.db + syms merged)
+// Loaded component (wast.json + syms merged)
 // ---------------------------------------------------------------------------
 
 export interface LoadedFunc {
@@ -108,10 +117,10 @@ export interface LoadedComponent {
 }
 
 /**
- * Read a component directory's wast.db and syms file.
+ * Read a component directory's wast.json and syms file.
  */
 export function readComponent(dir: string, lang: string): LoadedComponent | null {
-  const dbPath = path.join(dir, "wast.db");
+  const dbPath = path.join(dir, "wast.json");
   if (!fs.existsSync(dbPath)) return null;
 
   let db: WastDb;
@@ -134,26 +143,26 @@ export function readComponent(dir: string, lang: string): LoadedComponent | null
     }
   }
 
-  const funcs: LoadedFunc[] = (db.funcs ?? []).map(([uid, f]) => {
-    const sourceType = funcSourceType(f.source);
-    const sourceId = funcSourceId(f.source);
+  const funcs: LoadedFunc[] = (db.funcs ?? []).map((row) => {
+    const sourceType = funcSourceType(row.source);
+    const sourceId = funcSourceId(row.source);
 
     // Look up display name from syms
     let displayName: string | undefined;
     if (sourceType === "internal") {
-      displayName = syms.internal.get(uid) ?? syms.internal.get(sourceId);
+      displayName = syms.internal.get(row.uid) ?? syms.internal.get(sourceId);
     } else {
       // wit (imported/exported) — look in wit syms
-      displayName = syms.wit.get(uid) ?? syms.wit.get(sourceId);
+      displayName = syms.wit.get(row.uid) ?? syms.wit.get(sourceId);
     }
 
     return {
-      uid,
-      source: f.source,
+      uid: row.uid,
+      source: row.source,
       sourceType,
       displayName,
-      params: f.params,
-      result: f.result,
+      params: row.params,
+      result: row.result,
     };
   });
 

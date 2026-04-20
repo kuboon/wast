@@ -3,7 +3,7 @@
  *
  * URI format: wast://component/{dir-path-base64}[?func=uid1&func=uid2]
  *
- * When opened, reads the component's wast.db + syms and formats a simple
+ * When opened, reads the component's wast.json + syms and formats a simple
  * text representation of the requested functions (or all functions if none
  * specified).
  */
@@ -26,7 +26,7 @@ export class WastDocumentProvider implements vscode.TextDocumentContentProvider 
 
     const lang = vscode.workspace.getConfiguration("wast").get<string>("symsLanguage", "en");
     const component = readComponent(dir, lang);
-    if (!component) return `# Error: could not read wast.db in ${dir}\n`;
+    if (!component) return `# Error: could not read wast.json in ${dir}\n`;
 
     // Determine which functions to show
     const requestedUids = new URLSearchParams(uri.query).getAll("func");

@@ -14,7 +14,8 @@ use crate::wast::file_manager_hosted::types::{
     WitType as BindingWitType,
 };
 use serde_types::{
-    FuncSource, PrimitiveType, Syms, TypeSource, WastDb, WastFunc, WastTypeDef, WitType,
+    FuncSource, PrimitiveType, Syms, TypeSource, WastDb, WastFunc, WastFuncRow, WastTypeDef,
+    WastTypeRow, WitType,
 };
 use wit_parser::ParsedWorld;
 
@@ -138,14 +139,14 @@ fn db_to_binding(db: &WastDb, syms: &Syms) -> WastComponent {
         funcs: db
             .funcs
             .iter()
-            .map(|(uid, func)| {
+            .map(|row| {
                 (
-                    uid.clone(),
+                    row.uid.clone(),
                     BindingWastFunc {
-                        source: func_source_to_binding(&func.source),
-                        params: func.params.clone(),
-                        result: func.result.clone(),
-                        body: func.body.clone(),
+                        source: func_source_to_binding(&row.func.source),
+                        params: row.func.params.clone(),
+                        result: row.func.result.clone(),
+                        body: row.func.body.clone(),
                     },
                 )
             })
@@ -153,12 +154,12 @@ fn db_to_binding(db: &WastDb, syms: &Syms) -> WastComponent {
         types: db
             .types
             .iter()
-            .map(|(uid, type_def)| {
+            .map(|row| {
                 (
-                    uid.clone(),
+                    row.uid.clone(),
                     BindingWastTypeDef {
-                        source: type_source_to_binding(&type_def.source),
-                        definition: wit_type_to_binding(&type_def.definition),
+                        source: type_source_to_binding(&row.def.source),
+                        definition: wit_type_to_binding(&row.def.definition),
                     },
                 )
             })
@@ -190,29 +191,25 @@ fn binding_to_db(component: &WastComponent) -> (WastDb, Syms) {
         funcs: component
             .funcs
             .iter()
-            .map(|(uid, func)| {
-                (
-                    uid.clone(),
-                    WastFunc {
-                        source: func_source_from_binding(&func.source),
-                        params: func.params.clone(),
-                        result: func.result.clone(),
-                        body: func.body.clone(),
-                    },
-                )
+            .map(|(uid, func)| WastFuncRow {
+                uid: uid.clone(),
+                func: WastFunc {
+                    source: func_source_from_binding(&func.source),
+                    params: func.params.clone(),
+                    result: func.result.clone(),
+                    body: func.body.clone(),
+                },
             })
             .collect(),
         types: component
             .types
             .iter()
-            .map(|(uid, type_def)| {
-                (
-                    uid.clone(),
-                    WastTypeDef {
-                        source: type_source_from_binding(&type_def.source),
-                        definition: wit_type_from_binding(&type_def.definition),
-                    },
-                )
+            .map(|(uid, type_def)| WastTypeRow {
+                uid: uid.clone(),
+                def: WastTypeDef {
+                    source: type_source_from_binding(&type_def.source),
+                    definition: wit_type_from_binding(&type_def.definition),
+                },
             })
             .collect(),
     };
@@ -251,9 +248,9 @@ fn read_db_and_syms(
     db_bytes: &[u8],
     syms_bytes: Option<&[u8]>,
 ) -> Result<(WastDb, Syms), WastError> {
-    let db_text = parse_utf8(db_bytes, "wast.db")?;
+    let db_text = parse_utf8(db_bytes, "wast.json")?;
     let db: WastDb = serde_json::from_str(&db_text)
-        .map_err(|e| err_at(format!("invalid JSON in wast.db: {}", e), "wast.db"))?;
+        .map_err(|e| err_at(format!("invalid JSON in wast.json: {}", e), "wast.json"))?;
 
     let syms = match syms_bytes {
         Some(bytes) => {
@@ -281,7 +278,7 @@ fn write_db_and_syms(db: &WastDb, syms: &Syms) -> Result<ComponentFiles, WastErr
     let syms_yaml = syms_yaml::write_syms_yaml(syms);
 
     Ok(ComponentFiles {
-        wast_db: db_json.into_bytes(),
+        wast_json: db_json.into_bytes(),
         syms_en_yaml: Some(syms_yaml.into_bytes()),
     })
 }
@@ -312,28 +309,22 @@ fn merge_db_and_syms(
     partial_db: WastDb,
     partial_syms: Syms,
 ) -> (WastDb, Syms) {
-    let partial_func_uids: std::collections::BTreeSet<String> = partial_db
-        .funcs
-        .iter()
-        .map(|(uid, _)| uid.clone())
-        .collect();
-    let partial_type_uids: std::collections::BTreeSet<String> = partial_db
-        .types
-        .iter()
-        .map(|(uid, _)| uid.clone())
-        .collect();
+    let partial_func_uids: std::collections::BTreeSet<String> =
+        partial_db.funcs.iter().map(|row| row.uid.clone()).collect();
+    let partial_type_uids: std::collections::BTreeSet<String> =
+        partial_db.types.iter().map(|row| row.uid.clone()).collect();
 
-    let mut funcs: Vec<(String, WastFunc)> = full_db
+    let mut funcs: Vec<WastFuncRow> = full_db
         .funcs
         .into_iter()
-        .filter(|(uid, _)| !partial_func_uids.contains(uid))
+        .filter(|row| !partial_func_uids.contains(&row.uid))
         .collect();
     funcs.extend(partial_db.funcs);
 
-    let mut types: Vec<(String, WastTypeDef)> = full_db
+    let mut types: Vec<WastTypeRow> = full_db
         .types
         .into_iter()
-        .filter(|(uid, _)| !partial_type_uids.contains(uid))
+        .filter(|row| !partial_type_uids.contains(&row.uid))
         .collect();
     types.extend(partial_db.types);
 
@@ -371,7 +362,9 @@ fn validate_against_parsed_world(parsed: &ParsedWorld, db: &WastDb) -> Result<()
         .map(|func| (func.wit_path.as_str(), func.params.len()))
         .collect();
 
-    for (uid, func) in &db.funcs {
+    for row in &db.funcs {
+        let uid = &row.uid;
+        let func = &row.func;
         match &func.source {
             FuncSource::Exported(wit_id) => match wit_exports.get(wit_id.as_str()) {
                 None => {
@@ -419,8 +412,8 @@ impl exports::wast::file_manager_hosted::file_manager_bindgen::Guest for Compone
     fn bindgen(world_wit: Vec<u8>) -> Result<ComponentFiles, WastError> {
         let parsed = parse_world_bytes(&world_wit)?;
 
-        let mut funcs: Vec<(String, WastFunc)> = Vec::new();
-        let mut types: Vec<(String, WastTypeDef)> = Vec::new();
+        let mut funcs: Vec<WastFuncRow> = Vec::new();
+        let mut types: Vec<WastTypeRow> = Vec::new();
         let mut wit_syms: Vec<(String, String)> = Vec::new();
         let mut seen_types = std::collections::BTreeSet::<String>::new();
 
@@ -430,13 +423,13 @@ impl exports::wast::file_manager_hosted::file_manager_bindgen::Guest for Compone
             }
             if let Some(p) = parse_primitive(type_name) {
                 seen_types.insert(type_name.to_string());
-                types.push((
-                    type_name.to_string(),
-                    WastTypeDef {
+                types.push(WastTypeRow {
+                    uid: type_name.to_string(),
+                    def: WastTypeDef {
                         source: TypeSource::Imported(type_name.to_string()),
                         definition: WitType::Primitive(p),
                     },
-                ));
+                });
             }
         };
 
@@ -447,15 +440,15 @@ impl exports::wast::file_manager_hosted::file_manager_bindgen::Guest for Compone
             if let Some(ret) = &f.result {
                 ensure_type(ret);
             }
-            funcs.push((
-                f.wit_path.clone(),
-                WastFunc {
+            funcs.push(WastFuncRow {
+                uid: f.wit_path.clone(),
+                func: WastFunc {
                     source: FuncSource::Imported(f.wit_path.clone()),
                     params: f.params.clone(),
                     result: f.result.clone(),
                     body: None,
                 },
-            ));
+            });
             wit_syms.push((f.wit_path.clone(), f.name.clone()));
         }
 
@@ -466,15 +459,15 @@ impl exports::wast::file_manager_hosted::file_manager_bindgen::Guest for Compone
             if let Some(ret) = &f.result {
                 ensure_type(ret);
             }
-            funcs.push((
-                f.wit_path.clone(),
-                WastFunc {
+            funcs.push(WastFuncRow {
+                uid: f.wit_path.clone(),
+                func: WastFunc {
                     source: FuncSource::Exported(f.wit_path.clone()),
                     params: f.params.clone(),
                     result: f.result.clone(),
                     body: None,
                 },
-            ));
+            });
             wit_syms.push((f.wit_path.clone(), f.name.clone()));
         }
 
@@ -488,8 +481,8 @@ impl exports::wast::file_manager_hosted::file_manager_bindgen::Guest for Compone
         write_db_and_syms(&db, &syms)
     }
 
-    fn read(wast_db: Vec<u8>, syms_en_yaml: Option<Vec<u8>>) -> Result<WastComponent, WastError> {
-        let (db, syms) = read_db_and_syms(&wast_db, syms_en_yaml.as_deref())?;
+    fn read(wast_json: Vec<u8>, syms_en_yaml: Option<Vec<u8>>) -> Result<WastComponent, WastError> {
+        let (db, syms) = read_db_and_syms(&wast_json, syms_en_yaml.as_deref())?;
         Ok(db_to_binding(&db, &syms))
     }
 
@@ -504,7 +497,7 @@ impl exports::wast::file_manager_hosted::file_manager_bindgen::Guest for Compone
         full: ComponentFiles,
         partial: WastComponent,
     ) -> Result<ComponentFiles, WastError> {
-        let (full_db, full_syms) = read_db_and_syms(&full.wast_db, full.syms_en_yaml.as_deref())?;
+        let (full_db, full_syms) = read_db_and_syms(&full.wast_json, full.syms_en_yaml.as_deref())?;
         let (partial_db, partial_syms) = binding_to_db(&partial);
         validate_against_wit(&world_wit, &partial_db)?;
         let (merged_db, merged_syms) =
@@ -549,15 +542,15 @@ world bot {
     #[test]
     fn validate_against_parsed_world_rejects_missing_export() {
         let db = WastDb {
-            funcs: vec![(
-                "wrong".to_string(),
-                WastFunc {
+            funcs: vec![WastFuncRow {
+                uid: "wrong".to_string(),
+                func: WastFunc {
                     source: FuncSource::Exported("wrong".to_string()),
                     params: vec![("event-id".to_string(), "u32".to_string())],
                     result: Some("bool".to_string()),
                     body: None,
                 },
-            )],
+            }],
             types: vec![],
         };
 
@@ -570,15 +563,15 @@ world bot {
     #[test]
     fn validate_against_parsed_world_rejects_param_count_mismatch() {
         let db = WastDb {
-            funcs: vec![(
-                "handle-event".to_string(),
-                WastFunc {
+            funcs: vec![WastFuncRow {
+                uid: "handle-event".to_string(),
+                func: WastFunc {
                     source: FuncSource::Exported("handle-event".to_string()),
                     params: vec![],
                     result: Some("bool".to_string()),
                     body: None,
                 },
-            )],
+            }],
             types: vec![],
         };
 
@@ -592,7 +585,7 @@ world bot {
     fn bindgen_and_read_roundtrip() {
         let files = <Component as Guest>::bindgen(sample_world_bytes()).expect("bindgen");
         let component =
-            <Component as Guest>::read(files.wast_db, files.syms_en_yaml).expect("read");
+            <Component as Guest>::read(files.wast_json, files.syms_en_yaml).expect("read");
 
         assert_eq!(component.funcs.len(), 2);
         assert_eq!(component.types.len(), 3);
@@ -603,7 +596,7 @@ world bot {
     fn merge_returns_updated_serialized_files() {
         let full = <Component as Guest>::bindgen(sample_world_bytes()).expect("bindgen");
         let mut partial =
-            <Component as Guest>::read(full.wast_db.clone(), full.syms_en_yaml.clone())
+            <Component as Guest>::read(full.wast_json.clone(), full.syms_en_yaml.clone())
                 .expect("read");
 
         partial.funcs.push((
@@ -623,7 +616,7 @@ world bot {
         let merged =
             <Component as Guest>::merge(sample_world_bytes(), full, partial).expect("merge");
         let reloaded =
-            <Component as Guest>::read(merged.wast_db, merged.syms_en_yaml).expect("reload");
+            <Component as Guest>::read(merged.wast_json, merged.syms_en_yaml).expect("reload");
 
         assert!(
             reloaded

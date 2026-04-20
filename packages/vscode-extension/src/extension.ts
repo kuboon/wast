@@ -44,8 +44,8 @@ export function activate(context: vscode.ExtensionContext) {
     }),
   );
 
-  // ── File system watcher for wast.db changes ──
-  const watcher = vscode.workspace.createFileSystemWatcher("**/wast.db");
+  // ── File system watcher for wast.json changes ──
+  const watcher = vscode.workspace.createFileSystemWatcher("**/wast.json");
 
   watcher.onDidChange((uri) => {
     treeProvider.refresh();
@@ -65,7 +65,7 @@ export function activate(context: vscode.ExtensionContext) {
 }
 
 /**
- * When a wast.db file changes, fire change events for any open virtual
+ * When a wast.json file changes, fire change events for any open virtual
  * documents that belong to the same component directory, and optionally
  * show a notification.
  */
@@ -89,7 +89,7 @@ function notifyOpenDocuments(
     if (docDir === changedDir) {
       docProvider.fireChange(doc.uri);
       void vscode.window.showInformationMessage(
-        `WAST: wast.db changed externally, refreshing view.`,
+        `WAST: wast.json changed externally, refreshing view.`,
       );
     }
   }

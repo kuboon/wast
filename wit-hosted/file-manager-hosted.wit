@@ -69,7 +69,7 @@ interface types {
   }
 
   record component-files {
-    wast-db: list<u8>,
+    wast-json: list<u8>,
     syms-en-yaml: option<list<u8>>,
   }
 
@@ -82,7 +82,7 @@ interface types {
 interface file-manager-bindgen {
   use types.{component-files, wast-component, wast-error};
   bindgen: func(world-wit: list<u8>) -> result<component-files, wast-error>;
-  read: func(wast-db: list<u8>, syms-en-yaml: option<list<u8>>) -> result<wast-component, wast-error>;
+  read: func(wast-json: list<u8>, syms-en-yaml: option<list<u8>>) -> result<wast-component, wast-error>;
   write: func(world-wit: list<u8>, component: wast-component) -> result<component-files, wast-error>;
   merge: func(world-wit: list<u8>, full: component-files, partial: wast-component) -> result<component-files, wast-error>;
 }

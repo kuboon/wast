@@ -127,29 +127,25 @@ fn component_to_db(c: &WastComponent) -> serde_types::WastDb {
         funcs: c
             .funcs
             .iter()
-            .map(|(uid, f)| {
-                (
-                    uid.clone(),
-                    serde_types::WastFunc {
-                        source: func_source_to_serde(&f.source),
-                        params: f.params.clone(),
-                        result: f.result.clone(),
-                        body: f.body.clone(),
-                    },
-                )
+            .map(|(uid, f)| serde_types::WastFuncRow {
+                uid: uid.clone(),
+                func: serde_types::WastFunc {
+                    source: func_source_to_serde(&f.source),
+                    params: f.params.clone(),
+                    result: f.result.clone(),
+                    body: f.body.clone(),
+                },
             })
             .collect(),
         types: c
             .types
             .iter()
-            .map(|(uid, td)| {
-                (
-                    uid.clone(),
-                    serde_types::WastTypeDef {
-                        source: type_source_to_serde(&td.source),
-                        definition: wit_type_to_serde(&td.definition),
-                    },
-                )
+            .map(|(uid, td)| serde_types::WastTypeRow {
+                uid: uid.clone(),
+                def: serde_types::WastTypeDef {
+                    source: type_source_to_serde(&td.source),
+                    definition: wit_type_to_serde(&td.definition),
+                },
             })
             .collect(),
     }
@@ -161,14 +157,14 @@ fn component_from_db(db: &serde_types::WastDb) -> WastComponent {
         funcs: db
             .funcs
             .iter()
-            .map(|(uid, f)| {
+            .map(|row| {
                 (
-                    uid.clone(),
+                    row.uid.clone(),
                     WastFunc {
-                        source: func_source_from_serde(&f.source),
-                        params: f.params.clone(),
-                        result: f.result.clone(),
-                        body: f.body.clone(),
+                        source: func_source_from_serde(&row.func.source),
+                        params: row.func.params.clone(),
+                        result: row.func.result.clone(),
+                        body: row.func.body.clone(),
                     },
                 )
             })
@@ -176,12 +172,12 @@ fn component_from_db(db: &serde_types::WastDb) -> WastComponent {
         types: db
             .types
             .iter()
-            .map(|(uid, td)| {
+            .map(|row| {
                 (
-                    uid.clone(),
+                    row.uid.clone(),
                     WastTypeDef {
-                        source: type_source_from_serde(&td.source),
-                        definition: wit_type_from_serde(&td.definition),
+                        source: type_source_from_serde(&row.def.source),
+                        definition: wit_type_from_serde(&row.def.definition),
                     },
                 )
             })
@@ -199,7 +195,7 @@ fn component_from_db(db: &serde_types::WastDb) -> WastComponent {
 // ---------------------------------------------------------------------------
 
 fn db_path(path: &str) -> String {
-    format!("{}/wast.db", path)
+    format!("{}/wast.json", path)
 }
 
 fn wit_path(path: &str) -> String {
@@ -359,13 +355,13 @@ fn validate_against_wit(path: &str, component: &WastComponent) -> Result<(), Was
 }
 
 // ---------------------------------------------------------------------------
-// Component file I/O (wast.db + syms)
+// Component file I/O (wast.json + syms)
 // ---------------------------------------------------------------------------
 
 fn read_component_from_disk(path: &str) -> Result<WastComponent, WastError> {
     let db = db_path(path);
 
-    // Check if wast.db exists; if not, report db_not_found
+    // Check if wast.json exists; if not, report db_not_found
     if !std::path::Path::new(&db).exists() {
         return Err(WastError {
             message: "db_not_found".to_string(),
@@ -555,10 +551,10 @@ impl bindings::exports::wast::core::file_manager::Guest for Component {
             return Err(err("wit_not_found: world.wit does not exist"));
         }
 
-        // Check wast.db does NOT exist
+        // Check wast.json does NOT exist
         let db = db_path(&path);
         if std::path::Path::new(&db).exists() {
-            return Err(err("db_exists: wast.db already exists"));
+            return Err(err("db_exists: wast.json already exists"));
         }
 
         // Parse world.wit

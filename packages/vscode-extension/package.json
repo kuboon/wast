@@ -9,7 +9,7 @@
   },
   "main": "./dist/extension.js",
   "activationEvents": [
-    "workspaceContains:**/wast.db"
+    "workspaceContains:**/wast.json"
   ],
   "contributes": {
     "viewsContainers": {

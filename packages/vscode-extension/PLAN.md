@@ -3,14 +3,15 @@
 ## Purpose
 
 VS Code extension providing TreeView navigation, virtual document editing, LSP diagnostics, and save-merge workflow for wast components.
+Should be work on vscode.dev web.
 
 ## Key Features
 
-- TreeView panel listing wast.db components and their functions
+- TreeView panel listing wast.json components and their functions
 - Virtual documents (`wast://` scheme) for editing partial components
 - Real-time LSP diagnostics via syntax-plugin from-text
-- Save flow: from-text → merge → write to wast.db
-- fs.watch for external wast.db change detection
+- Save flow: from-text → merge → write to wast.json
+- fs.watch for external wast.json change detection
 - Session conflict handling
 
 ## User Settings
@@ -26,12 +27,12 @@ VS Code extension providing TreeView navigation, virtual document editing, LSP d
 ## Status
 
 Core features implemented (direct file access, no wasm runtime):
-- TreeView panel listing wast.db components and their functions
+- TreeView panel listing wast.json components and their functions
 - Virtual documents (`wast://` scheme) for viewing component functions
-- fs.watch for external wast.db change detection with TreeView refresh
+- fs.watch for external wast.json change detection with TreeView refresh
 - Settings for symsLanguage and syntaxPlugin
 
 Not yet implemented (requires wasm component runtime):
 - Real-time LSP diagnostics via syntax-plugin from-text
-- Save flow: from-text -> merge -> write to wast.db
+- Save flow: from-text -> merge -> write to wast.json
 - Session conflict handling

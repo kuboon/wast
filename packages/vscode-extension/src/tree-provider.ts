@@ -1,7 +1,7 @@
 /**
  * TreeView data provider for WAST components.
  *
- * Scans workspace folders for directories containing wast.db, then shows
+ * Scans workspace folders for directories containing wast.json, then shows
  * each component as a parent node with its functions as children.
  */
 
@@ -99,18 +99,18 @@ export class WastTreeProvider implements vscode.TreeDataProvider<WastTreeItem> {
   }
 
   /**
-   * Recursively scan for directories containing wast.db, up to a depth limit.
+   * Recursively scan for directories containing wast.json, up to a depth limit.
    */
   private scanDir(dir: string, lang: string, depth: number): void {
     if (depth > 5) return;
 
-    const dbPath = path.join(dir, "wast.db");
+    const dbPath = path.join(dir, "wast.json");
     if (fs.existsSync(dbPath)) {
       const component = readComponent(dir, lang);
       if (component) {
         this.components.push(component);
       }
-      // Don't recurse into component dirs (wast.db marks a leaf)
+      // Don't recurse into component dirs (wast.json marks a leaf)
       return;
     }
 

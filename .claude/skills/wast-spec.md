@@ -5,18 +5,22 @@
 WAST = intermediate layer between text files and WASM Components.
 
 ```
-text <──syntax plugin──> partial WastComponent <──partial manager──> full WastComponent <──file manager──> [wast.db, world.wit, syms]
+text <──syntax plugin──> partial WastComponent <──partial manager──> full WastComponent <──file manager──> [wast.json, world.wit, syms]
+[wast.json, world.wit] --compiler--> wasm component
 ```
 
 ## File Structure
 
 ```
 component-name/
-  wast.db          # Logic (SQLite format)
+  wast.json        # Logic (row-oriented JSON; SQLite format as wast.db planned)
   world.wit        # Interface definition (source of truth)
   syms.ja.yaml     # Japanese display names
   syms.en.yaml     # English display names
 ```
+
+- `wast.json` is the **current** storage format. Structure is row-oriented so each func/type is a direct SQLite row when migration lands.
+- `wast.db` (SQLite) is the **future** format. Same logical schema plus indexed `call_edges` table for caller/callee traversal.
 
 ## WastComponent (Central Type)
 
@@ -62,9 +66,9 @@ syms are NOT needed for wasm generation.
 
 | Command | Description |
 |---|---|
-| `wast bindgen <dir>` | Generate wast.db from world.wit |
+| `wast bindgen <dir>` | Generate wast.json from world.wit |
 | `wast extract <dir> <uid...>` | Extract partial as text → stdout |
-| `wast merge <dir>` | Merge text from stdin → wast.db |
+| `wast merge <dir>` | Merge text from stdin → wast.json |
 | `wast fmt` | Format/validate wast text |
 | `wast diff <dir-a> <dir-b>` | Diff via difftastic |
 | `wast syms <dir> <uid> <name>` | Set display name |
