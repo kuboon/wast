@@ -4,9 +4,17 @@
 //! `LocalGet`, `Const`, `Arithmetic`, `Compare`, `Return`, `Nop`. Later
 //! stages will grow this module (calls, control flow, WIT types…).
 
-use wast_pattern_analyzer::{ArithOp, CompareOp, Instruction};
+use std::collections::HashMap;
 
+use wast_pattern_analyzer::{ArithOp, CompareOp, Instruction};
+use wast_types::WastFunc;
+
+use crate::emit::mangle;
 use crate::error::CompileError;
+
+/// Map from a callable func's uid to its definition. Used by `emit_body` to
+/// resolve `Instruction::Call` targets (param order + return type).
+pub type FuncMap<'a> = HashMap<String, &'a WastFunc>;
 
 /// Map a project-WIT primitive type name (`u32`/`i32`/…) to the WIT ABI
 /// token accepted in a Component's lifted function signature. The project
@@ -59,14 +67,16 @@ fn is_signed(ty: &str) -> bool {
 /// `params` is the ordered list of `(name, wit_type)` pairs matching
 /// `LocalGet { uid }` lookups. `result_ty` is the function's return type
 /// (used as the default inference hint for ambiguous top-level `Const`).
+/// `func_map` resolves `Instruction::Call` target uids to their signatures.
 pub fn emit_body(
     instructions: &[Instruction],
     params: &[(String, String)],
     result_ty: Option<&str>,
+    func_map: &FuncMap,
 ) -> Result<String, CompileError> {
     let mut out = String::new();
     for instr in instructions {
-        emit_instr(instr, result_ty, params, &mut out)?;
+        emit_instr(instr, result_ty, params, func_map, &mut out)?;
     }
     Ok(out)
 }
@@ -77,6 +87,7 @@ fn emit_instr(
     instr: &Instruction,
     expected: Option<&str>,
     params: &[(String, String)],
+    func_map: &FuncMap,
     out: &mut String,
 ) -> Result<(), CompileError> {
     match instr {
@@ -105,23 +116,39 @@ fn emit_instr(
         Instruction::Arithmetic { op, lhs, rhs } => {
             let ty = expected
                 .map(str::to_string)
-                .or_else(|| infer_wit_type(lhs, params))
-                .or_else(|| infer_wit_type(rhs, params))
+                .or_else(|| infer_wit_type(lhs, params, func_map))
+                .or_else(|| infer_wit_type(rhs, params, func_map))
                 .unwrap_or_else(|| "i32".to_string());
-            emit_instr(lhs, Some(&ty), params, out)?;
-            emit_instr(rhs, Some(&ty), params, out)?;
+            emit_instr(lhs, Some(&ty), params, func_map, out)?;
+            emit_instr(rhs, Some(&ty), params, func_map, out)?;
             out.push_str(&format!("      {}\n", arith_op(op.clone(), &ty)?));
         }
         Instruction::Compare { op, lhs, rhs } => {
             // Compare pushes i32 regardless of operand type, so `expected`
             // only tells us the final boolean width (always i32) — operand
             // type must be inferred from the operands themselves.
-            let operand_ty = infer_wit_type(lhs, params)
-                .or_else(|| infer_wit_type(rhs, params))
+            let operand_ty = infer_wit_type(lhs, params, func_map)
+                .or_else(|| infer_wit_type(rhs, params, func_map))
                 .unwrap_or_else(|| "i32".to_string());
-            emit_instr(lhs, Some(&operand_ty), params, out)?;
-            emit_instr(rhs, Some(&operand_ty), params, out)?;
+            emit_instr(lhs, Some(&operand_ty), params, func_map, out)?;
+            emit_instr(rhs, Some(&operand_ty), params, func_map, out)?;
             out.push_str(&format!("      {}\n", compare_op(op.clone(), &operand_ty)?));
+        }
+        Instruction::Call { func_uid, args } => {
+            let target = func_map.get(func_uid).ok_or_else(|| {
+                CompileError::InvalidInput(format!("Call references unknown func {func_uid:?}"))
+            })?;
+            // Push args in the target's declared param order (callers can
+            // supply them in any order since args are name-keyed pairs).
+            for (pname, pty) in &target.params {
+                let (_, arg_instr) = args.iter().find(|(n, _)| n == pname).ok_or_else(|| {
+                    CompileError::InvalidInput(format!(
+                        "Call to {func_uid:?} missing arg for param {pname:?}"
+                    ))
+                })?;
+                emit_instr(arg_instr, Some(pty), params, func_map, out)?;
+            }
+            out.push_str(&format!("      call ${}\n", mangle(func_uid)));
         }
         other => {
             return Err(CompileError::Unsupported(format!(
@@ -134,17 +161,22 @@ fn emit_instr(
 
 /// Best-effort WIT-type inference for an instruction's stack result.
 /// Returns `None` when the type is ambiguous (e.g. bare `Const`).
-fn infer_wit_type(instr: &Instruction, params: &[(String, String)]) -> Option<String> {
+fn infer_wit_type(
+    instr: &Instruction,
+    params: &[(String, String)],
+    func_map: &FuncMap,
+) -> Option<String> {
     match instr {
         Instruction::LocalGet { uid } => params
             .iter()
             .find(|(n, _)| n == uid)
             .map(|(_, ty)| ty.clone()),
         Instruction::Arithmetic { lhs, rhs, .. } => {
-            infer_wit_type(lhs, params).or_else(|| infer_wit_type(rhs, params))
+            infer_wit_type(lhs, params, func_map).or_else(|| infer_wit_type(rhs, params, func_map))
         }
         Instruction::Compare { .. } => Some("bool".to_string()),
         Instruction::IsErr { .. } => Some("bool".to_string()),
+        Instruction::Call { func_uid, .. } => func_map.get(func_uid).and_then(|f| f.result.clone()),
         _ => None,
     }
 }
