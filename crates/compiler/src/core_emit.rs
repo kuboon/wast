@@ -1,8 +1,9 @@
 //! Core WASM instruction emission from WAST IR.
 //!
 //! Scope: numeric primitives (i32/i64/u32/u64/f32/f64/bool/char) with
-//! `LocalGet`, `Const`, `Arithmetic`, `Compare`, `Return`, `Nop`. Later
-//! stages will grow this module (calls, control flow, WIT types…).
+//! `LocalGet`/`LocalSet`, `Const`, `Arithmetic`, `Compare`, `Call` (internal),
+//! `If`/`Block`/`Loop`/`Br`/`BrIf`, `Return`, `Nop`. Later stages will add
+//! WIT imports, option/result, string, lists.
 
 use std::collections::HashMap;
 
@@ -62,21 +63,115 @@ fn is_signed(ty: &str) -> bool {
     matches!(ty, "i32" | "i64")
 }
 
+/// Locals introduced by `LocalSet` instructions (in first-assignment order),
+/// paired with their inferred WIT type.
+pub fn collect_locals(
+    body: &[Instruction],
+    params: &[(String, String)],
+    func_map: &FuncMap,
+) -> Vec<(String, String)> {
+    let mut locals: Vec<(String, String)> = Vec::new();
+    let mut seen: std::collections::HashSet<String> =
+        params.iter().map(|(n, _)| n.clone()).collect();
+    collect_locals_rec(body, params, func_map, &mut locals, &mut seen);
+    locals
+}
+
+fn collect_locals_rec(
+    body: &[Instruction],
+    params: &[(String, String)],
+    func_map: &FuncMap,
+    locals: &mut Vec<(String, String)>,
+    seen: &mut std::collections::HashSet<String>,
+) {
+    for instr in body {
+        match instr {
+            Instruction::LocalSet { uid, value } => {
+                if !seen.contains(uid) {
+                    let ty = infer_wit_type(value, params, func_map)
+                        .unwrap_or_else(|| "i32".to_string());
+                    seen.insert(uid.clone());
+                    locals.push((uid.clone(), ty));
+                }
+                collect_locals_rec(
+                    std::slice::from_ref(value.as_ref()),
+                    params,
+                    func_map,
+                    locals,
+                    seen,
+                );
+            }
+            Instruction::Block { body, .. } | Instruction::Loop { body, .. } => {
+                collect_locals_rec(body, params, func_map, locals, seen);
+            }
+            Instruction::If {
+                condition,
+                then_body,
+                else_body,
+            } => {
+                collect_locals_rec(
+                    std::slice::from_ref(condition.as_ref()),
+                    params,
+                    func_map,
+                    locals,
+                    seen,
+                );
+                collect_locals_rec(then_body, params, func_map, locals, seen);
+                collect_locals_rec(else_body, params, func_map, locals, seen);
+            }
+            Instruction::BrIf { condition, .. } => {
+                collect_locals_rec(
+                    std::slice::from_ref(condition.as_ref()),
+                    params,
+                    func_map,
+                    locals,
+                    seen,
+                );
+            }
+            Instruction::Call { args, .. } => {
+                for (_, arg) in args {
+                    collect_locals_rec(std::slice::from_ref(arg), params, func_map, locals, seen);
+                }
+            }
+            Instruction::Arithmetic { lhs, rhs, .. } | Instruction::Compare { lhs, rhs, .. } => {
+                collect_locals_rec(
+                    std::slice::from_ref(lhs.as_ref()),
+                    params,
+                    func_map,
+                    locals,
+                    seen,
+                );
+                collect_locals_rec(
+                    std::slice::from_ref(rhs.as_ref()),
+                    params,
+                    func_map,
+                    locals,
+                    seen,
+                );
+            }
+            _ => {}
+        }
+    }
+}
+
 /// Emit the core WAT body text for a function.
 ///
 /// `params` is the ordered list of `(name, wit_type)` pairs matching
 /// `LocalGet { uid }` lookups. `result_ty` is the function's return type
 /// (used as the default inference hint for ambiguous top-level `Const`).
 /// `func_map` resolves `Instruction::Call` target uids to their signatures.
+/// `locals` are declared locals (after params) that `LocalSet` can assign.
 pub fn emit_body(
     instructions: &[Instruction],
     params: &[(String, String)],
+    locals: &[(String, String)],
     result_ty: Option<&str>,
     func_map: &FuncMap,
 ) -> Result<String, CompileError> {
+    let scope: Vec<(String, String)> = params.iter().chain(locals.iter()).cloned().collect();
     let mut out = String::new();
     for instr in instructions {
-        emit_instr(instr, result_ty, params, func_map, &mut out)?;
+        emit_instr(instr, result_ty, &scope, func_map, &mut out)?;
     }
     Ok(out)
 }
@@ -95,9 +190,7 @@ fn emit_instr(
         Instruction::Return => out.push_str("      return\n"),
         Instruction::LocalGet { uid } => {
             let idx = params.iter().position(|(n, _)| n == uid).ok_or_else(|| {
-                CompileError::InvalidInput(format!(
-                    "LocalGet references unknown local {uid:?}; only params are supported"
-                ))
+                CompileError::InvalidInput(format!("LocalGet references unknown local {uid:?}"))
             })?;
             out.push_str(&format!("      local.get {idx}\n"));
         }
@@ -150,6 +243,67 @@ fn emit_instr(
             }
             out.push_str(&format!("      call ${}\n", mangle(func_uid)));
         }
+        Instruction::LocalSet { uid, value } => {
+            let (idx, (_, ty)) = params
+                .iter()
+                .enumerate()
+                .find(|(_, (n, _))| n == uid)
+                .ok_or_else(|| {
+                    CompileError::InvalidInput(format!("LocalSet references unknown local {uid:?}"))
+                })?;
+            emit_instr(value, Some(ty), params, func_map, out)?;
+            out.push_str(&format!("      local.set {idx}\n"));
+        }
+        Instruction::If {
+            condition,
+            then_body,
+            else_body,
+        } => {
+            emit_instr(condition, None, params, func_map, out)?;
+            // If the consumer expects a value AND both branches are populated,
+            // emit a typed if — otherwise plain statement form.
+            let emit_typed = expected.is_some() && !else_body.is_empty();
+            let result_clause = if emit_typed {
+                format!(" (result {})", wit_to_core(expected.unwrap())?)
+            } else {
+                String::new()
+            };
+            out.push_str(&format!("      if{result_clause}\n"));
+            let child_expected = if emit_typed { expected } else { None };
+            for i in then_body {
+                emit_instr(i, child_expected, params, func_map, out)?;
+            }
+            if !else_body.is_empty() {
+                out.push_str("      else\n");
+                for i in else_body {
+                    emit_instr(i, child_expected, params, func_map, out)?;
+                }
+            }
+            out.push_str("      end\n");
+        }
+        Instruction::Block { label, body } => {
+            let lbl = label_clause(label.as_deref());
+            out.push_str(&format!("      block{lbl}\n"));
+            for i in body {
+                emit_instr(i, None, params, func_map, out)?;
+            }
+            out.push_str("      end\n");
+        }
+        Instruction::Loop { label, body } => {
+            let lbl = label_clause(label.as_deref());
+            out.push_str(&format!("      loop{lbl}\n"));
+            for i in body {
+                emit_instr(i, None, params, func_map, out)?;
+            }
+            out.push_str("      end\n");
+        }
+        Instruction::Br { label } => {
+            out.push_str(&format!("      br ${}\n", mangle(label)));
+        }
+        Instruction::BrIf { label, condition } => {
+            emit_instr(condition, None, params, func_map, out)?;
+            out.push_str(&format!("      br_if ${}\n", mangle(label)));
+        }
         other => {
             return Err(CompileError::Unsupported(format!(
                 "instruction {other:?} not yet supported"
@@ -157,6 +311,13 @@ fn emit_instr(
         }
     }
     Ok(())
+}
+
+fn label_clause(label: Option<&str>) -> String {
+    match label {
+        Some(l) if !l.is_empty() => format!(" ${}", mangle(l)),
+        _ => String::new(),
+    }
 }
 
 /// Best-effort WIT-type inference for an instruction's stack result.

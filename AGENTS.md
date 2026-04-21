@@ -30,7 +30,7 @@ See [crates/file-manager/PLAN.md](crates/file-manager/PLAN.md) for the SQLite mi
 | file-manager | `crates/file-manager/` | **Done** (JSON, row-oriented) | SQLite migration |
 | file-manager-hosted | `crates/file-manager-hosted/` | **Done** (JSON, row-oriented) | — |
 | wast-types (shared serde types) | `crates/wast-types/` | **Done** | — |
-| compiler | `crates/compiler/` | **v0.3 done** (numeric + internal `Call`) | Imported Call → control flow → option/result → string |
+| compiler | `crates/compiler/` | **v0.4 done** (numeric + internal `Call` + control flow + locals) | Imported Call → option/result → string |
 | pattern-analyzer | `crates/syntax-plugin/internal/pattern-analyzer/` | **Done** | — |
 | raw syntax | `crates/syntax-plugin/raw/` | **Done** | — |
 | ruby-like syntax | `crates/syntax-plugin/ruby-like/` | **Partial** | `from_text` body parsing, body roundtrip tests |
@@ -52,7 +52,8 @@ See [crates/file-manager/PLAN.md](crates/file-manager/PLAN.md) for the SQLite mi
 - [x] v0.1: emit `u32 -> u32` identity function, verify via Rust `wasmtime::component` harness
 - [x] v0.2: numeric primitives — `Const`, `Arithmetic` (add/sub/mul/div with signedness), `Compare` (eq/ne/lt/le/gt/ge with signedness) across i32/i64/u32/u64/f32/f64/bool; type-inferred `Const`; `s32`/`s64` mapping for lifted signatures
 - [x] v0.3: `Call` to internal funcs — single core module houses all internal + exported funcs, callers push args in the callee's declared param order (callers may pass args by name in any order)
-- [ ] Roadmap: imported `Call` (canon lower for WIT imports) → control flow → `option/result` → `string` (requires `cabi_realloc`) → `list/record/variant/tuple/resource`
+- [x] v0.4: control flow (`If`/`Else` with optional typed result, `Block`/`Loop`, `Br`/`BrIf`) + `LocalSet` with first-assignment local declaration (locals collected from body, emitted as `(local …)` after params)
+- [ ] Roadmap: imported `Call` (canon lower for WIT imports) → `option/result` → `string` (requires `cabi_realloc`) → `list/record/variant/tuple/resource`
 - See [crates/compiler/PLAN.md](crates/compiler/PLAN.md) for full context
 
 ### file-manager (`crates/file-manager/src/lib.rs`)

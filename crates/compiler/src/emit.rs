@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use wast_pattern_analyzer::deserialize_body;
 use wast_types::{FuncSource, WastDb, WastFuncRow};
 
-use crate::core_emit::{FuncMap, emit_body, wit_abi_name, wit_to_core};
+use crate::core_emit::{FuncMap, collect_locals, emit_body, wit_abi_name, wit_to_core};
 use crate::error::CompileError;
 
 /// Fixed Component WAT for the v0 WASI CLI empty-run case.
@@ -121,9 +121,18 @@ fn emit_core_func(row: &WastFuncRow, func_map: &FuncMap) -> Result<String, Compi
             .map_err(|e| CompileError::InvalidInput(format!("body decode failed: {e}")))?,
         _ => Vec::new(),
     };
+
+    let locals = collect_locals(&body_instr, &row.func.params, func_map);
+    let locals_decl = locals
+        .iter()
+        .map(|(_, ty)| wit_to_core(ty).map(|t| format!("(local {t})")))
+        .collect::<Result<Vec<_>, _>>()?
+        .join(" ");
+
     let body_wat = emit_body(
         &body_instr,
         &row.func.params,
+        &locals,
         row.func.result.as_deref(),
         func_map,
     )?;
@@ -133,8 +142,14 @@ fn emit_core_func(row: &WastFuncRow, func_map: &FuncMap) -> Result<String, Compi
         _ => String::new(),
     };
 
+    let locals_clause = if locals_decl.is_empty() {
+        String::new()
+    } else {
+        format!(" {locals_decl}")
+    };
+
     Ok(format!(
-        "    (func ${mangled}{export_clause} {core_params} {core_result}\n{body_wat}    )\n"
+        "    (func ${mangled}{export_clause} {core_params} {core_result}{locals_clause}\n{body_wat}    )\n"
     ))
 }
 
