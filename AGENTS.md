@@ -29,8 +29,8 @@ See [crates/file-manager/PLAN.md](crates/file-manager/PLAN.md) for the SQLite mi
 | partial-manager | `crates/partial-manager/` | **Done** | — |
 | file-manager | `crates/file-manager/` | **Done** (JSON, row-oriented) | SQLite migration |
 | file-manager-hosted | `crates/file-manager-hosted/` | **Done** (JSON, row-oriented) | — |
-| wast-types (shared serde types) | `crates/wast-types/` | **Not started** | Extract from file-manager + file-manager-hosted |
-| compiler | `crates/compiler/` | **Not started** (top priority) | Full v0 (WASI CLI empty run) → v0.1 (`u32 -> u32`) → types/calls/control-flow |
+| wast-types (shared serde types) | `crates/wast-types/` | **Done** | — |
+| compiler | `crates/compiler/` | **v0.2 done** (numeric types: Const/Arithmetic/Compare across i32/i64/u32/u64/f32/f64/bool) | Call → control flow → option/result → string |
 | pattern-analyzer | `crates/syntax-plugin/internal/pattern-analyzer/` | **Done** | — |
 | raw syntax | `crates/syntax-plugin/raw/` | **Done** | — |
 | ruby-like syntax | `crates/syntax-plugin/ruby-like/` | **Partial** | `from_text` body parsing, body roundtrip tests |
@@ -46,11 +46,12 @@ See [crates/file-manager/PLAN.md](crates/file-manager/PLAN.md) for the SQLite mi
 - [x] **merge**: Validate that all func references in partial's internal funcs exist in full (missing_dependency check)
 
 ### compiler (`crates/compiler/`) — top priority
-- [ ] Extract shared serde types into new `crates/wast-types/` crate (prerequisite; both file-manager crates and compiler depend on it)
-- [ ] Scaffold `crates/compiler/` as plain rlib (no `-hosted` suffix; future wasm-component migration is mechanical)
-- [ ] v0: emit fixed Component WAT for WASI CLI empty run (`wasi:cli/run@0.2.0`), verify with `wasmtime run` → exit 0
-- [ ] v0.1: emit `u32 -> u32` identity function, verify via Rust `wasmtime::component` harness
-- [ ] Roadmap: numeric types → `Call` → control flow → `option/result` → `string` (requires `cabi_realloc`) → `list/record/variant/tuple/resource`
+- [x] Extract shared serde types into new `crates/wast-types/` crate (prerequisite; both file-manager crates and compiler depend on it)
+- [x] Scaffold `crates/compiler/` as plain rlib (no `-hosted` suffix; future wasm-component migration is mechanical)
+- [x] v0: emit fixed Component WAT for WASI CLI empty run (`wasi:cli/run@0.2.0`), verify via `wasmtime::component::Command` → `Ok(())`
+- [x] v0.1: emit `u32 -> u32` identity function, verify via Rust `wasmtime::component` harness
+- [x] v0.2: numeric primitives — `Const`, `Arithmetic` (add/sub/mul/div with signedness), `Compare` (eq/ne/lt/le/gt/ge with signedness) across i32/i64/u32/u64/f32/f64/bool; type-inferred `Const`; `s32`/`s64` mapping for lifted signatures
+- [ ] Roadmap: `Call` → control flow → `option/result` → `string` (requires `cabi_realloc`) → `list/record/variant/tuple/resource`
 - See [crates/compiler/PLAN.md](crates/compiler/PLAN.md) for full context
 
 ### file-manager (`crates/file-manager/src/lib.rs`)

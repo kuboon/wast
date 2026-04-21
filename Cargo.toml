@@ -1,6 +1,7 @@
 [workspace]
 resolver = "2"
 members = [
+    "crates/compiler",
     "crates/file-manager",
     "crates/file-manager-hosted",
     "crates/partial-manager",
@@ -9,6 +10,7 @@ members = [
     "crates/syntax-plugin/rust-like",
     "crates/syntax-plugin/internal/pattern-analyzer",
     "crates/syntax-plugin/raw",
+    "crates/wast-types",
 ]
 
 [workspace.package]

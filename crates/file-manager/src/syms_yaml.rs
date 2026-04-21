@@ -5,7 +5,7 @@
 //! (which has trouble on wasm32-wasip1) and instead implement a small bespoke
 //! parser/writer for this known schema.
 
-use crate::serde_types::{SymEntry, Syms};
+use wast_types::{SymEntry, Syms};
 
 /// Parse a syms YAML string into a `Syms` struct.
 pub fn parse_syms_yaml(input: &str) -> Result<Syms, String> {

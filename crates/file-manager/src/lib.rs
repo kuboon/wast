@@ -2,7 +2,6 @@
 #[rustfmt::skip]
 mod bindings;
 
-mod serde_types;
 mod syms_yaml;
 mod wit_parser;
 
@@ -37,99 +36,99 @@ fn err_at(msg: impl Into<String>, loc: impl Into<String>) -> WastError {
 // Conversions: bindings <-> serde mirror types
 // ---------------------------------------------------------------------------
 
-fn prim_to_serde(p: &PrimitiveType) -> serde_types::PrimitiveType {
+fn prim_to_serde(p: &PrimitiveType) -> wast_types::PrimitiveType {
     match p {
-        PrimitiveType::U32 => serde_types::PrimitiveType::U32,
-        PrimitiveType::U64 => serde_types::PrimitiveType::U64,
-        PrimitiveType::I32 => serde_types::PrimitiveType::I32,
-        PrimitiveType::I64 => serde_types::PrimitiveType::I64,
-        PrimitiveType::F32 => serde_types::PrimitiveType::F32,
-        PrimitiveType::F64 => serde_types::PrimitiveType::F64,
-        PrimitiveType::Bool => serde_types::PrimitiveType::Bool,
-        PrimitiveType::Char => serde_types::PrimitiveType::Char,
-        PrimitiveType::String => serde_types::PrimitiveType::String,
+        PrimitiveType::U32 => wast_types::PrimitiveType::U32,
+        PrimitiveType::U64 => wast_types::PrimitiveType::U64,
+        PrimitiveType::I32 => wast_types::PrimitiveType::I32,
+        PrimitiveType::I64 => wast_types::PrimitiveType::I64,
+        PrimitiveType::F32 => wast_types::PrimitiveType::F32,
+        PrimitiveType::F64 => wast_types::PrimitiveType::F64,
+        PrimitiveType::Bool => wast_types::PrimitiveType::Bool,
+        PrimitiveType::Char => wast_types::PrimitiveType::Char,
+        PrimitiveType::String => wast_types::PrimitiveType::String,
     }
 }
 
-fn prim_from_serde(p: &serde_types::PrimitiveType) -> PrimitiveType {
+fn prim_from_serde(p: &wast_types::PrimitiveType) -> PrimitiveType {
     match p {
-        serde_types::PrimitiveType::U32 => PrimitiveType::U32,
-        serde_types::PrimitiveType::U64 => PrimitiveType::U64,
-        serde_types::PrimitiveType::I32 => PrimitiveType::I32,
-        serde_types::PrimitiveType::I64 => PrimitiveType::I64,
-        serde_types::PrimitiveType::F32 => PrimitiveType::F32,
-        serde_types::PrimitiveType::F64 => PrimitiveType::F64,
-        serde_types::PrimitiveType::Bool => PrimitiveType::Bool,
-        serde_types::PrimitiveType::Char => PrimitiveType::Char,
-        serde_types::PrimitiveType::String => PrimitiveType::String,
+        wast_types::PrimitiveType::U32 => PrimitiveType::U32,
+        wast_types::PrimitiveType::U64 => PrimitiveType::U64,
+        wast_types::PrimitiveType::I32 => PrimitiveType::I32,
+        wast_types::PrimitiveType::I64 => PrimitiveType::I64,
+        wast_types::PrimitiveType::F32 => PrimitiveType::F32,
+        wast_types::PrimitiveType::F64 => PrimitiveType::F64,
+        wast_types::PrimitiveType::Bool => PrimitiveType::Bool,
+        wast_types::PrimitiveType::Char => PrimitiveType::Char,
+        wast_types::PrimitiveType::String => PrimitiveType::String,
     }
 }
 
-fn wit_type_to_serde(t: &WitType) -> serde_types::WitType {
+fn wit_type_to_serde(t: &WitType) -> wast_types::WitType {
     match t {
-        WitType::Primitive(p) => serde_types::WitType::Primitive(prim_to_serde(p)),
-        WitType::Option(r) => serde_types::WitType::Option(r.clone()),
-        WitType::Result((a, b)) => serde_types::WitType::Result(a.clone(), b.clone()),
-        WitType::List(r) => serde_types::WitType::List(r.clone()),
-        WitType::Record(fields) => serde_types::WitType::Record(fields.clone()),
-        WitType::Variant(cases) => serde_types::WitType::Variant(cases.clone()),
-        WitType::Tuple(elems) => serde_types::WitType::Tuple(elems.clone()),
+        WitType::Primitive(p) => wast_types::WitType::Primitive(prim_to_serde(p)),
+        WitType::Option(r) => wast_types::WitType::Option(r.clone()),
+        WitType::Result((a, b)) => wast_types::WitType::Result(a.clone(), b.clone()),
+        WitType::List(r) => wast_types::WitType::List(r.clone()),
+        WitType::Record(fields) => wast_types::WitType::Record(fields.clone()),
+        WitType::Variant(cases) => wast_types::WitType::Variant(cases.clone()),
+        WitType::Tuple(elems) => wast_types::WitType::Tuple(elems.clone()),
     }
 }
 
-fn wit_type_from_serde(t: &serde_types::WitType) -> WitType {
+fn wit_type_from_serde(t: &wast_types::WitType) -> WitType {
     match t {
-        serde_types::WitType::Primitive(p) => WitType::Primitive(prim_from_serde(p)),
-        serde_types::WitType::Option(r) => WitType::Option(r.clone()),
-        serde_types::WitType::Result(a, b) => WitType::Result((a.clone(), b.clone())),
-        serde_types::WitType::List(r) => WitType::List(r.clone()),
-        serde_types::WitType::Record(fields) => WitType::Record(fields.clone()),
-        serde_types::WitType::Variant(cases) => WitType::Variant(cases.clone()),
-        serde_types::WitType::Tuple(elems) => WitType::Tuple(elems.clone()),
+        wast_types::WitType::Primitive(p) => WitType::Primitive(prim_from_serde(p)),
+        wast_types::WitType::Option(r) => WitType::Option(r.clone()),
+        wast_types::WitType::Result(a, b) => WitType::Result((a.clone(), b.clone())),
+        wast_types::WitType::List(r) => WitType::List(r.clone()),
+        wast_types::WitType::Record(fields) => WitType::Record(fields.clone()),
+        wast_types::WitType::Variant(cases) => WitType::Variant(cases.clone()),
+        wast_types::WitType::Tuple(elems) => WitType::Tuple(elems.clone()),
     }
 }
 
-fn func_source_to_serde(s: &FuncSource) -> serde_types::FuncSource {
+fn func_source_to_serde(s: &FuncSource) -> wast_types::FuncSource {
     match s {
-        FuncSource::Internal(id) => serde_types::FuncSource::Internal(id.clone()),
-        FuncSource::Imported(id) => serde_types::FuncSource::Imported(id.clone()),
-        FuncSource::Exported(id) => serde_types::FuncSource::Exported(id.clone()),
+        FuncSource::Internal(id) => wast_types::FuncSource::Internal(id.clone()),
+        FuncSource::Imported(id) => wast_types::FuncSource::Imported(id.clone()),
+        FuncSource::Exported(id) => wast_types::FuncSource::Exported(id.clone()),
     }
 }
 
-fn func_source_from_serde(s: &serde_types::FuncSource) -> FuncSource {
+fn func_source_from_serde(s: &wast_types::FuncSource) -> FuncSource {
     match s {
-        serde_types::FuncSource::Internal(id) => FuncSource::Internal(id.clone()),
-        serde_types::FuncSource::Imported(id) => FuncSource::Imported(id.clone()),
-        serde_types::FuncSource::Exported(id) => FuncSource::Exported(id.clone()),
+        wast_types::FuncSource::Internal(id) => FuncSource::Internal(id.clone()),
+        wast_types::FuncSource::Imported(id) => FuncSource::Imported(id.clone()),
+        wast_types::FuncSource::Exported(id) => FuncSource::Exported(id.clone()),
     }
 }
 
-fn type_source_to_serde(s: &TypeSource) -> serde_types::TypeSource {
+fn type_source_to_serde(s: &TypeSource) -> wast_types::TypeSource {
     match s {
-        TypeSource::Internal(id) => serde_types::TypeSource::Internal(id.clone()),
-        TypeSource::Imported(id) => serde_types::TypeSource::Imported(id.clone()),
-        TypeSource::Exported(id) => serde_types::TypeSource::Exported(id.clone()),
+        TypeSource::Internal(id) => wast_types::TypeSource::Internal(id.clone()),
+        TypeSource::Imported(id) => wast_types::TypeSource::Imported(id.clone()),
+        TypeSource::Exported(id) => wast_types::TypeSource::Exported(id.clone()),
     }
 }
 
-fn type_source_from_serde(s: &serde_types::TypeSource) -> TypeSource {
+fn type_source_from_serde(s: &wast_types::TypeSource) -> TypeSource {
     match s {
-        serde_types::TypeSource::Internal(id) => TypeSource::Internal(id.clone()),
-        serde_types::TypeSource::Imported(id) => TypeSource::Imported(id.clone()),
-        serde_types::TypeSource::Exported(id) => TypeSource::Exported(id.clone()),
+        wast_types::TypeSource::Internal(id) => TypeSource::Internal(id.clone()),
+        wast_types::TypeSource::Imported(id) => TypeSource::Imported(id.clone()),
+        wast_types::TypeSource::Exported(id) => TypeSource::Exported(id.clone()),
     }
 }
 
 /// Convert WastComponent to on-disk format (no syms — those go in syms.*.yaml).
-fn component_to_db(c: &WastComponent) -> serde_types::WastDb {
-    serde_types::WastDb {
+fn component_to_db(c: &WastComponent) -> wast_types::WastDb {
+    wast_types::WastDb {
         funcs: c
             .funcs
             .iter()
-            .map(|(uid, f)| serde_types::WastFuncRow {
+            .map(|(uid, f)| wast_types::WastFuncRow {
                 uid: uid.clone(),
-                func: serde_types::WastFunc {
+                func: wast_types::WastFunc {
                     source: func_source_to_serde(&f.source),
                     params: f.params.clone(),
                     result: f.result.clone(),
@@ -140,9 +139,9 @@ fn component_to_db(c: &WastComponent) -> serde_types::WastDb {
         types: c
             .types
             .iter()
-            .map(|(uid, td)| serde_types::WastTypeRow {
+            .map(|(uid, td)| wast_types::WastTypeRow {
                 uid: uid.clone(),
-                def: serde_types::WastTypeDef {
+                def: wast_types::WastTypeDef {
                     source: type_source_to_serde(&td.source),
                     definition: wit_type_to_serde(&td.definition),
                 },
@@ -152,7 +151,7 @@ fn component_to_db(c: &WastComponent) -> serde_types::WastDb {
 }
 
 /// Convert on-disk format to WastComponent (syms empty — loaded separately from YAML).
-fn component_from_db(db: &serde_types::WastDb) -> WastComponent {
+fn component_from_db(db: &wast_types::WastDb) -> WastComponent {
     WastComponent {
         funcs: db
             .funcs
@@ -210,15 +209,15 @@ fn syms_path(path: &str, lang: &str) -> String {
 // Syms file I/O
 // ---------------------------------------------------------------------------
 
-fn read_syms(path: &str, lang: &str) -> serde_types::Syms {
+fn read_syms(path: &str, lang: &str) -> wast_types::Syms {
     let p = syms_path(path, lang);
     match std::fs::read_to_string(&p) {
-        Ok(data) => syms_yaml::parse_syms_yaml(&data).unwrap_or_else(|_| serde_types::Syms {
+        Ok(data) => syms_yaml::parse_syms_yaml(&data).unwrap_or_else(|_| wast_types::Syms {
             wit_syms: Vec::new(),
             internal: Vec::new(),
             local: Vec::new(),
         }),
-        Err(_) => serde_types::Syms {
+        Err(_) => wast_types::Syms {
             wit_syms: Vec::new(),
             internal: Vec::new(),
             local: Vec::new(),
@@ -226,7 +225,7 @@ fn read_syms(path: &str, lang: &str) -> serde_types::Syms {
     }
 }
 
-fn write_syms(path: &str, lang: &str, syms: &serde_types::Syms) -> Result<(), WastError> {
+fn write_syms(path: &str, lang: &str, syms: &wast_types::Syms) -> Result<(), WastError> {
     let p = syms_path(path, lang);
     let yaml = syms_yaml::write_syms_yaml(syms);
     std::fs::write(&p, yaml.as_bytes())
@@ -234,13 +233,13 @@ fn write_syms(path: &str, lang: &str, syms: &serde_types::Syms) -> Result<(), Wa
     Ok(())
 }
 
-fn syms_to_serde(syms: &Syms) -> serde_types::Syms {
-    serde_types::Syms {
+fn syms_to_serde(syms: &Syms) -> wast_types::Syms {
+    wast_types::Syms {
         wit_syms: syms.wit_syms.clone(),
         internal: syms
             .internal
             .iter()
-            .map(|e| serde_types::SymEntry {
+            .map(|e| wast_types::SymEntry {
                 uid: e.uid.clone(),
                 display_name: e.display_name.clone(),
             })
@@ -248,7 +247,7 @@ fn syms_to_serde(syms: &Syms) -> serde_types::Syms {
         local: syms
             .local
             .iter()
-            .map(|e| serde_types::SymEntry {
+            .map(|e| wast_types::SymEntry {
                 uid: e.uid.clone(),
                 display_name: e.display_name.clone(),
             })
@@ -256,7 +255,7 @@ fn syms_to_serde(syms: &Syms) -> serde_types::Syms {
     }
 }
 
-fn syms_from_serde(s: &serde_types::Syms) -> Syms {
+fn syms_from_serde(s: &wast_types::Syms) -> Syms {
     Syms {
         wit_syms: s.wit_syms.clone(),
         internal: s
@@ -371,7 +370,7 @@ fn read_component_from_disk(path: &str) -> Result<WastComponent, WastError> {
 
     let data = std::fs::read_to_string(&db)
         .map_err(|e| err_at(format!("failed to read {}: {}", db, e), db.clone()))?;
-    let sc: serde_types::WastDb = serde_json::from_str(&data)
+    let sc: wast_types::WastDb = serde_json::from_str(&data)
         .map_err(|e| err_at(format!("invalid JSON in {}: {}", db, e), db))?;
     let mut component = component_from_db(&sc);
 

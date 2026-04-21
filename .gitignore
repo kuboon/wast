@@ -6,6 +6,7 @@
 node_modules/
 dist/
 *.tsbuildinfo
+.pnpm-store/
 
 # WASM artifacts
 *.wasm
@@ -26,3 +27,6 @@ Thumbs.db
 
 # Claude Code worktrees
 .claude/worktrees/
+
+# Scratch directory for in-repo temp files
+/tmp/

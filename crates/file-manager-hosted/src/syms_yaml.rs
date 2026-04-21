@@ -1,4 +1,4 @@
-use crate::serde_types::Syms;
+use wast_types::{SymEntry, Syms};
 
 pub fn parse_syms_yaml(input: &str) -> Result<Syms, String> {
     let mut syms = Syms {
@@ -46,11 +46,11 @@ pub fn parse_syms_yaml(input: &str) -> Result<Syms, String> {
             let value = value.trim().to_string();
             match current {
                 Section::Wit => syms.wit_syms.push((key, value)),
-                Section::Internal => syms.internal.push(crate::serde_types::SymEntry {
+                Section::Internal => syms.internal.push(SymEntry {
                     uid: key,
                     display_name: value,
                 }),
-                Section::Local => syms.local.push(crate::serde_types::SymEntry {
+                Section::Local => syms.local.push(SymEntry {
                     uid: key,
                     display_name: value,
                 }),

@@ -3,7 +3,6 @@ wit_bindgen::generate!({
     world: "file-manager-hosted-world",
 });
 
-mod serde_types;
 mod syms_yaml;
 mod wit_parser;
 
@@ -13,7 +12,7 @@ use crate::wast::file_manager_hosted::types::{
     WastComponent, WastError, WastFunc as BindingWastFunc, WastTypeDef as BindingWastTypeDef,
     WitType as BindingWitType,
 };
-use serde_types::{
+use wast_types::{
     FuncSource, PrimitiveType, Syms, TypeSource, WastDb, WastFunc, WastFuncRow, WastTypeDef,
     WastTypeRow, WitType,
 };
@@ -220,7 +219,7 @@ fn binding_to_db(component: &WastComponent) -> (WastDb, Syms) {
             .syms
             .internal
             .iter()
-            .map(|entry| serde_types::SymEntry {
+            .map(|entry| wast_types::SymEntry {
                 uid: entry.uid.clone(),
                 display_name: entry.display_name.clone(),
             })
@@ -229,7 +228,7 @@ fn binding_to_db(component: &WastComponent) -> (WastDb, Syms) {
             .syms
             .local
             .iter()
-            .map(|entry| serde_types::SymEntry {
+            .map(|entry| wast_types::SymEntry {
                 uid: entry.uid.clone(),
                 display_name: entry.display_name.clone(),
             })
@@ -290,9 +289,9 @@ fn parse_world_bytes(world_wit: &[u8]) -> Result<ParsedWorld, WastError> {
 }
 
 fn merge_sym_entries(
-    mut base: Vec<serde_types::SymEntry>,
-    overlay: Vec<serde_types::SymEntry>,
-) -> Vec<serde_types::SymEntry> {
+    mut base: Vec<wast_types::SymEntry>,
+    overlay: Vec<wast_types::SymEntry>,
+) -> Vec<wast_types::SymEntry> {
     for entry in overlay {
         if let Some(existing) = base.iter_mut().find(|e| e.uid == entry.uid) {
             existing.display_name = entry.display_name;

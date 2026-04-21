@@ -1,0 +1,15 @@
+[package]
+name = "wast-compiler"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+wast-types = { path = "../wast-types" }
+wast-pattern-analyzer = { path = "../syntax-plugin/internal/pattern-analyzer" }
+wat = "1"
+
+[dev-dependencies]
+wasmtime = { version = "27", features = ["component-model"] }
+wasmtime-wasi = "27"
+tokio = { version = "1", features = ["rt", "macros"] }
