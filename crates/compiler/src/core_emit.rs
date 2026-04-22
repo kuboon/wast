@@ -4,8 +4,9 @@
 //! `LocalGet`/`LocalSet`, `Const`, `Arithmetic`, `Compare`, `Call`,
 //! `If`/`Block`/`Loop`/`Br`/`BrIf`, `Return`, `Nop`, `IsErr` on result
 //! params, option/result-in-param via the Canonical ABI flat layout,
-//! and option/result **return** with primitive payload via indirect
-//! return through the bump allocator (`cabi_realloc`).
+//! option/result **return** with primitive payload via indirect return
+//! through the bump allocator (`cabi_realloc`), and `MatchOption` /
+//! `MatchResult` for destructuring compound params.
 //! Later stages will add strings, lists, records, variants.
 
 use std::collections::HashMap;
@@ -341,6 +342,73 @@ fn collect_locals_rec(
                 );
                 collect_locals_rec(
                     std::slice::from_ref(rhs.as_ref()),
+                    params,
+                    func_map,
+                    type_map,
+                    locals,
+                    seen,
+                );
+            }
+            Instruction::MatchOption {
+                value,
+                some_binding,
+                some_body,
+                none_body,
+            } => {
+                collect_locals_rec(
+                    std::slice::from_ref(value.as_ref()),
+                    params,
+                    func_map,
+                    type_map,
+                    locals,
+                    seen,
+                );
+                if !seen.contains(some_binding) {
+                    if let Some(opt_ty) = infer_wit_type(value, params, func_map, type_map)
+                        && let Ok(ResolvedType::Option(inner)) = resolve_type(&opt_ty, type_map)
+                    {
+                        seen.insert(some_binding.clone());
+                        locals.push((some_binding.clone(), inner));
+                    }
+                }
+                collect_locals_rec(some_body, params, func_map, type_map, locals, seen);
+                collect_locals_rec(none_body, params, func_map, type_map, locals, seen);
+            }
+            Instruction::MatchResult {
+                value,
+                ok_binding,
+                ok_body,
+                err_binding,
+                err_body,
+            } => {
+                collect_locals_rec(
+                    std::slice::from_ref(value.as_ref()),
+                    params,
+                    func_map,
+                    type_map,
+                    locals,
+                    seen,
+                );
+                if let Some(res_ty) = infer_wit_type(value, params, func_map, type_map)
+                    && let Ok(ResolvedType::Result(ok, err)) = resolve_type(&res_ty, type_map)
+                {
+                    if !seen.contains(ok_binding) {
+                        seen.insert(ok_binding.clone());
+                        locals.push((ok_binding.clone(), ok));
+                    }
+                    if !seen.contains(err_binding) {
+                        seen.insert(err_binding.clone());
+                        locals.push((err_binding.clone(), err));
+                    }
+                }
+                collect_locals_rec(ok_body, params, func_map, type_map, locals, seen);
+                collect_locals_rec(err_body, params, func_map, type_map, locals, seen);
+            }
+            Instruction::Some { value }
+            | Instruction::Ok { value }
+            | Instruction::Err { value } => {
+                collect_locals_rec(
+                    std::slice::from_ref(value.as_ref()),
                     params,
                     func_map,
                     type_map,
@@ -701,10 +769,108 @@ fn emit_instr(
                 out,
             )?;
         }
-        other => {
-            return Err(CompileError::Unsupported(format!(
-                "instruction {other:?} not yet supported"
-            )));
+        Instruction::MatchOption {
+            value,
+            some_binding,
+            some_body,
+            none_body,
+        } => {
+            // Emit value → pushes [disc, payload]. Save payload into
+            // `some_binding`'s local slot so LocalGet(some_binding) in
+            // some_body reads it. `none_body` inherits a zero (or prior)
+            // value there — caller responsibility to respect scoping.
+            emit_instr(value, None, scope, func_map, type_map, ret_ptr_slot, out)?;
+
+            let (bind_idx, bind_slots, _) = slot_info(some_binding, scope, type_map)?;
+            if bind_slots.len() != 1 {
+                return Err(CompileError::Unsupported(format!(
+                    "MatchOption binding {some_binding:?} of compound type not supported yet"
+                )));
+            }
+            out.push_str(&format!("      local.set {bind_idx}\n"));
+
+            let (result_clause, child_expected) = branch_result_clause(expected, type_map)?;
+            out.push_str(&format!("      if{result_clause}\n"));
+            for i in some_body {
+                emit_instr(
+                    i,
+                    child_expected,
+                    scope,
+                    func_map,
+                    type_map,
+                    ret_ptr_slot,
+                    out,
+                )?;
+            }
+            out.push_str("      else\n");
+            for i in none_body {
+                emit_instr(
+                    i,
+                    child_expected,
+                    scope,
+                    func_map,
+                    type_map,
+                    ret_ptr_slot,
+                    out,
+                )?;
+            }
+            out.push_str("      end\n");
+        }
+        Instruction::MatchResult {
+            value,
+            ok_binding,
+            ok_body,
+            err_binding,
+            err_body,
+        } => {
+            // Emit value → pushes [disc, payload]. Canonical-ABI flat-join
+            // makes the payload a single core type; if ok/err have matching
+            // core types we can `tee` payload into both bindings in one go.
+            let (ok_idx, ok_slots, ok_ty) = slot_info(ok_binding, scope, type_map)?;
+            let (err_idx, err_slots, err_ty) = slot_info(err_binding, scope, type_map)?;
+            if ok_slots.len() != 1 || err_slots.len() != 1 {
+                return Err(CompileError::Unsupported(
+                    "MatchResult binding of compound type not supported yet".into(),
+                ));
+            }
+            if wit_to_core(ok_ty)? != wit_to_core(err_ty)? {
+                return Err(CompileError::Unsupported(format!(
+                    "MatchResult with heterogeneous ok/err core types \
+                     (ok={ok_ty}, err={err_ty}) not supported yet"
+                )));
+            }
+            emit_instr(value, None, scope, func_map, type_map, ret_ptr_slot, out)?;
+            // Seed both bindings: tee copies to one while keeping on stack.
+            out.push_str(&format!("      local.tee {err_idx}\n"));
+            out.push_str(&format!("      local.set {ok_idx}\n"));
+
+            // disc != 0 → err_body, disc == 0 → ok_body.
+            let (result_clause, child_expected) = branch_result_clause(expected, type_map)?;
+            out.push_str(&format!("      if{result_clause}\n"));
+            for i in err_body {
+                emit_instr(
+                    i,
+                    child_expected,
+                    scope,
+                    func_map,
+                    type_map,
+                    ret_ptr_slot,
+                    out,
+                )?;
+            }
+            out.push_str("      else\n");
+            for i in ok_body {
+                emit_instr(
+                    i,
+                    child_expected,
+                    scope,
+                    func_map,
+                    type_map,
+                    ret_ptr_slot,
+                    out,
+                )?;
+            }
+            out.push_str("      end\n");
         }
     }
     Ok(())
@@ -794,6 +960,26 @@ fn label_clause(label: Option<&str>) -> String {
     match label {
         Some(l) if !l.is_empty() => format!(" ${}", mangle(l)),
         _ => String::new(),
+    }
+}
+
+/// Helper for `if …` clauses inside `MatchOption`/`MatchResult`. Returns
+/// `(result_clause, child_expected)` — a typed form with propagated
+/// expected type when the consumer wants a value, plain statement form
+/// otherwise. Compound consumer types use `i32` (indirect-return ptr).
+fn branch_result_clause<'a>(
+    expected: Option<&'a str>,
+    type_map: &TypeMap,
+) -> Result<(String, Option<&'a str>), CompileError> {
+    match expected {
+        None => Ok((String::new(), None)),
+        Some(ty) => {
+            let core = match resolve_type(ty, type_map)? {
+                ResolvedType::Primitive(p) => wit_to_core(&p)?.to_string(),
+                ResolvedType::Option(_) | ResolvedType::Result(_, _) => "i32".to_string(),
+            };
+            Ok((format!(" (result {core})"), Some(ty)))
+        }
     }
 }
 
