@@ -5,7 +5,10 @@ use std::collections::HashMap;
 use wast_pattern_analyzer::deserialize_body;
 use wast_types::{FuncSource, WastDb, WastFuncRow};
 
-use crate::core_emit::{FuncMap, TypeMap, collect_locals, emit_body, flat_slots, lifted_type_wat};
+use crate::core_emit::{
+    FuncMap, TypeMap, body_needs_ret_ptr, collect_locals, emit_body, flat_slots, lifted_type_wat,
+    return_is_indirect,
+};
 use crate::error::CompileError;
 
 /// Memory + `cabi_realloc` infrastructure injected into every non-empty core
@@ -232,7 +235,27 @@ fn emit_core_func(
     };
 
     let locals = collect_locals(&body_instr, &row.func.params, func_map, type_map);
-    let locals_decl = locals
+
+    // Compute core slot positions so `ret_ptr_slot` lands right after all
+    // user-declared params+locals.
+    let param_slot_count: usize = row
+        .func
+        .params
+        .iter()
+        .map(|(_, ty)| flat_slots(ty, type_map).map(|s| s.len()).unwrap_or(0))
+        .sum();
+    let local_slot_count: usize = locals
+        .iter()
+        .map(|(_, ty)| flat_slots(ty, type_map).map(|s| s.len()).unwrap_or(0))
+        .sum();
+    let needs_ret_ptr = body_needs_ret_ptr(&body_instr);
+    let ret_ptr_slot = if needs_ret_ptr {
+        Some(param_slot_count + local_slot_count)
+    } else {
+        None
+    };
+
+    let mut locals_parts: Vec<String> = locals
         .iter()
         .map(|(_, ty)| {
             flat_slots(ty, type_map).map(|ts| {
@@ -242,8 +265,11 @@ fn emit_core_func(
                     .join(" ")
             })
         })
-        .collect::<Result<Vec<_>, _>>()?
-        .join(" ");
+        .collect::<Result<Vec<_>, _>>()?;
+    if needs_ret_ptr {
+        locals_parts.push("(local i32)".to_string());
+    }
+    let locals_decl = locals_parts.join(" ");
 
     let body_wat = emit_body(
         &body_instr,
@@ -252,6 +278,7 @@ fn emit_core_func(
         row.func.result.as_deref(),
         func_map,
         type_map,
+        ret_ptr_slot,
     )?;
 
     let export_clause = match row.func.source {
@@ -284,16 +311,22 @@ fn flat_param_clauses(
     Ok(parts.join(" "))
 }
 
-/// Flatten result into a core WAT `(result T …)` clause (empty if no result).
+/// Flatten result into a core WAT `(result …)` clause.
+///
+/// For types within `MAX_FLAT_RESULTS` the clause is the full flat list; for
+/// types that exceed it (e.g. option/result with payload) the core function
+/// uses indirect return — a single `i32` pointer to caller-allocated (for
+/// lower) or callee-allocated (for lift) memory.
 fn flat_result_clause(result: Option<&str>, type_map: &TypeMap) -> Result<String, CompileError> {
     match result {
         None => Ok(String::new()),
         Some(ty) => {
-            let slots = flat_slots(ty, type_map)?;
-            Ok(format!(
-                "(result {})",
-                slots.iter().copied().collect::<Vec<_>>().join(" ")
-            ))
+            if return_is_indirect(ty, type_map)? {
+                Ok("(result i32)".to_string())
+            } else {
+                let slots = flat_slots(ty, type_map)?;
+                Ok(format!("(result {})", slots.join(" ")))
+            }
         }
     }
 }

@@ -3,9 +3,10 @@
 //! Scope: numeric primitives (i32/i64/u32/u64/f32/f64/bool/char) with
 //! `LocalGet`/`LocalSet`, `Const`, `Arithmetic`, `Compare`, `Call`,
 //! `If`/`Block`/`Loop`/`Br`/`BrIf`, `Return`, `Nop`, `IsErr` on result
-//! params, and option/result-in-param via the Canonical ABI flat layout.
-//! Later stages will add option/result returns (needs `cabi_realloc`),
-//! strings, lists, records, variants.
+//! params, option/result-in-param via the Canonical ABI flat layout,
+//! and option/result **return** with primitive payload via indirect
+//! return through the bump allocator (`cabi_realloc`).
+//! Later stages will add strings, lists, records, variants.
 
 use std::collections::HashMap;
 
@@ -108,6 +109,82 @@ fn join_core_type(a: &'static str, b: &'static str) -> Result<&'static str, Comp
             "flat-join of core types {a:?} and {b:?} not supported yet"
         ))),
     }
+}
+
+/// Canonical-ABI byte size and alignment for a WIT type. Driven by the
+/// compile-time layout; see <https://github.com/WebAssembly/component-model/blob/main/design/mvp/CanonicalABI.md#alignment>.
+pub fn size_align(ty_ref: &str, type_map: &TypeMap) -> Result<(usize, usize), CompileError> {
+    match resolve_type(ty_ref, type_map)? {
+        ResolvedType::Primitive(p) => Ok(match p.as_str() {
+            "bool" => (1, 1),
+            "u32" | "i32" | "f32" | "char" => (4, 4),
+            "u64" | "i64" | "f64" => (8, 8),
+            other => {
+                return Err(CompileError::Unsupported(format!(
+                    "size_align for primitive {other}"
+                )));
+            }
+        }),
+        ResolvedType::Option(inner) => variant_layout(&[Some(inner)], type_map),
+        ResolvedType::Result(ok, err) => variant_layout(&[Some(ok), Some(err)], type_map),
+    }
+}
+
+/// Layout of a variant with the given case payload types (`None` = no payload).
+/// For option/result the discriminant fits in `u8` (only two cases).
+fn variant_layout(
+    cases: &[Option<String>],
+    type_map: &TypeMap,
+) -> Result<(usize, usize), CompileError> {
+    // Discriminant: u8 for ≤256 cases (all our current compounds).
+    let disc_size = 1usize;
+    let disc_align = 1usize;
+    let mut case_align = disc_align;
+    let mut case_size = 0usize;
+    for case in cases {
+        if let Some(ty) = case {
+            let (s, a) = size_align(ty, type_map)?;
+            case_align = case_align.max(a);
+            case_size = case_size.max(s);
+        }
+    }
+    let case_start = align_up(disc_size, case_align);
+    let align = case_align;
+    let size = align_up(case_start + case_size, align);
+    Ok((size, align))
+}
+
+pub fn align_up(offset: usize, align: usize) -> usize {
+    if align == 0 {
+        offset
+    } else {
+        (offset + align - 1) & !(align - 1)
+    }
+}
+
+/// Number of core flat result slots: primitives → 1; option/result → 2.
+pub const MAX_FLAT_RESULTS: usize = 1;
+
+/// True when the WIT return type exceeds `MAX_FLAT_RESULTS` and therefore
+/// requires indirect return (core func returns a single `i32` pointer).
+pub fn return_is_indirect(ty: &str, type_map: &TypeMap) -> Result<bool, CompileError> {
+    Ok(flat_slots(ty, type_map)?.len() > MAX_FLAT_RESULTS)
+}
+
+/// Core store instruction + natural-alignment power-of-two for a primitive.
+/// `bool` stores a single byte via `i32.store8`. Integers and floats use
+/// their natural width.
+pub fn store_op(ty: &str) -> Result<(&'static str, u32), CompileError> {
+    Ok(match ty {
+        "bool" => ("i32.store8", 0),
+        "u32" | "i32" | "char" => ("i32.store", 2),
+        "u64" | "i64" => ("i64.store", 3),
+        "f32" => ("f32.store", 2),
+        "f64" => ("f64.store", 3),
+        other => {
+            return Err(CompileError::Unsupported(format!("store op for {other}")));
+        }
+    })
 }
 
 /// Component-Model-level WAT type string for a WIT type reference.
@@ -303,6 +380,9 @@ fn slot_info<'a>(
 /// `locals` are declared locals (after params) that `LocalSet` can assign.
 /// `type_map` resolves compound types (option/result) referenced from
 /// params/locals so compound slot layouts can be computed.
+/// `ret_ptr_slot` is the core-local index of the synthesized `i32` that
+/// holds the return buffer pointer for indirect-return functions; `None`
+/// when the function doesn't need it.
 pub fn emit_body(
     instructions: &[Instruction],
     params: &[(String, String)],
@@ -310,23 +390,69 @@ pub fn emit_body(
     result_ty: Option<&str>,
     func_map: &FuncMap,
     type_map: &TypeMap,
+    ret_ptr_slot: Option<usize>,
 ) -> Result<String, CompileError> {
     let scope: Vec<(String, String)> = params.iter().chain(locals.iter()).cloned().collect();
     let mut out = String::new();
     for instr in instructions {
-        emit_instr(instr, result_ty, &scope, func_map, type_map, &mut out)?;
+        emit_instr(
+            instr,
+            result_ty,
+            &scope,
+            func_map,
+            type_map,
+            ret_ptr_slot,
+            &mut out,
+        )?;
     }
     Ok(out)
 }
 
+/// Scan a body for any compound constructor (`Some`/`None`/`Ok`/`Err`) that
+/// would need the synthesized return-pointer local.
+pub fn body_needs_ret_ptr(body: &[Instruction]) -> bool {
+    body.iter().any(instr_has_compound_ctor)
+}
+
+fn instr_has_compound_ctor(i: &Instruction) -> bool {
+    match i {
+        Instruction::Some { .. }
+        | Instruction::None
+        | Instruction::Ok { .. }
+        | Instruction::Err { .. } => true,
+        Instruction::If {
+            condition,
+            then_body,
+            else_body,
+        } => {
+            instr_has_compound_ctor(condition)
+                || then_body.iter().any(instr_has_compound_ctor)
+                || else_body.iter().any(instr_has_compound_ctor)
+        }
+        Instruction::Block { body, .. } | Instruction::Loop { body, .. } => {
+            body.iter().any(instr_has_compound_ctor)
+        }
+        Instruction::BrIf { condition, .. } => instr_has_compound_ctor(condition),
+        Instruction::Call { args, .. } => args.iter().any(|(_, a)| instr_has_compound_ctor(a)),
+        Instruction::Arithmetic { lhs, rhs, .. } | Instruction::Compare { lhs, rhs, .. } => {
+            instr_has_compound_ctor(lhs) || instr_has_compound_ctor(rhs)
+        }
+        Instruction::LocalSet { value, .. } => instr_has_compound_ctor(value),
+        _ => false,
+    }
+}
+
 /// Emit a single instruction. `expected` is the WIT type the consumer wants
-/// on the stack — used only to disambiguate free-floating `Const` values.
+/// on the stack — used only to disambiguate free-floating `Const` values and
+/// to resolve compound constructors (`Some`/`None`/`Ok`/`Err`) that write to
+/// the return-pointer slot.
 fn emit_instr(
     instr: &Instruction,
     expected: Option<&str>,
     scope: &[(String, String)],
     func_map: &FuncMap,
     type_map: &TypeMap,
+    ret_ptr_slot: Option<usize>,
     out: &mut String,
 ) -> Result<(), CompileError> {
     match instr {
@@ -334,7 +460,6 @@ fn emit_instr(
         Instruction::Return => out.push_str("      return\n"),
         Instruction::LocalGet { uid } => {
             let (first_idx, slots, _) = slot_info(uid, scope, type_map)?;
-            // For compound locals (option/result) this pushes disc then payload.
             for i in 0..slots.len() {
                 out.push_str(&format!("      local.get {}\n", first_idx + i));
             }
@@ -343,9 +468,6 @@ fn emit_instr(
             let ty = expected.unwrap_or("i32");
             let core = wit_to_core(ty)?;
             if is_float(ty) {
-                // `value` is i64 in the IR — cast for float const. Lossy for
-                // values beyond f64 mantissa, but the IR currently has no
-                // richer float literal representation.
                 out.push_str(&format!("      {core}.const {}\n", *value as f64));
             } else {
                 out.push_str(&format!("      {core}.const {value}\n"));
@@ -357,19 +479,32 @@ fn emit_instr(
                 .or_else(|| infer_wit_type(lhs, scope, func_map, type_map))
                 .or_else(|| infer_wit_type(rhs, scope, func_map, type_map))
                 .unwrap_or_else(|| "i32".to_string());
-            emit_instr(lhs, Some(&ty), scope, func_map, type_map, out)?;
-            emit_instr(rhs, Some(&ty), scope, func_map, type_map, out)?;
+            emit_instr(lhs, Some(&ty), scope, func_map, type_map, ret_ptr_slot, out)?;
+            emit_instr(rhs, Some(&ty), scope, func_map, type_map, ret_ptr_slot, out)?;
             out.push_str(&format!("      {}\n", arith_op(op.clone(), &ty)?));
         }
         Instruction::Compare { op, lhs, rhs } => {
-            // Compare pushes i32 regardless of operand type, so `expected`
-            // only tells us the final boolean width (always i32) — operand
-            // type must be inferred from the operands themselves.
             let operand_ty = infer_wit_type(lhs, scope, func_map, type_map)
                 .or_else(|| infer_wit_type(rhs, scope, func_map, type_map))
                 .unwrap_or_else(|| "i32".to_string());
-            emit_instr(lhs, Some(&operand_ty), scope, func_map, type_map, out)?;
-            emit_instr(rhs, Some(&operand_ty), scope, func_map, type_map, out)?;
+            emit_instr(
+                lhs,
+                Some(&operand_ty),
+                scope,
+                func_map,
+                type_map,
+                ret_ptr_slot,
+                out,
+            )?;
+            emit_instr(
+                rhs,
+                Some(&operand_ty),
+                scope,
+                func_map,
+                type_map,
+                ret_ptr_slot,
+                out,
+            )?;
             out.push_str(&format!("      {}\n", compare_op(op.clone(), &operand_ty)?));
         }
         Instruction::Call { func_uid, args } => {
@@ -382,7 +517,15 @@ fn emit_instr(
                         "Call to {func_uid:?} missing arg for param {pname:?}"
                     ))
                 })?;
-                emit_instr(arg_instr, Some(pty), scope, func_map, type_map, out)?;
+                emit_instr(
+                    arg_instr,
+                    Some(pty),
+                    scope,
+                    func_map,
+                    type_map,
+                    ret_ptr_slot,
+                    out,
+                )?;
             }
             out.push_str(&format!("      call ${}\n", mangle(func_uid)));
         }
@@ -394,7 +537,15 @@ fn emit_instr(
                 )));
             }
             let ty_owned = ty.to_string();
-            emit_instr(value, Some(&ty_owned), scope, func_map, type_map, out)?;
+            emit_instr(
+                value,
+                Some(&ty_owned),
+                scope,
+                func_map,
+                type_map,
+                ret_ptr_slot,
+                out,
+            )?;
             out.push_str(&format!("      local.set {first_idx}\n"));
         }
         Instruction::If {
@@ -402,7 +553,15 @@ fn emit_instr(
             then_body,
             else_body,
         } => {
-            emit_instr(condition, None, scope, func_map, type_map, out)?;
+            emit_instr(
+                condition,
+                None,
+                scope,
+                func_map,
+                type_map,
+                ret_ptr_slot,
+                out,
+            )?;
             let emit_typed = expected.is_some() && !else_body.is_empty();
             let result_clause = if emit_typed {
                 format!(" (result {})", wit_to_core(expected.unwrap())?)
@@ -412,12 +571,28 @@ fn emit_instr(
             out.push_str(&format!("      if{result_clause}\n"));
             let child_expected = if emit_typed { expected } else { None };
             for i in then_body {
-                emit_instr(i, child_expected, scope, func_map, type_map, out)?;
+                emit_instr(
+                    i,
+                    child_expected,
+                    scope,
+                    func_map,
+                    type_map,
+                    ret_ptr_slot,
+                    out,
+                )?;
             }
             if !else_body.is_empty() {
                 out.push_str("      else\n");
                 for i in else_body {
-                    emit_instr(i, child_expected, scope, func_map, type_map, out)?;
+                    emit_instr(
+                        i,
+                        child_expected,
+                        scope,
+                        func_map,
+                        type_map,
+                        ret_ptr_slot,
+                        out,
+                    )?;
                 }
             }
             out.push_str("      end\n");
@@ -426,7 +601,7 @@ fn emit_instr(
             let lbl = label_clause(label.as_deref());
             out.push_str(&format!("      block{lbl}\n"));
             for i in body {
-                emit_instr(i, None, scope, func_map, type_map, out)?;
+                emit_instr(i, None, scope, func_map, type_map, ret_ptr_slot, out)?;
             }
             out.push_str("      end\n");
         }
@@ -434,7 +609,7 @@ fn emit_instr(
             let lbl = label_clause(label.as_deref());
             out.push_str(&format!("      loop{lbl}\n"));
             for i in body {
-                emit_instr(i, None, scope, func_map, type_map, out)?;
+                emit_instr(i, None, scope, func_map, type_map, ret_ptr_slot, out)?;
             }
             out.push_str("      end\n");
         }
@@ -442,12 +617,18 @@ fn emit_instr(
             out.push_str(&format!("      br ${}\n", mangle(label)));
         }
         Instruction::BrIf { label, condition } => {
-            emit_instr(condition, None, scope, func_map, type_map, out)?;
+            emit_instr(
+                condition,
+                None,
+                scope,
+                func_map,
+                type_map,
+                ret_ptr_slot,
+                out,
+            )?;
             out.push_str(&format!("      br_if ${}\n", mangle(label)));
         }
         Instruction::IsErr { value } => {
-            // v0.6: restrict to `LocalGet(result_param)`; generalizing requires
-            // knowing the static type of arbitrary sub-expressions.
             let uid = match value.as_ref() {
                 Instruction::LocalGet { uid } => uid,
                 _ => {
@@ -459,7 +640,6 @@ fn emit_instr(
             let (first_idx, _, ty) = slot_info(uid, scope, type_map)?;
             match resolve_type(ty, type_map)? {
                 ResolvedType::Result(_, _) => {
-                    // disc is at first_idx; a disc != 0 means `err`.
                     out.push_str(&format!("      local.get {first_idx}\n"));
                 }
                 other => {
@@ -469,6 +649,58 @@ fn emit_instr(
                 }
             }
         }
+        Instruction::Some { value } => {
+            emit_variant_ctor(
+                expected,
+                1,
+                Some(value.as_ref()),
+                ExpectedKind::Option,
+                scope,
+                func_map,
+                type_map,
+                ret_ptr_slot,
+                out,
+            )?;
+        }
+        Instruction::None => {
+            emit_variant_ctor(
+                expected,
+                0,
+                None,
+                ExpectedKind::Option,
+                scope,
+                func_map,
+                type_map,
+                ret_ptr_slot,
+                out,
+            )?;
+        }
+        Instruction::Ok { value } => {
+            emit_variant_ctor(
+                expected,
+                0,
+                Some(value.as_ref()),
+                ExpectedKind::ResultOk,
+                scope,
+                func_map,
+                type_map,
+                ret_ptr_slot,
+                out,
+            )?;
+        }
+        Instruction::Err { value } => {
+            emit_variant_ctor(
+                expected,
+                1,
+                Some(value.as_ref()),
+                ExpectedKind::ResultErr,
+                scope,
+                func_map,
+                type_map,
+                ret_ptr_slot,
+                out,
+            )?;
+        }
         other => {
             return Err(CompileError::Unsupported(format!(
                 "instruction {other:?} not yet supported"
@@ -476,6 +708,86 @@ fn emit_instr(
         }
     }
     Ok(())
+}
+
+#[derive(Clone, Copy)]
+enum ExpectedKind {
+    Option,
+    ResultOk,
+    ResultErr,
+}
+
+#[allow(clippy::too_many_arguments)]
+fn emit_variant_ctor(
+    expected: Option<&str>,
+    disc: u8,
+    value: Option<&Instruction>,
+    kind: ExpectedKind,
+    scope: &[(String, String)],
+    func_map: &FuncMap,
+    type_map: &TypeMap,
+    ret_ptr_slot: Option<usize>,
+    out: &mut String,
+) -> Result<(), CompileError> {
+    let expected_ty = expected.ok_or_else(|| {
+        CompileError::Unsupported(
+            "compound constructors (Some/None/Ok/Err) are only supported at return position".into(),
+        )
+    })?;
+    let payload_ty = match (resolve_type(expected_ty, type_map)?, kind) {
+        (ResolvedType::Option(inner), ExpectedKind::Option) => Some(inner),
+        (ResolvedType::Result(ok, _), ExpectedKind::ResultOk) => Some(ok),
+        (ResolvedType::Result(_, err), ExpectedKind::ResultErr) => Some(err),
+        (rt, _) => {
+            return Err(CompileError::InvalidInput(format!(
+                "variant ctor {kind:?} in context of type {expected_ty:?} (resolved {rt:?})"
+            )));
+        }
+    };
+    let (size, align) = size_align(expected_ty, type_map)?;
+    let ret_ptr = ret_ptr_slot.ok_or_else(|| {
+        CompileError::Unsupported(
+            "ret_ptr_slot missing; collect_locals should have reserved one".into(),
+        )
+    })?;
+
+    // Allocate return area: realloc(0, 0, align, size) → ptr, stash in ret_ptr.
+    out.push_str(&format!(
+        "      i32.const 0\n      i32.const 0\n      i32.const {align}\n      i32.const {size}\n      call $cabi_realloc\n      local.set {ret_ptr}\n"
+    ));
+
+    // Store disc at offset 0 (u8).
+    out.push_str(&format!(
+        "      local.get {ret_ptr}\n      i32.const {disc}\n      i32.store8 offset=0\n"
+    ));
+
+    // Store payload if present. Some/None's payload-less case skips entirely;
+    // Result cases always have a payload in our IR.
+    if let (Some(v), Some(pty)) = (value, payload_ty.as_deref()) {
+        let (_, pay_align) = size_align(pty, type_map)?;
+        let payload_offset = align_up(1, pay_align);
+        let (store, align_pow2) = store_op(pty)?;
+        out.push_str(&format!("      local.get {ret_ptr}\n"));
+        emit_instr(v, Some(pty), scope, func_map, type_map, ret_ptr_slot, out)?;
+        out.push_str(&format!(
+            "      {store} offset={payload_offset} align={align_pow2}\n"
+        ));
+    }
+
+    // Return area pointer — this is the function's return value.
+    out.push_str(&format!("      local.get {ret_ptr}\n"));
+
+    Ok(())
+}
+
+impl std::fmt::Debug for ExpectedKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ExpectedKind::Option => f.write_str("Option"),
+            ExpectedKind::ResultOk => f.write_str("ResultOk"),
+            ExpectedKind::ResultErr => f.write_str("ResultErr"),
+        }
+    }
 }
 
 fn label_clause(label: Option<&str>) -> String {
