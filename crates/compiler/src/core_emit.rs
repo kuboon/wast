@@ -1,14 +1,16 @@
 //! Core WASM instruction emission from WAST IR.
 //!
 //! Scope: numeric primitives (i32/i64/u32/u64/f32/f64/bool/char) with
-//! `LocalGet`/`LocalSet`, `Const`, `Arithmetic`, `Compare`, `Call` (internal),
-//! `If`/`Block`/`Loop`/`Br`/`BrIf`, `Return`, `Nop`. Later stages will add
-//! WIT imports, option/result, string, lists.
+//! `LocalGet`/`LocalSet`, `Const`, `Arithmetic`, `Compare`, `Call`,
+//! `If`/`Block`/`Loop`/`Br`/`BrIf`, `Return`, `Nop`, `IsErr` on result
+//! params, and option/result-in-param via the Canonical ABI flat layout.
+//! Later stages will add option/result returns (needs `cabi_realloc`),
+//! strings, lists, records, variants.
 
 use std::collections::HashMap;
 
 use wast_pattern_analyzer::{ArithOp, CompareOp, Instruction};
-use wast_types::WastFunc;
+use wast_types::{WastFunc, WitType};
 
 use crate::emit::mangle;
 use crate::error::CompileError;
@@ -16,6 +18,112 @@ use crate::error::CompileError;
 /// Map from a callable func's uid to its definition. Used by `emit_body` to
 /// resolve `Instruction::Call` targets (param order + return type).
 pub type FuncMap<'a> = HashMap<String, &'a WastFunc>;
+
+/// Map from a type uid to its structural definition (for resolving
+/// `option<…>`, `result<…,…>`, etc. that appear as param or result refs).
+pub type TypeMap<'a> = HashMap<String, &'a WitType>;
+
+/// Structural view of a WIT type reference (resolved through a `TypeMap`).
+/// v0.6 scope: primitives + option<prim> + result<prim, prim>.
+#[derive(Debug, Clone)]
+pub enum ResolvedType {
+    Primitive(String),
+    Option(String),
+    Result(String, String),
+}
+
+pub fn resolve_type(ty_ref: &str, type_map: &TypeMap) -> Result<ResolvedType, CompileError> {
+    if is_known_primitive(ty_ref) {
+        return Ok(ResolvedType::Primitive(ty_ref.to_string()));
+    }
+    let def = type_map
+        .get(ty_ref)
+        .ok_or_else(|| CompileError::InvalidInput(format!("unknown type reference {ty_ref:?}")))?;
+    match def {
+        WitType::Primitive(p) => Ok(ResolvedType::Primitive(primitive_name(p).to_string())),
+        WitType::Option(inner) => Ok(ResolvedType::Option(inner.clone())),
+        WitType::Result(ok, err) => Ok(ResolvedType::Result(ok.clone(), err.clone())),
+        other => Err(CompileError::Unsupported(format!(
+            "type {ty_ref:?} with definition {other:?} is not supported yet"
+        ))),
+    }
+}
+
+fn is_known_primitive(name: &str) -> bool {
+    matches!(
+        name,
+        "u32" | "u64" | "i32" | "i64" | "f32" | "f64" | "bool" | "char" | "string"
+    )
+}
+
+fn primitive_name(p: &wast_types::PrimitiveType) -> &'static str {
+    use wast_types::PrimitiveType as P;
+    match p {
+        P::U32 => "u32",
+        P::U64 => "u64",
+        P::I32 => "i32",
+        P::I64 => "i64",
+        P::F32 => "f32",
+        P::F64 => "f64",
+        P::Bool => "bool",
+        P::Char => "char",
+        P::String => "string",
+    }
+}
+
+/// Core-flat slot types for a WIT type reference (one core type per slot).
+/// primitive → 1 slot; option<P>/result<A,B> → 2 slots (i32 disc + joined payload).
+pub fn flat_slots(ty_ref: &str, type_map: &TypeMap) -> Result<Vec<&'static str>, CompileError> {
+    match resolve_type(ty_ref, type_map)? {
+        ResolvedType::Primitive(p) => Ok(vec![wit_to_core(&p)?]),
+        ResolvedType::Option(inner) => {
+            let payload = wit_to_core(&inner)?;
+            Ok(vec!["i32", payload])
+        }
+        ResolvedType::Result(ok, err) => {
+            // v0.6: both payloads required. Pick the wider/float-compatible
+            // join — restricted to matching core types for simplicity.
+            let ok_core = wit_to_core(&ok)?;
+            let err_core = wit_to_core(&err)?;
+            let payload = join_core_type(ok_core, err_core)?;
+            Ok(vec!["i32", payload])
+        }
+    }
+}
+
+fn join_core_type(a: &'static str, b: &'static str) -> Result<&'static str, CompileError> {
+    // Canonical ABI flat-join, restricted to v0.6 primitive payloads:
+    if a == b {
+        return Ok(a);
+    }
+    // i32/i64 widening
+    match (a, b) {
+        ("i32", "i64") | ("i64", "i32") => Ok("i64"),
+        ("f32", "f64") | ("f64", "f32") => Ok("f64"),
+        // i32↔f32 reinterpret as i32
+        ("i32", "f32") | ("f32", "i32") => Ok("i32"),
+        // i64↔f64 reinterpret as i64
+        ("i64", "f64") | ("f64", "i64") => Ok("i64"),
+        _ => Err(CompileError::Unsupported(format!(
+            "flat-join of core types {a:?} and {b:?} not supported yet"
+        ))),
+    }
+}
+
+/// Component-Model-level WAT type string for a WIT type reference.
+/// E.g. `u32` → `u32`, `i32` → `s32`, `option<u32>` → `(option u32)`,
+/// `result<u32, u32>` → `(result u32 (error u32))`.
+pub fn lifted_type_wat(ty_ref: &str, type_map: &TypeMap) -> Result<String, CompileError> {
+    match resolve_type(ty_ref, type_map)? {
+        ResolvedType::Primitive(p) => Ok(wit_abi_name(&p)?.to_string()),
+        ResolvedType::Option(inner) => Ok(format!("(option {})", wit_abi_name(&inner)?)),
+        ResolvedType::Result(ok, err) => Ok(format!(
+            "(result {} (error {}))",
+            wit_abi_name(&ok)?,
+            wit_abi_name(&err)?
+        )),
+    }
+}
 
 /// Map a project-WIT primitive type name (`u32`/`i32`/…) to the WIT ABI
 /// token accepted in a Component's lifted function signature. The project
@@ -69,11 +177,12 @@ pub fn collect_locals(
     body: &[Instruction],
     params: &[(String, String)],
     func_map: &FuncMap,
+    type_map: &TypeMap,
 ) -> Vec<(String, String)> {
     let mut locals: Vec<(String, String)> = Vec::new();
     let mut seen: std::collections::HashSet<String> =
         params.iter().map(|(n, _)| n.clone()).collect();
-    collect_locals_rec(body, params, func_map, &mut locals, &mut seen);
+    collect_locals_rec(body, params, func_map, type_map, &mut locals, &mut seen);
     locals
 }
 
@@ -81,6 +190,7 @@ fn collect_locals_rec(
     body: &[Instruction],
     params: &[(String, String)],
     func_map: &FuncMap,
+    type_map: &TypeMap,
     locals: &mut Vec<(String, String)>,
     seen: &mut std::collections::HashSet<String>,
 ) {
@@ -88,7 +198,7 @@ fn collect_locals_rec(
         match instr {
             Instruction::LocalSet { uid, value } => {
                 if !seen.contains(uid) {
-                    let ty = infer_wit_type(value, params, func_map)
+                    let ty = infer_wit_type(value, params, func_map, type_map)
                         .unwrap_or_else(|| "i32".to_string());
                     seen.insert(uid.clone());
                     locals.push((uid.clone(), ty));
@@ -97,12 +207,13 @@ fn collect_locals_rec(
                     std::slice::from_ref(value.as_ref()),
                     params,
                     func_map,
+                    type_map,
                     locals,
                     seen,
                 );
             }
             Instruction::Block { body, .. } | Instruction::Loop { body, .. } => {
-                collect_locals_rec(body, params, func_map, locals, seen);
+                collect_locals_rec(body, params, func_map, type_map, locals, seen);
             }
             Instruction::If {
                 condition,
@@ -113,24 +224,33 @@ fn collect_locals_rec(
                     std::slice::from_ref(condition.as_ref()),
                     params,
                     func_map,
+                    type_map,
                     locals,
                     seen,
                 );
-                collect_locals_rec(then_body, params, func_map, locals, seen);
-                collect_locals_rec(else_body, params, func_map, locals, seen);
+                collect_locals_rec(then_body, params, func_map, type_map, locals, seen);
+                collect_locals_rec(else_body, params, func_map, type_map, locals, seen);
             }
             Instruction::BrIf { condition, .. } => {
                 collect_locals_rec(
                     std::slice::from_ref(condition.as_ref()),
                     params,
                     func_map,
+                    type_map,
                     locals,
                     seen,
                 );
             }
             Instruction::Call { args, .. } => {
                 for (_, arg) in args {
-                    collect_locals_rec(std::slice::from_ref(arg), params, func_map, locals, seen);
+                    collect_locals_rec(
+                        std::slice::from_ref(arg),
+                        params,
+                        func_map,
+                        type_map,
+                        locals,
+                        seen,
+                    );
                 }
             }
             Instruction::Arithmetic { lhs, rhs, .. } | Instruction::Compare { lhs, rhs, .. } => {
@@ -138,6 +258,7 @@ fn collect_locals_rec(
                     std::slice::from_ref(lhs.as_ref()),
                     params,
                     func_map,
+                    type_map,
                     locals,
                     seen,
                 );
@@ -145,6 +266,7 @@ fn collect_locals_rec(
                     std::slice::from_ref(rhs.as_ref()),
                     params,
                     func_map,
+                    type_map,
                     locals,
                     seen,
                 );
@@ -154,24 +276,45 @@ fn collect_locals_rec(
     }
 }
 
+/// Look up the core-slot layout of a named local in a scope that mixes
+/// params and locals. Returns `(first_slot_idx, flat_core_types, wit_type_ref)`.
+fn slot_info<'a>(
+    uid: &str,
+    scope: &'a [(String, String)],
+    type_map: &TypeMap,
+) -> Result<(usize, Vec<&'static str>, &'a str), CompileError> {
+    let mut cur = 0usize;
+    for (name, ty) in scope {
+        let slots = flat_slots(ty, type_map)?;
+        if name == uid {
+            return Ok((cur, slots, ty.as_str()));
+        }
+        cur += slots.len();
+    }
+    Err(CompileError::InvalidInput(format!("unknown local {uid:?}")))
+}
+
 /// Emit the core WAT body text for a function.
 ///
-/// `params` is the ordered list of `(name, wit_type)` pairs matching
+/// `params` is the ordered list of `(name, wit_type_ref)` pairs matching
 /// `LocalGet { uid }` lookups. `result_ty` is the function's return type
 /// (used as the default inference hint for ambiguous top-level `Const`).
 /// `func_map` resolves `Instruction::Call` target uids to their signatures.
 /// `locals` are declared locals (after params) that `LocalSet` can assign.
+/// `type_map` resolves compound types (option/result) referenced from
+/// params/locals so compound slot layouts can be computed.
 pub fn emit_body(
     instructions: &[Instruction],
     params: &[(String, String)],
     locals: &[(String, String)],
     result_ty: Option<&str>,
     func_map: &FuncMap,
+    type_map: &TypeMap,
 ) -> Result<String, CompileError> {
     let scope: Vec<(String, String)> = params.iter().chain(locals.iter()).cloned().collect();
     let mut out = String::new();
     for instr in instructions {
-        emit_instr(instr, result_ty, &scope, func_map, &mut out)?;
+        emit_instr(instr, result_ty, &scope, func_map, type_map, &mut out)?;
     }
     Ok(out)
 }
@@ -181,18 +324,20 @@ pub fn emit_body(
 fn emit_instr(
     instr: &Instruction,
     expected: Option<&str>,
-    params: &[(String, String)],
+    scope: &[(String, String)],
     func_map: &FuncMap,
+    type_map: &TypeMap,
     out: &mut String,
 ) -> Result<(), CompileError> {
     match instr {
         Instruction::Nop => out.push_str("      nop\n"),
         Instruction::Return => out.push_str("      return\n"),
         Instruction::LocalGet { uid } => {
-            let idx = params.iter().position(|(n, _)| n == uid).ok_or_else(|| {
-                CompileError::InvalidInput(format!("LocalGet references unknown local {uid:?}"))
-            })?;
-            out.push_str(&format!("      local.get {idx}\n"));
+            let (first_idx, slots, _) = slot_info(uid, scope, type_map)?;
+            // For compound locals (option/result) this pushes disc then payload.
+            for i in 0..slots.len() {
+                out.push_str(&format!("      local.get {}\n", first_idx + i));
+            }
         }
         Instruction::Const { value } => {
             let ty = expected.unwrap_or("i32");
@@ -209,59 +354,55 @@ fn emit_instr(
         Instruction::Arithmetic { op, lhs, rhs } => {
             let ty = expected
                 .map(str::to_string)
-                .or_else(|| infer_wit_type(lhs, params, func_map))
-                .or_else(|| infer_wit_type(rhs, params, func_map))
+                .or_else(|| infer_wit_type(lhs, scope, func_map, type_map))
+                .or_else(|| infer_wit_type(rhs, scope, func_map, type_map))
                 .unwrap_or_else(|| "i32".to_string());
-            emit_instr(lhs, Some(&ty), params, func_map, out)?;
-            emit_instr(rhs, Some(&ty), params, func_map, out)?;
+            emit_instr(lhs, Some(&ty), scope, func_map, type_map, out)?;
+            emit_instr(rhs, Some(&ty), scope, func_map, type_map, out)?;
             out.push_str(&format!("      {}\n", arith_op(op.clone(), &ty)?));
         }
         Instruction::Compare { op, lhs, rhs } => {
             // Compare pushes i32 regardless of operand type, so `expected`
             // only tells us the final boolean width (always i32) — operand
             // type must be inferred from the operands themselves.
-            let operand_ty = infer_wit_type(lhs, params, func_map)
-                .or_else(|| infer_wit_type(rhs, params, func_map))
+            let operand_ty = infer_wit_type(lhs, scope, func_map, type_map)
+                .or_else(|| infer_wit_type(rhs, scope, func_map, type_map))
                 .unwrap_or_else(|| "i32".to_string());
-            emit_instr(lhs, Some(&operand_ty), params, func_map, out)?;
-            emit_instr(rhs, Some(&operand_ty), params, func_map, out)?;
+            emit_instr(lhs, Some(&operand_ty), scope, func_map, type_map, out)?;
+            emit_instr(rhs, Some(&operand_ty), scope, func_map, type_map, out)?;
             out.push_str(&format!("      {}\n", compare_op(op.clone(), &operand_ty)?));
         }
         Instruction::Call { func_uid, args } => {
             let target = func_map.get(func_uid).ok_or_else(|| {
                 CompileError::InvalidInput(format!("Call references unknown func {func_uid:?}"))
             })?;
-            // Push args in the target's declared param order (callers can
-            // supply them in any order since args are name-keyed pairs).
             for (pname, pty) in &target.params {
                 let (_, arg_instr) = args.iter().find(|(n, _)| n == pname).ok_or_else(|| {
                     CompileError::InvalidInput(format!(
                         "Call to {func_uid:?} missing arg for param {pname:?}"
                     ))
                 })?;
-                emit_instr(arg_instr, Some(pty), params, func_map, out)?;
+                emit_instr(arg_instr, Some(pty), scope, func_map, type_map, out)?;
             }
             out.push_str(&format!("      call ${}\n", mangle(func_uid)));
         }
         Instruction::LocalSet { uid, value } => {
-            let (idx, (_, ty)) = params
-                .iter()
-                .enumerate()
-                .find(|(_, (n, _))| n == uid)
-                .ok_or_else(|| {
-                    CompileError::InvalidInput(format!("LocalSet references unknown local {uid:?}"))
-                })?;
-            emit_instr(value, Some(ty), params, func_map, out)?;
-            out.push_str(&format!("      local.set {idx}\n"));
+            let (first_idx, slots, ty) = slot_info(uid, scope, type_map)?;
+            if slots.len() != 1 {
+                return Err(CompileError::Unsupported(format!(
+                    "LocalSet on compound local {uid:?} not supported yet"
+                )));
+            }
+            let ty_owned = ty.to_string();
+            emit_instr(value, Some(&ty_owned), scope, func_map, type_map, out)?;
+            out.push_str(&format!("      local.set {first_idx}\n"));
         }
         Instruction::If {
             condition,
             then_body,
             else_body,
         } => {
-            emit_instr(condition, None, params, func_map, out)?;
-            // If the consumer expects a value AND both branches are populated,
-            // emit a typed if — otherwise plain statement form.
+            emit_instr(condition, None, scope, func_map, type_map, out)?;
             let emit_typed = expected.is_some() && !else_body.is_empty();
             let result_clause = if emit_typed {
                 format!(" (result {})", wit_to_core(expected.unwrap())?)
@@ -271,12 +412,12 @@ fn emit_instr(
             out.push_str(&format!("      if{result_clause}\n"));
             let child_expected = if emit_typed { expected } else { None };
             for i in then_body {
-                emit_instr(i, child_expected, params, func_map, out)?;
+                emit_instr(i, child_expected, scope, func_map, type_map, out)?;
             }
             if !else_body.is_empty() {
                 out.push_str("      else\n");
                 for i in else_body {
-                    emit_instr(i, child_expected, params, func_map, out)?;
+                    emit_instr(i, child_expected, scope, func_map, type_map, out)?;
                 }
             }
             out.push_str("      end\n");
@@ -285,7 +426,7 @@ fn emit_instr(
             let lbl = label_clause(label.as_deref());
             out.push_str(&format!("      block{lbl}\n"));
             for i in body {
-                emit_instr(i, None, params, func_map, out)?;
+                emit_instr(i, None, scope, func_map, type_map, out)?;
             }
             out.push_str("      end\n");
         }
@@ -293,7 +434,7 @@ fn emit_instr(
             let lbl = label_clause(label.as_deref());
             out.push_str(&format!("      loop{lbl}\n"));
             for i in body {
-                emit_instr(i, None, params, func_map, out)?;
+                emit_instr(i, None, scope, func_map, type_map, out)?;
             }
             out.push_str("      end\n");
         }
@@ -301,8 +442,32 @@ fn emit_instr(
             out.push_str(&format!("      br ${}\n", mangle(label)));
         }
         Instruction::BrIf { label, condition } => {
-            emit_instr(condition, None, params, func_map, out)?;
+            emit_instr(condition, None, scope, func_map, type_map, out)?;
             out.push_str(&format!("      br_if ${}\n", mangle(label)));
+        }
+        Instruction::IsErr { value } => {
+            // v0.6: restrict to `LocalGet(result_param)`; generalizing requires
+            // knowing the static type of arbitrary sub-expressions.
+            let uid = match value.as_ref() {
+                Instruction::LocalGet { uid } => uid,
+                _ => {
+                    return Err(CompileError::Unsupported(
+                        "IsErr only supports LocalGet of a result local for now".into(),
+                    ));
+                }
+            };
+            let (first_idx, _, ty) = slot_info(uid, scope, type_map)?;
+            match resolve_type(ty, type_map)? {
+                ResolvedType::Result(_, _) => {
+                    // disc is at first_idx; a disc != 0 means `err`.
+                    out.push_str(&format!("      local.get {first_idx}\n"));
+                }
+                other => {
+                    return Err(CompileError::InvalidInput(format!(
+                        "IsErr applied to non-result local {uid:?} (resolved as {other:?})"
+                    )));
+                }
+            }
         }
         other => {
             return Err(CompileError::Unsupported(format!(
@@ -324,17 +489,17 @@ fn label_clause(label: Option<&str>) -> String {
 /// Returns `None` when the type is ambiguous (e.g. bare `Const`).
 fn infer_wit_type(
     instr: &Instruction,
-    params: &[(String, String)],
+    scope: &[(String, String)],
     func_map: &FuncMap,
+    type_map: &TypeMap,
 ) -> Option<String> {
     match instr {
-        Instruction::LocalGet { uid } => params
+        Instruction::LocalGet { uid } => scope
             .iter()
             .find(|(n, _)| n == uid)
             .map(|(_, ty)| ty.clone()),
-        Instruction::Arithmetic { lhs, rhs, .. } => {
-            infer_wit_type(lhs, params, func_map).or_else(|| infer_wit_type(rhs, params, func_map))
-        }
+        Instruction::Arithmetic { lhs, rhs, .. } => infer_wit_type(lhs, scope, func_map, type_map)
+            .or_else(|| infer_wit_type(rhs, scope, func_map, type_map)),
         Instruction::Compare { .. } => Some("bool".to_string()),
         Instruction::IsErr { .. } => Some("bool".to_string()),
         Instruction::Call { func_uid, .. } => func_map.get(func_uid).and_then(|f| f.result.clone()),

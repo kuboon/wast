@@ -30,7 +30,7 @@ See [crates/file-manager/PLAN.md](crates/file-manager/PLAN.md) for the SQLite mi
 | file-manager | `crates/file-manager/` | **Done** (JSON, row-oriented) | SQLite migration |
 | file-manager-hosted | `crates/file-manager-hosted/` | **Done** (JSON, row-oriented) | — |
 | wast-types (shared serde types) | `crates/wast-types/` | **Done** | — |
-| compiler | `crates/compiler/` | **v0.5 done** (numeric + Call incl. imports + control flow + locals) | option/result → string |
+| compiler | `crates/compiler/` | **v0.6 done** (+ option/result params, IsErr) | option/result returns (needs cabi_realloc) → string |
 | pattern-analyzer | `crates/syntax-plugin/internal/pattern-analyzer/` | **Done** | — |
 | raw syntax | `crates/syntax-plugin/raw/` | **Done** | — |
 | ruby-like syntax | `crates/syntax-plugin/ruby-like/` | **Partial** | `from_text` body parsing, body roundtrip tests |
@@ -54,7 +54,8 @@ See [crates/file-manager/PLAN.md](crates/file-manager/PLAN.md) for the SQLite mi
 - [x] v0.3: `Call` to internal funcs — single core module houses all internal + exported funcs, callers push args in the callee's declared param order (callers may pass args by name in any order)
 - [x] v0.4: control flow (`If`/`Else` with optional typed result, `Block`/`Loop`, `Br`/`BrIf`) + `LocalSet` with first-assignment local declaration (locals collected from body, emitted as `(local …)` after params)
 - [x] v0.5: imported `Call` — component-level `(import …)` → `canon lower` core func → core-module `(import "imports" "name" …)` wired via `(with "imports" (instance …))` at instantiation. Primitive-only imports (no memory/realloc yet)
-- [ ] Roadmap: `option/result` → `string` (requires `cabi_realloc`) → `list/record/variant/tuple/resource`
+- [x] v0.6: `option<prim>` / `result<prim, prim>` **in param position** + `IsErr` on result locals. Canonical-ABI flat layout: each compound param expands to `(i32 disc, join<payload> payload)` core slots. `LocalGet` pushes all slots; `IsErr` reads only the disc slot. Return position requires `cabi_realloc` — deferred.
+- [ ] Roadmap: option/result returns (needs cabi_realloc) → `string` → `list/record/variant/tuple/resource`
 - See [crates/compiler/PLAN.md](crates/compiler/PLAN.md) for full context
 
 ### file-manager (`crates/file-manager/src/lib.rs`)

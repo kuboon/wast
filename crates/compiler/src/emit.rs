@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use wast_pattern_analyzer::deserialize_body;
 use wast_types::{FuncSource, WastDb, WastFuncRow};
 
-use crate::core_emit::{FuncMap, collect_locals, emit_body, wit_abi_name, wit_to_core};
+use crate::core_emit::{FuncMap, TypeMap, collect_locals, emit_body, flat_slots, lifted_type_wat};
 use crate::error::CompileError;
 
 /// Fixed Component WAT for the v0 WASI CLI empty-run case.
@@ -65,6 +65,14 @@ pub fn compile_component(db: &WastDb, _world_wit: &str) -> Result<String, Compil
         .map(|r| (source_key(&r.func.source).to_string(), &r.func))
         .collect::<HashMap<_, _>>();
 
+    // Type map for resolving param/result type references (primitive vs
+    // option<T>/result<T,E>).
+    let type_map: TypeMap = db
+        .types
+        .iter()
+        .map(|r| (r.uid.clone(), &r.def.definition))
+        .collect::<HashMap<_, _>>();
+
     // Component-level imports + canon lower + core module imports.
     // Each imported func appears at three layers:
     //   (1) component-level `(import "name" (func $name_comp …))`
@@ -84,11 +92,11 @@ pub fn compile_component(db: &WastDb, _world_wit: &str) -> Result<String, Compil
             .func
             .params
             .iter()
-            .map(|(n, ty)| wit_abi_name(ty).map(|t| format!("(param \"{n}\" {t})")))
+            .map(|(n, ty)| lifted_type_wat(ty, &type_map).map(|t| format!("(param \"{n}\" {t})")))
             .collect::<Result<Vec<_>, _>>()?
             .join(" ");
         let comp_result = match &row.func.result {
-            Some(ty) => format!("(result {})", wit_abi_name(ty)?),
+            Some(ty) => format!("(result {})", lifted_type_wat(ty, &type_map)?),
             None => String::new(),
         };
         comp_imports.push_str(&format!(
@@ -99,17 +107,8 @@ pub fn compile_component(db: &WastDb, _world_wit: &str) -> Result<String, Compil
             "  (core func ${mangled} (canon lower (func ${mangled}_comp)))\n"
         ));
 
-        let core_params = row
-            .func
-            .params
-            .iter()
-            .map(|(_, ty)| wit_to_core(ty).map(|t| format!("(param {t})")))
-            .collect::<Result<Vec<_>, _>>()?
-            .join(" ");
-        let core_result = match &row.func.result {
-            Some(ty) => format!("(result {})", wit_to_core(ty)?),
-            None => String::new(),
-        };
+        let core_params = flat_param_clauses(&row.func.params, &type_map)?;
+        let core_result = flat_result_clause(row.func.result.as_deref(), &type_map)?;
         core_module_imports.push_str(&format!(
             "    (import \"imports\" \"{mangled}\" (func ${mangled} {core_params} {core_result}))\n"
         ));
@@ -119,7 +118,7 @@ pub fn compile_component(db: &WastDb, _world_wit: &str) -> Result<String, Compil
 
     let mut core_body = String::new();
     for row in internals.iter().chain(exports.iter()) {
-        core_body.push_str(&emit_core_func(row, &func_map)?);
+        core_body.push_str(&emit_core_func(row, &func_map, &type_map)?);
     }
 
     let instantiate_clause = if with_exports.is_empty() {
@@ -141,11 +140,11 @@ pub fn compile_component(db: &WastDb, _world_wit: &str) -> Result<String, Compil
             .func
             .params
             .iter()
-            .map(|(n, ty)| wit_abi_name(ty).map(|t| format!("(param \"{n}\" {t})")))
+            .map(|(n, ty)| lifted_type_wat(ty, &type_map).map(|t| format!("(param \"{n}\" {t})")))
             .collect::<Result<Vec<_>, _>>()?
             .join(" ");
         let lifted_result = match &row.func.result {
-            Some(ty) => format!("(result {})", wit_abi_name(ty)?),
+            Some(ty) => format!("(result {})", lifted_type_wat(ty, &type_map)?),
             None => String::new(),
         };
 
@@ -166,21 +165,16 @@ pub fn compile_component(db: &WastDb, _world_wit: &str) -> Result<String, Compil
 
 /// Emit a single core function definition for a WastDb row. Exported rows also
 /// get `(export "name")` so the host component can alias them.
-fn emit_core_func(row: &WastFuncRow, func_map: &FuncMap) -> Result<String, CompileError> {
+fn emit_core_func(
+    row: &WastFuncRow,
+    func_map: &FuncMap,
+    type_map: &TypeMap,
+) -> Result<String, CompileError> {
     let name = source_key(&row.func.source);
     let mangled = mangle(name);
 
-    let core_params = row
-        .func
-        .params
-        .iter()
-        .map(|(_, ty)| wit_to_core(ty).map(|t| format!("(param {t})")))
-        .collect::<Result<Vec<_>, _>>()?
-        .join(" ");
-    let core_result = match &row.func.result {
-        Some(ty) => format!("(result {})", wit_to_core(ty)?),
-        None => String::new(),
-    };
+    let core_params = flat_param_clauses(&row.func.params, type_map)?;
+    let core_result = flat_result_clause(row.func.result.as_deref(), type_map)?;
 
     let body_instr = match &row.func.body {
         Some(bytes) if !bytes.is_empty() => deserialize_body(bytes)
@@ -188,10 +182,17 @@ fn emit_core_func(row: &WastFuncRow, func_map: &FuncMap) -> Result<String, Compi
         _ => Vec::new(),
     };
 
-    let locals = collect_locals(&body_instr, &row.func.params, func_map);
+    let locals = collect_locals(&body_instr, &row.func.params, func_map, type_map);
     let locals_decl = locals
         .iter()
-        .map(|(_, ty)| wit_to_core(ty).map(|t| format!("(local {t})")))
+        .map(|(_, ty)| {
+            flat_slots(ty, type_map).map(|ts| {
+                ts.iter()
+                    .map(|t| format!("(local {t})"))
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            })
+        })
         .collect::<Result<Vec<_>, _>>()?
         .join(" ");
 
@@ -201,6 +202,7 @@ fn emit_core_func(row: &WastFuncRow, func_map: &FuncMap) -> Result<String, Compi
         &locals,
         row.func.result.as_deref(),
         func_map,
+        type_map,
     )?;
 
     let export_clause = match row.func.source {
@@ -217,6 +219,34 @@ fn emit_core_func(row: &WastFuncRow, func_map: &FuncMap) -> Result<String, Compi
     Ok(format!(
         "    (func ${mangled}{export_clause} {core_params} {core_result}{locals_clause}\n{body_wat}    )\n"
     ))
+}
+
+/// Flatten params into core WAT `(param T)` clauses (one per slot).
+fn flat_param_clauses(
+    params: &[(String, String)],
+    type_map: &TypeMap,
+) -> Result<String, CompileError> {
+    let mut parts = Vec::new();
+    for (_, ty) in params {
+        for slot in flat_slots(ty, type_map)? {
+            parts.push(format!("(param {slot})"));
+        }
+    }
+    Ok(parts.join(" "))
+}
+
+/// Flatten result into a core WAT `(result T …)` clause (empty if no result).
+fn flat_result_clause(result: Option<&str>, type_map: &TypeMap) -> Result<String, CompileError> {
+    match result {
+        None => Ok(String::new()),
+        Some(ty) => {
+            let slots = flat_slots(ty, type_map)?;
+            Ok(format!(
+                "(result {})",
+                slots.iter().copied().collect::<Vec<_>>().join(" ")
+            ))
+        }
+    }
 }
 
 /// Retrieve the uid-ish string from any FuncSource variant.
