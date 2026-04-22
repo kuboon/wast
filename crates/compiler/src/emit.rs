@@ -47,8 +47,13 @@ pub fn compile_component(db: &WastDb, _world_wit: &str) -> Result<String, Compil
         .iter()
         .filter(|r| matches!(r.func.source, FuncSource::Internal(_)))
         .collect();
+    let imports: Vec<&WastFuncRow> = db
+        .funcs
+        .iter()
+        .filter(|r| matches!(r.func.source, FuncSource::Imported(_)))
+        .collect();
 
-    if exports.is_empty() && internals.is_empty() && db.types.is_empty() {
+    if exports.is_empty() && internals.is_empty() && imports.is_empty() && db.types.is_empty() {
         return Ok(wasi_cli_empty_run_wat().to_string());
     }
 
@@ -60,10 +65,71 @@ pub fn compile_component(db: &WastDb, _world_wit: &str) -> Result<String, Compil
         .map(|r| (source_key(&r.func.source).to_string(), &r.func))
         .collect::<HashMap<_, _>>();
 
+    // Component-level imports + canon lower + core module imports.
+    // Each imported func appears at three layers:
+    //   (1) component-level `(import "name" (func $name_comp …))`
+    //   (2) core func `(core func $name (canon lower (func $name_comp)))`
+    //   (3) core module `(import "imports" "name" (func $name …))`
+    // and the core instantiation plumbs (2) into (3) via `with "imports" …`.
+    let mut comp_imports = String::new();
+    let mut core_lowers = String::new();
+    let mut core_module_imports = String::new();
+    let mut with_exports: Vec<String> = Vec::new();
+
+    for row in &imports {
+        let name = source_key(&row.func.source).to_string();
+        let mangled = mangle(&name);
+
+        let comp_params = row
+            .func
+            .params
+            .iter()
+            .map(|(n, ty)| wit_abi_name(ty).map(|t| format!("(param \"{n}\" {t})")))
+            .collect::<Result<Vec<_>, _>>()?
+            .join(" ");
+        let comp_result = match &row.func.result {
+            Some(ty) => format!("(result {})", wit_abi_name(ty)?),
+            None => String::new(),
+        };
+        comp_imports.push_str(&format!(
+            "  (import \"{name}\" (func ${mangled}_comp {comp_params} {comp_result}))\n"
+        ));
+
+        core_lowers.push_str(&format!(
+            "  (core func ${mangled} (canon lower (func ${mangled}_comp)))\n"
+        ));
+
+        let core_params = row
+            .func
+            .params
+            .iter()
+            .map(|(_, ty)| wit_to_core(ty).map(|t| format!("(param {t})")))
+            .collect::<Result<Vec<_>, _>>()?
+            .join(" ");
+        let core_result = match &row.func.result {
+            Some(ty) => format!("(result {})", wit_to_core(ty)?),
+            None => String::new(),
+        };
+        core_module_imports.push_str(&format!(
+            "    (import \"imports\" \"{mangled}\" (func ${mangled} {core_params} {core_result}))\n"
+        ));
+
+        with_exports.push(format!("      (export \"{mangled}\" (func ${mangled}))"));
+    }
+
     let mut core_body = String::new();
     for row in internals.iter().chain(exports.iter()) {
         core_body.push_str(&emit_core_func(row, &func_map)?);
     }
+
+    let instantiate_clause = if with_exports.is_empty() {
+        "(instantiate $Mod)".to_string()
+    } else {
+        format!(
+            "(instantiate $Mod\n    (with \"imports\" (instance\n{}\n    )))",
+            with_exports.join("\n")
+        )
+    };
 
     let mut lifted_funcs = String::new();
     let mut component_exports = String::new();
@@ -93,7 +159,7 @@ pub fn compile_component(db: &WastDb, _world_wit: &str) -> Result<String, Compil
     }
 
     let wat = format!(
-        "(component\n  (core module $Mod\n{core_body}  )\n  (core instance $m (instantiate $Mod))\n{lifted_funcs}{component_exports})\n"
+        "(component\n{comp_imports}{core_lowers}  (core module $Mod\n{core_module_imports}{core_body}  )\n  (core instance $m {instantiate_clause})\n{lifted_funcs}{component_exports})\n"
     );
     Ok(wat)
 }
