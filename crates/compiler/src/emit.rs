@@ -8,6 +8,51 @@ use wast_types::{FuncSource, WastDb, WastFuncRow};
 use crate::core_emit::{FuncMap, TypeMap, collect_locals, emit_body, flat_slots, lifted_type_wat};
 use crate::error::CompileError;
 
+/// Memory + `cabi_realloc` infrastructure injected into every non-empty core
+/// module. Exports `memory` and `cabi_realloc`, which `canon lift`/`canon
+/// lower` reference by name. The allocator is a simple bump allocator over
+/// a single memory page starting at offset 1024 (leaving room for future
+/// static data / stack). `memory.copy` (bulk-memory) handles realloc grows.
+const CABI_REALLOC_WAT: &str = r#"    (memory (export "memory") 1)
+    (global $heap_end (mut i32) (i32.const 1024))
+    (func $cabi_realloc (export "cabi_realloc")
+      (param $orig_ptr i32) (param $orig_size i32) (param $align i32) (param $new_size i32)
+      (result i32)
+      (local $aligned i32)
+      ;; aligned = (heap_end + align - 1) & ~(align - 1)
+      global.get $heap_end
+      local.get $align
+      i32.const 1
+      i32.sub
+      i32.add
+      local.get $align
+      i32.const 1
+      i32.sub
+      i32.const -1
+      i32.xor
+      i32.and
+      local.tee $aligned
+      ;; heap_end = aligned + new_size
+      local.get $new_size
+      i32.add
+      global.set $heap_end
+      ;; Copy old bytes if this is a realloc-grow
+      local.get $orig_size
+      if
+        local.get $aligned
+        local.get $orig_ptr
+        local.get $orig_size
+        memory.copy
+      end
+      local.get $aligned
+    )
+"#;
+
+/// Canon lift/lower options that tie a lifted or lowered func to the core
+/// module's memory + realloc. Always emitted when we're past the empty-run
+/// special case so strings/lists/compound returns work uniformly.
+const CANON_OPTS: &str = "\n    (memory $m \"memory\")\n    (realloc (func $m \"cabi_realloc\"))";
+
 /// Fixed Component WAT for the v0 WASI CLI empty-run case.
 ///
 /// The outer component exposes the `wasi:cli/run@0.2.0` instance; its single
@@ -103,6 +148,10 @@ pub fn compile_component(db: &WastDb, _world_wit: &str) -> Result<String, Compil
             "  (import \"{name}\" (func ${mangled}_comp {comp_params} {comp_result}))\n"
         ));
 
+        // canon lower can't reference $m (the core instance) because the core
+        // instance is created AFTER these lowerings — circular reference.
+        // For primitive-only imports no memory is needed; compound imports
+        // will need a two-module split (allocator module separate) — deferred.
         core_lowers.push_str(&format!(
             "  (core func ${mangled} (canon lower (func ${mangled}_comp)))\n"
         ));
@@ -149,7 +198,7 @@ pub fn compile_component(db: &WastDb, _world_wit: &str) -> Result<String, Compil
         };
 
         lifted_funcs.push_str(&format!(
-            "  (func ${mangled}_lifted {lifted_params} {lifted_result}\n    (canon lift (core func $m \"{mangled}\")))\n",
+            "  (func ${mangled}_lifted {lifted_params} {lifted_result}\n    (canon lift (core func $m \"{mangled}\"){CANON_OPTS}))\n",
         ));
 
         component_exports.push_str(&format!(
@@ -158,7 +207,7 @@ pub fn compile_component(db: &WastDb, _world_wit: &str) -> Result<String, Compil
     }
 
     let wat = format!(
-        "(component\n{comp_imports}{core_lowers}  (core module $Mod\n{core_module_imports}{core_body}  )\n  (core instance $m {instantiate_clause})\n{lifted_funcs}{component_exports})\n"
+        "(component\n{comp_imports}{core_lowers}  (core module $Mod\n{core_module_imports}{CABI_REALLOC_WAT}{core_body}  )\n  (core instance $m {instantiate_clause})\n{lifted_funcs}{component_exports})\n"
     );
     Ok(wat)
 }

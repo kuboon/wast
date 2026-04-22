@@ -30,7 +30,7 @@ See [crates/file-manager/PLAN.md](crates/file-manager/PLAN.md) for the SQLite mi
 | file-manager | `crates/file-manager/` | **Done** (JSON, row-oriented) | SQLite migration |
 | file-manager-hosted | `crates/file-manager-hosted/` | **Done** (JSON, row-oriented) | — |
 | wast-types (shared serde types) | `crates/wast-types/` | **Done** | — |
-| compiler | `crates/compiler/` | **v0.6 done** (+ option/result params, IsErr) | option/result returns (needs cabi_realloc) → string |
+| compiler | `crates/compiler/` | **v0.7 done** (+ memory + `cabi_realloc` infra) | compound returns (Some/Ok/Err) → string/list |
 | pattern-analyzer | `crates/syntax-plugin/internal/pattern-analyzer/` | **Done** | — |
 | raw syntax | `crates/syntax-plugin/raw/` | **Done** | — |
 | ruby-like syntax | `crates/syntax-plugin/ruby-like/` | **Partial** | `from_text` body parsing, body roundtrip tests |
@@ -55,7 +55,8 @@ See [crates/file-manager/PLAN.md](crates/file-manager/PLAN.md) for the SQLite mi
 - [x] v0.4: control flow (`If`/`Else` with optional typed result, `Block`/`Loop`, `Br`/`BrIf`) + `LocalSet` with first-assignment local declaration (locals collected from body, emitted as `(local …)` after params)
 - [x] v0.5: imported `Call` — component-level `(import …)` → `canon lower` core func → core-module `(import "imports" "name" …)` wired via `(with "imports" (instance …))` at instantiation. Primitive-only imports (no memory/realloc yet)
 - [x] v0.6: `option<prim>` / `result<prim, prim>` **in param position** + `IsErr` on result locals. Canonical-ABI flat layout: each compound param expands to `(i32 disc, join<payload> payload)` core slots. `LocalGet` pushes all slots; `IsErr` reads only the disc slot. Return position requires `cabi_realloc` — deferred.
-- [ ] Roadmap: option/result returns (needs cabi_realloc) → `string` → `list/record/variant/tuple/resource`
+- [x] v0.7: memory + `cabi_realloc` infrastructure. Every non-empty core module now exports `memory` (1 page) + a bump-allocator `cabi_realloc` backed by a mutable `$heap_end` global (starts at 1024). Bulk `memory.copy` handles realloc grows. `canon lift` threads `(memory $m "memory") (realloc (func $m "cabi_realloc"))`. `canon lower` still lacks options due to circular ref (core instance $m not yet created) — compound imports deferred until the allocator module is split out.
+- [ ] Roadmap: compound returns (Some/Ok/Err with payload via indirect return) → `string` → `list/record/variant/tuple/resource`
 - See [crates/compiler/PLAN.md](crates/compiler/PLAN.md) for full context
 
 ### file-manager (`crates/file-manager/src/lib.rs`)
