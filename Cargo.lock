@@ -1490,6 +1490,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "spdx"
+version = "0.10.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c3e17e880bafaeb362a7b751ec46bdc5b61445a188f80e0606e68167cd540fa3"
+dependencies = [
+ "smallvec",
+]
+
+[[package]]
 name = "spin"
 version = "0.9.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1851,6 +1860,22 @@ dependencies = [
 
 [[package]]
 name = "wasm-metadata"
+version = "0.219.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b1ef51bd442042a2a7b562dddb6016ead52c4abab254c376dcffc83add2c9c34"
+dependencies = [
+ "anyhow",
+ "indexmap",
+ "serde",
+ "serde_derive",
+ "serde_json",
+ "spdx",
+ "wasm-encoder 0.219.2",
+ "wasmparser 0.219.2",
+]
+
+[[package]]
+name = "wasm-metadata"
 version = "0.246.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e3e4c2aa916c425dcca61a6887d3e135acdee2c6d0ed51fd61c08d41ddaf62b1"
@@ -2203,6 +2228,8 @@ dependencies = [
  "wast-pattern-analyzer",
  "wast-types",
  "wat",
+ "wit-component 0.219.2",
+ "wit-parser 0.219.2",
 ]
 
 [[package]]
@@ -2591,9 +2618,9 @@ dependencies = [
  "indexmap",
  "prettyplease",
  "syn",
- "wasm-metadata",
+ "wasm-metadata 0.246.2",
  "wit-bindgen-core",
- "wit-component",
+ "wit-component 0.246.2",
 ]
 
 [[package]]
@@ -2614,6 +2641,25 @@ dependencies = [
 
 [[package]]
 name = "wit-component"
+version = "0.219.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4b8479a29d81c063264c3ab89d496787ef78f8345317a2dcf6dece0f129e5fcd"
+dependencies = [
+ "anyhow",
+ "bitflags",
+ "indexmap",
+ "log",
+ "serde",
+ "serde_derive",
+ "serde_json",
+ "wasm-encoder 0.219.2",
+ "wasm-metadata 0.219.2",
+ "wasmparser 0.219.2",
+ "wit-parser 0.219.2",
+]
+
+[[package]]
+name = "wit-component"
 version = "0.246.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1936c26cb24b93dc36bf78fb5dc35c55cd37f66ecdc2d2663a717d9fb3ee951e"
@@ -2626,7 +2672,7 @@ dependencies = [
  "serde_derive",
  "serde_json",
  "wasm-encoder 0.246.2",
- "wasm-metadata",
+ "wasm-metadata 0.246.2",
  "wasmparser 0.246.2",
  "wit-parser 0.246.2",
 ]

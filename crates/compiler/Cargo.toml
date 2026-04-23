@@ -8,6 +8,8 @@ license.workspace = true
 wast-types = { path = "../wast-types" }
 wast-pattern-analyzer = { path = "../syntax-plugin/internal/pattern-analyzer" }
 wat = "1"
+wit-component = "0.219"
+wit-parser = "0.219"
 
 [dev-dependencies]
 wasmtime = { version = "27", features = ["component-model"] }
