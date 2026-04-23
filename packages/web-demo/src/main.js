@@ -30,11 +30,6 @@ function h(tag, props = {}, children = []) {
   return el;
 }
 
-/** Convert a string or JSON preset to the actual args array for `call`. */
-function parsePreset(text) {
-  return JSON.parse(text);
-}
-
 /** Map a manifest result tag + runtime value to a printable string. */
 function formatResult(tag, value) {
   if (value === undefined) return "(void)";
@@ -130,19 +125,20 @@ function buildCard(demo) {
 
   const presets = h("div", { class: "presets" });
   for (const preset of demo.presets) {
+    // `preset` is already an Array (parsed from the manifest JSON). Don't
+    // JSON.parse it — each element maps straight to the corresponding input.
     presets.append(h("button", {
       type: "button",
       on: {
         click: () => {
-          const args = parsePreset(preset);
           demo.params.forEach((p, i) => {
             const el = inputs.querySelector(`input[data-name="${p.name}"]`);
             if (!el) return;
-            el.value = typeof args[i] === "string" ? JSON.stringify(args[i]) : JSON.stringify(args[i]);
+            el.value = JSON.stringify(preset[i]);
           });
         },
       },
-    }, preset));
+    }, JSON.stringify(preset)));
   }
   card.append(presets);
 
