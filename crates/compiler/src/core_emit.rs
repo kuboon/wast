@@ -188,45 +188,6 @@ pub fn store_op(ty: &str) -> Result<(&'static str, u32), CompileError> {
     })
 }
 
-/// Component-Model-level WAT type string for a WIT type reference.
-/// E.g. `u32` → `u32`, `i32` → `s32`, `option<u32>` → `(option u32)`,
-/// `result<u32, u32>` → `(result u32 (error u32))`.
-pub fn lifted_type_wat(ty_ref: &str, type_map: &TypeMap) -> Result<String, CompileError> {
-    match resolve_type(ty_ref, type_map)? {
-        ResolvedType::Primitive(p) => Ok(wit_abi_name(&p)?.to_string()),
-        ResolvedType::Option(inner) => Ok(format!("(option {})", wit_abi_name(&inner)?)),
-        ResolvedType::Result(ok, err) => Ok(format!(
-            "(result {} (error {}))",
-            wit_abi_name(&ok)?,
-            wit_abi_name(&err)?
-        )),
-    }
-}
-
-/// Map a project-WIT primitive type name (`u32`/`i32`/…) to the WIT ABI
-/// token accepted in a Component's lifted function signature. The project
-/// uses `i32`/`i64` for signed integers; Component Model WIT spells them
-/// `s32`/`s64`.
-pub fn wit_abi_name(ty: &str) -> Result<&'static str, CompileError> {
-    match ty {
-        "i32" => Ok("s32"),
-        "i64" => Ok("s64"),
-        "u32" | "u64" | "f32" | "f64" | "bool" | "char" | "string" => Ok(match ty {
-            "u32" => "u32",
-            "u64" => "u64",
-            "f32" => "f32",
-            "f64" => "f64",
-            "bool" => "bool",
-            "char" => "char",
-            "string" => "string",
-            _ => unreachable!(),
-        }),
-        _ => Err(CompileError::Unsupported(format!(
-            "WIT type {ty} is not supported yet"
-        ))),
-    }
-}
-
 /// Map a WIT primitive type name (e.g. `"u32"`) to the core WASM type token
 /// used in WAT text (`"i32"`, `"i64"`, `"f32"`, `"f64"`).
 pub fn wit_to_core(ty: &str) -> Result<&'static str, CompileError> {

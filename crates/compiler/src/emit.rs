@@ -1,66 +1,65 @@
-//! Component WAT text assembly.
+//! Core module WAT assembly + component wrap via `wit-component`.
+//!
+//! v0.11 dropped hand-rolled `(component …)` outer shells, `canon lift`,
+//! `canon lower`, and memory-option threading in favor of letting
+//! `wit-component::ComponentEncoder` synthesize all of that from a core
+//! module + embedded `component-type` custom section. We now only emit a
+//! single `(module …)` and a generated WIT world string; wit-component
+//! handles the Canonical ABI wiring for primitives, option/result, and
+//! (future) string/list/record/variant.
 
 use std::collections::HashMap;
 
 use wast_pattern_analyzer::deserialize_body;
 use wast_types::{FuncSource, WastDb, WastFuncRow};
+use wit_component::{ComponentEncoder, StringEncoding, embed_component_metadata};
+use wit_parser::Resolve;
 
 use crate::core_emit::{
-    FuncMap, TypeMap, body_needs_ret_ptr, collect_locals, emit_body, flat_slots, lifted_type_wat,
-    return_is_indirect,
+    FuncMap, ResolvedType, TypeMap, body_needs_ret_ptr, collect_locals, emit_body, flat_slots,
+    resolve_type, return_is_indirect,
 };
 use crate::error::CompileError;
 
 /// Memory + `cabi_realloc` infrastructure injected into every non-empty core
-/// module. Exports `memory` and `cabi_realloc`, which `canon lift`/`canon
-/// lower` reference by name. The allocator is a simple bump allocator over
-/// a single memory page starting at offset 1024 (leaving room for future
-/// static data / stack). `memory.copy` (bulk-memory) handles realloc grows.
-const CABI_REALLOC_WAT: &str = r#"    (memory (export "memory") 1)
-    (global $heap_end (mut i32) (i32.const 1024))
-    (func $cabi_realloc (export "cabi_realloc")
-      (param $orig_ptr i32) (param $orig_size i32) (param $align i32) (param $new_size i32)
-      (result i32)
-      (local $aligned i32)
-      ;; aligned = (heap_end + align - 1) & ~(align - 1)
-      global.get $heap_end
-      local.get $align
-      i32.const 1
-      i32.sub
-      i32.add
-      local.get $align
-      i32.const 1
-      i32.sub
-      i32.const -1
-      i32.xor
-      i32.and
-      local.tee $aligned
-      ;; heap_end = aligned + new_size
-      local.get $new_size
-      i32.add
-      global.set $heap_end
-      ;; Copy old bytes if this is a realloc-grow
-      local.get $orig_size
-      if
-        local.get $aligned
-        local.get $orig_ptr
-        local.get $orig_size
-        memory.copy
-      end
+/// module. Bump allocator over a single memory page starting at offset 1024;
+/// `memory.copy` handles realloc-grow.
+const CABI_REALLOC_WAT: &str = r#"  (memory (export "memory") 1)
+  (global $heap_end (mut i32) (i32.const 1024))
+  (func $cabi_realloc (export "cabi_realloc")
+    (param $orig_ptr i32) (param $orig_size i32) (param $align i32) (param $new_size i32)
+    (result i32)
+    (local $aligned i32)
+    global.get $heap_end
+    local.get $align
+    i32.const 1
+    i32.sub
+    i32.add
+    local.get $align
+    i32.const 1
+    i32.sub
+    i32.const -1
+    i32.xor
+    i32.and
+    local.tee $aligned
+    local.get $new_size
+    i32.add
+    global.set $heap_end
+    local.get $orig_size
+    if
       local.get $aligned
-    )
+      local.get $orig_ptr
+      local.get $orig_size
+      memory.copy
+    end
+    local.get $aligned
+  )
 "#;
 
-/// Canon lift/lower options that tie a lifted or lowered func to the core
-/// module's memory + realloc. Always emitted when we're past the empty-run
-/// special case so strings/lists/compound returns work uniformly.
-const CANON_OPTS: &str = "\n    (memory $m \"memory\")\n    (realloc (func $m \"cabi_realloc\"))";
-
-/// Fixed Component WAT for the v0 WASI CLI empty-run case.
-///
-/// The outer component exposes the `wasi:cli/run@0.2.0` instance; its single
-/// export `run` returns `result<_, _>` and we always return `ok` (discriminant
-/// `0`) via the core function `mod-main`. No imports, no memory, no realloc.
+/// Fixed Component binary for the v0 WASI CLI empty-run case. Kept as a
+/// verbatim Component WAT (not synthesized via wit-component) because the
+/// WASI CLI world exports `wasi:cli/run@0.2.0` with an inner-component
+/// wrapping pattern that predates this compiler and is not worth generating.
 pub fn wasi_cli_empty_run_wat() -> &'static str {
     r#"(component
   (core module $Mod
@@ -78,145 +77,98 @@ pub fn wasi_cli_empty_run_wat() -> &'static str {
 "#
 }
 
-/// Build the full Component WAT for a `WastDb`.
+/// Compile a `WastDb` into a WASM Component binary.
 ///
-/// Empty input falls back to the v0 WASI CLI empty-run fixed component (so the
-/// v0 smoke test keeps working). Otherwise all internal + exported funcs land
-/// in a single core module (so they can `call` each other by name), and every
-/// `FuncSource::Exported` row also becomes a top-level component export.
-pub fn compile_component(db: &WastDb, _world_wit: &str) -> Result<String, CompileError> {
-    let exports: Vec<&WastFuncRow> = db
-        .funcs
-        .iter()
-        .filter(|r| matches!(r.func.source, FuncSource::Exported(_)))
-        .collect();
-    let internals: Vec<&WastFuncRow> = db
-        .funcs
-        .iter()
-        .filter(|r| matches!(r.func.source, FuncSource::Internal(_)))
-        .collect();
-    let imports: Vec<&WastFuncRow> = db
-        .funcs
-        .iter()
-        .filter(|r| matches!(r.func.source, FuncSource::Imported(_)))
-        .collect();
-
-    if exports.is_empty() && internals.is_empty() && imports.is_empty() && db.types.is_empty() {
-        return Ok(wasi_cli_empty_run_wat().to_string());
+/// Empty input returns the fixed WASI CLI empty-run component (verbatim WAT,
+/// then parsed to bytes). Otherwise:
+///  1. Emit a core-only `(module …)` with memory + cabi_realloc + funcs
+///  2. Synthesize a WIT world string from `db`'s exports/imports
+///  3. Embed the `component-type` custom section
+///  4. Wrap via `wit_component::ComponentEncoder`
+pub fn compile_component(db: &WastDb, _world_wit: &str) -> Result<Vec<u8>, CompileError> {
+    if db.funcs.is_empty() && db.types.is_empty() {
+        return wat::parse_str(wasi_cli_empty_run_wat())
+            .map_err(|e| CompileError::WatParse(e.to_string()));
     }
 
-    // Func map for Call resolution — keyed on the source uid so
-    // `Instruction::Call { func_uid }` matches whatever FuncSource stored.
     let func_map: FuncMap = db
         .funcs
         .iter()
         .map(|r| (source_key(&r.func.source).to_string(), &r.func))
         .collect::<HashMap<_, _>>();
-
-    // Type map for resolving param/result type references (primitive vs
-    // option<T>/result<T,E>).
     let type_map: TypeMap = db
         .types
         .iter()
         .map(|r| (r.uid.clone(), &r.def.definition))
         .collect::<HashMap<_, _>>();
 
-    // Component-level imports + canon lower + core module imports.
-    // Each imported func appears at three layers:
-    //   (1) component-level `(import "name" (func $name_comp …))`
-    //   (2) core func `(core func $name (canon lower (func $name_comp)))`
-    //   (3) core module `(import "imports" "name" (func $name …))`
-    // and the core instantiation plumbs (2) into (3) via `with "imports" …`.
-    let mut comp_imports = String::new();
-    let mut core_lowers = String::new();
-    let mut core_module_imports = String::new();
-    let mut with_exports: Vec<String> = Vec::new();
+    let core_wat = emit_core_module(db, &func_map, &type_map)?;
+    let mut core_bytes = wat::parse_str(&core_wat)
+        .map_err(|e| CompileError::WatParse(format!("{e}\n--- WAT ---\n{core_wat}")))?;
 
-    for row in &imports {
-        let name = source_key(&row.func.source).to_string();
-        let mangled = mangle(&name);
+    let wit_src = synthesize_world(db, &type_map)?;
+    let mut resolve = Resolve::default();
+    let pkg = resolve.push_str("generated.wit", &wit_src).map_err(|e| {
+        CompileError::InvalidInput(format!("wit parse failed: {e}\n--- WIT ---\n{wit_src}"))
+    })?;
+    let world = resolve.select_world(pkg, None).map_err(|e| {
+        CompileError::InvalidInput(format!(
+            "wit select_world failed: {e}\n--- WIT ---\n{wit_src}"
+        ))
+    })?;
 
-        let comp_params = row
-            .func
-            .params
-            .iter()
-            .map(|(n, ty)| lifted_type_wat(ty, &type_map).map(|t| format!("(param \"{n}\" {t})")))
-            .collect::<Result<Vec<_>, _>>()?
-            .join(" ");
-        let comp_result = match &row.func.result {
-            Some(ty) => format!("(result {})", lifted_type_wat(ty, &type_map)?),
-            None => String::new(),
-        };
-        comp_imports.push_str(&format!(
-            "  (import \"{name}\" (func ${mangled}_comp {comp_params} {comp_result}))\n"
-        ));
+    embed_component_metadata(&mut core_bytes, &resolve, world, StringEncoding::UTF8)
+        .map_err(|e| CompileError::InvalidInput(format!("embed_component_metadata failed: {e}")))?;
 
-        // canon lower can't reference $m (the core instance) because the core
-        // instance is created AFTER these lowerings — circular reference.
-        // For primitive-only imports no memory is needed; compound imports
-        // will need a two-module split (allocator module separate) — deferred.
-        core_lowers.push_str(&format!(
-            "  (core func ${mangled} (canon lower (func ${mangled}_comp)))\n"
-        ));
-
-        let core_params = flat_param_clauses(&row.func.params, &type_map)?;
-        let core_result = flat_result_clause(row.func.result.as_deref(), &type_map)?;
-        core_module_imports.push_str(&format!(
-            "    (import \"imports\" \"{mangled}\" (func ${mangled} {core_params} {core_result}))\n"
-        ));
-
-        with_exports.push(format!("      (export \"{mangled}\" (func ${mangled}))"));
-    }
-
-    let mut core_body = String::new();
-    for row in internals.iter().chain(exports.iter()) {
-        core_body.push_str(&emit_core_func(row, &func_map, &type_map)?);
-    }
-
-    let instantiate_clause = if with_exports.is_empty() {
-        "(instantiate $Mod)".to_string()
-    } else {
-        format!(
-            "(instantiate $Mod\n    (with \"imports\" (instance\n{}\n    )))",
-            with_exports.join("\n")
-        )
-    };
-
-    let mut lifted_funcs = String::new();
-    let mut component_exports = String::new();
-    for row in &exports {
-        let export_name = source_key(&row.func.source).to_string();
-        let mangled = mangle(&export_name);
-
-        let lifted_params = row
-            .func
-            .params
-            .iter()
-            .map(|(n, ty)| lifted_type_wat(ty, &type_map).map(|t| format!("(param \"{n}\" {t})")))
-            .collect::<Result<Vec<_>, _>>()?
-            .join(" ");
-        let lifted_result = match &row.func.result {
-            Some(ty) => format!("(result {})", lifted_type_wat(ty, &type_map)?),
-            None => String::new(),
-        };
-
-        lifted_funcs.push_str(&format!(
-            "  (func ${mangled}_lifted {lifted_params} {lifted_result}\n    (canon lift (core func $m \"{mangled}\"){CANON_OPTS}))\n",
-        ));
-
-        component_exports.push_str(&format!(
-            "  (export \"{export_name}\" (func ${mangled}_lifted))\n",
-        ));
-    }
-
-    let wat = format!(
-        "(component\n{comp_imports}{core_lowers}  (core module $Mod\n{core_module_imports}{CABI_REALLOC_WAT}{core_body}  )\n  (core instance $m {instantiate_clause})\n{lifted_funcs}{component_exports})\n"
-    );
-    Ok(wat)
+    ComponentEncoder::default()
+        .validate(true)
+        .module(&core_bytes)
+        .map_err(|e| CompileError::InvalidInput(format!("ComponentEncoder::module failed: {e}")))?
+        .encode()
+        .map_err(|e| CompileError::InvalidInput(format!("ComponentEncoder::encode failed: {e}")))
 }
 
-/// Emit a single core function definition for a WastDb row. Exported rows also
-/// get `(export "name")` so the host component can alias them.
+/// Emit a single `(module …)` containing memory + realloc + imports +
+/// internal + exported funcs. Exports use the unmangled WIT name so
+/// `wit-component` matches them to the WIT world.
+fn emit_core_module(
+    db: &WastDb,
+    func_map: &FuncMap,
+    type_map: &TypeMap,
+) -> Result<String, CompileError> {
+    let mut imports = String::new();
+    for row in db
+        .funcs
+        .iter()
+        .filter(|r| matches!(r.func.source, FuncSource::Imported(_)))
+    {
+        let name = source_key(&row.func.source);
+        let mangled = mangle(name);
+        let core_params = flat_param_clauses(&row.func.params, type_map)?;
+        let core_result = flat_result_clause(row.func.result.as_deref(), type_map)?;
+        imports.push_str(&format!(
+            "  (import \"$root\" \"{name}\" (func ${mangled} {core_params} {core_result}))\n"
+        ));
+    }
+
+    let mut body_funcs = String::new();
+    for row in db.funcs.iter().filter(|r| {
+        matches!(
+            r.func.source,
+            FuncSource::Internal(_) | FuncSource::Exported(_)
+        )
+    }) {
+        body_funcs.push_str(&emit_core_func(row, func_map, type_map)?);
+    }
+
+    Ok(format!(
+        "(module\n{imports}{CABI_REALLOC_WAT}{body_funcs})\n"
+    ))
+}
+
+/// Emit a single core function definition. Exported rows carry `(export
+/// "name")` with the **unmangled** WIT name so wit-component can bind it.
+/// The `$mangled` WAT identifier is used only for intra-module references.
 fn emit_core_func(
     row: &WastFuncRow,
     func_map: &FuncMap,
@@ -236,8 +188,6 @@ fn emit_core_func(
 
     let locals = collect_locals(&body_instr, &row.func.params, func_map, type_map);
 
-    // Compute core slot positions so `ret_ptr_slot` lands right after all
-    // user-declared params+locals.
     let param_slot_count: usize = row
         .func
         .params
@@ -281,8 +231,8 @@ fn emit_core_func(
         ret_ptr_slot,
     )?;
 
-    let export_clause = match row.func.source {
-        FuncSource::Exported(_) => format!(" (export \"{mangled}\")"),
+    let export_clause = match &row.func.source {
+        FuncSource::Exported(n) => format!(" (export \"{n}\")"),
         _ => String::new(),
     };
 
@@ -293,11 +243,11 @@ fn emit_core_func(
     };
 
     Ok(format!(
-        "    (func ${mangled}{export_clause} {core_params} {core_result}{locals_clause}\n{body_wat}    )\n"
+        "  (func ${mangled}{export_clause} {core_params} {core_result}{locals_clause}\n{body_wat}  )\n"
     ))
 }
 
-/// Flatten params into core WAT `(param T)` clauses (one per slot).
+/// Flatten params into core WAT `(param T)` clauses (one per flat slot).
 fn flat_param_clauses(
     params: &[(String, String)],
     type_map: &TypeMap,
@@ -311,12 +261,8 @@ fn flat_param_clauses(
     Ok(parts.join(" "))
 }
 
-/// Flatten result into a core WAT `(result …)` clause.
-///
-/// For types within `MAX_FLAT_RESULTS` the clause is the full flat list; for
-/// types that exceed it (e.g. option/result with payload) the core function
-/// uses indirect return — a single `i32` pointer to caller-allocated (for
-/// lower) or callee-allocated (for lift) memory.
+/// Flatten result into a core WAT `(result …)` clause. Indirect-return
+/// types (flat > `MAX_FLAT_RESULTS`) collapse to a single `i32` pointer.
 fn flat_result_clause(result: Option<&str>, type_map: &TypeMap) -> Result<String, CompileError> {
     match result {
         None => Ok(String::new()),
@@ -331,6 +277,69 @@ fn flat_result_clause(result: Option<&str>, type_map: &TypeMap) -> Result<String
     }
 }
 
+/// Synthesize a WIT world string from the db's exports + imports. Type refs
+/// are inlined (no `type` declarations) — `option<u32>` / `result<u32, u32>`
+/// are emitted directly at each use site.
+fn synthesize_world(db: &WastDb, type_map: &TypeMap) -> Result<String, CompileError> {
+    let mut out = String::new();
+    out.push_str("package wast:generated;\n\nworld generated {\n");
+
+    for row in &db.funcs {
+        match &row.func.source {
+            FuncSource::Exported(name) => {
+                let sig = format_wit_sig(&row.func.params, row.func.result.as_deref(), type_map)?;
+                out.push_str(&format!("  export {name}: {sig};\n"));
+            }
+            FuncSource::Imported(name) => {
+                let sig = format_wit_sig(&row.func.params, row.func.result.as_deref(), type_map)?;
+                out.push_str(&format!("  import {name}: {sig};\n"));
+            }
+            FuncSource::Internal(_) => {}
+        }
+    }
+
+    out.push_str("}\n");
+    Ok(out)
+}
+
+fn format_wit_sig(
+    params: &[(String, String)],
+    result: Option<&str>,
+    type_map: &TypeMap,
+) -> Result<String, CompileError> {
+    let params_wit = params
+        .iter()
+        .map(|(n, ty)| format_wit_type(ty, type_map).map(|t| format!("{n}: {t}")))
+        .collect::<Result<Vec<_>, _>>()?
+        .join(", ");
+    let result_wit = match result {
+        Some(ty) => format!(" -> {}", format_wit_type(ty, type_map)?),
+        None => String::new(),
+    };
+    Ok(format!("func({params_wit}){result_wit}"))
+}
+
+/// Render a WIT type reference as WIT source syntax (as opposed to WAT's
+/// parenthesized form). `i32` → `s32`, `i64` → `s64`, compound types use
+/// the `name<args>` brackets.
+fn format_wit_type(ty: &str, type_map: &TypeMap) -> Result<String, CompileError> {
+    match resolve_type(ty, type_map)? {
+        ResolvedType::Primitive(p) => Ok(match p.as_str() {
+            "i32" => "s32".to_string(),
+            "i64" => "s64".to_string(),
+            other => other.to_string(),
+        }),
+        ResolvedType::Option(inner) => {
+            Ok(format!("option<{}>", format_wit_type(&inner, type_map)?))
+        }
+        ResolvedType::Result(ok, err) => Ok(format!(
+            "result<{}, {}>",
+            format_wit_type(&ok, type_map)?,
+            format_wit_type(&err, type_map)?
+        )),
+    }
+}
+
 /// Retrieve the uid-ish string from any FuncSource variant.
 fn source_key(s: &FuncSource) -> &str {
     match s {
@@ -338,8 +347,9 @@ fn source_key(s: &FuncSource) -> &str {
     }
 }
 
-/// Turn an arbitrary WIT export name (which may contain `-` or other chars
-/// WAT identifiers disallow) into a WAT-safe identifier.
+/// Turn an arbitrary WIT name (which may contain `-` or other chars WAT
+/// identifiers disallow) into a WAT-safe identifier for internal references.
+/// Export *strings* keep the original kebab form so WIT matching works.
 pub(crate) fn mangle(name: &str) -> String {
     name.chars()
         .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
