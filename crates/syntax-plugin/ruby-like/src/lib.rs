@@ -313,6 +313,10 @@ fn render_instruction(
             let val = render_expr(value, local_names, func_names);
             format!("{}is_err({})", indent, val)
         }
+        Instruction::StringLen { value } => {
+            let val = render_expr(value, local_names, func_names);
+            format!("{}{}.bytesize", indent, val)
+        }
         Instruction::MatchOption {
             value,
             some_binding,

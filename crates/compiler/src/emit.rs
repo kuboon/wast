@@ -329,6 +329,7 @@ fn format_wit_type(ty: &str, type_map: &TypeMap) -> Result<String, CompileError>
             "i64" => "s64".to_string(),
             other => other.to_string(),
         }),
+        ResolvedType::String => Ok("string".to_string()),
         ResolvedType::Option(inner) => {
             Ok(format!("option<{}>", format_wit_type(&inner, type_map)?))
         }

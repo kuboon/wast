@@ -261,6 +261,13 @@ fn render_instruction(instr: &Instruction, indent: &str) -> String {
         Instruction::IsErr { value } => {
             format!("{}(is_err\n{})", indent, render_instruction(value, &inner))
         }
+        Instruction::StringLen { value } => {
+            format!(
+                "{}(string.len\n{})",
+                indent,
+                render_instruction(value, &inner)
+            )
+        }
         Instruction::MatchOption {
             value,
             some_binding,

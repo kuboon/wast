@@ -26,15 +26,20 @@ pub type FuncMap<'a> = HashMap<String, &'a WastFunc>;
 pub type TypeMap<'a> = HashMap<String, &'a WitType>;
 
 /// Structural view of a WIT type reference (resolved through a `TypeMap`).
-/// v0.6 scope: primitives + option<prim> + result<prim, prim>.
+/// Scope: primitives (numeric + bool/char), string (ptr+len pair), and
+/// option/result with primitive payload.
 #[derive(Debug, Clone)]
 pub enum ResolvedType {
     Primitive(String),
+    String,
     Option(String),
     Result(String, String),
 }
 
 pub fn resolve_type(ty_ref: &str, type_map: &TypeMap) -> Result<ResolvedType, CompileError> {
+    if ty_ref == "string" {
+        return Ok(ResolvedType::String);
+    }
     if is_known_primitive(ty_ref) {
         return Ok(ResolvedType::Primitive(ty_ref.to_string()));
     }
@@ -42,7 +47,14 @@ pub fn resolve_type(ty_ref: &str, type_map: &TypeMap) -> Result<ResolvedType, Co
         .get(ty_ref)
         .ok_or_else(|| CompileError::InvalidInput(format!("unknown type reference {ty_ref:?}")))?;
     match def {
-        WitType::Primitive(p) => Ok(ResolvedType::Primitive(primitive_name(p).to_string())),
+        WitType::Primitive(p) => {
+            let name = primitive_name(p);
+            if name == "string" {
+                Ok(ResolvedType::String)
+            } else {
+                Ok(ResolvedType::Primitive(name.to_string()))
+            }
+        }
         WitType::Option(inner) => Ok(ResolvedType::Option(inner.clone())),
         WitType::Result(ok, err) => Ok(ResolvedType::Result(ok.clone(), err.clone())),
         other => Err(CompileError::Unsupported(format!(
@@ -54,7 +66,7 @@ pub fn resolve_type(ty_ref: &str, type_map: &TypeMap) -> Result<ResolvedType, Co
 fn is_known_primitive(name: &str) -> bool {
     matches!(
         name,
-        "u32" | "u64" | "i32" | "i64" | "f32" | "f64" | "bool" | "char" | "string"
+        "u32" | "u64" | "i32" | "i64" | "f32" | "f64" | "bool" | "char"
     )
 }
 
@@ -74,10 +86,11 @@ fn primitive_name(p: &wast_types::PrimitiveType) -> &'static str {
 }
 
 /// Core-flat slot types for a WIT type reference (one core type per slot).
-/// primitive → 1 slot; option<P>/result<A,B> → 2 slots (i32 disc + joined payload).
+/// primitive → 1 slot; option<P>/result<A,B>/string → 2 slots.
 pub fn flat_slots(ty_ref: &str, type_map: &TypeMap) -> Result<Vec<&'static str>, CompileError> {
     match resolve_type(ty_ref, type_map)? {
         ResolvedType::Primitive(p) => Ok(vec![wit_to_core(&p)?]),
+        ResolvedType::String => Ok(vec!["i32", "i32"]),
         ResolvedType::Option(inner) => {
             let payload = wit_to_core(&inner)?;
             Ok(vec!["i32", payload])
@@ -126,6 +139,7 @@ pub fn size_align(ty_ref: &str, type_map: &TypeMap) -> Result<(usize, usize), Co
                 )));
             }
         }),
+        ResolvedType::String => Ok((8, 4)),
         ResolvedType::Option(inner) => variant_layout(&[Some(inner)], type_map),
         ResolvedType::Result(ok, err) => variant_layout(&[Some(ok), Some(err)], type_map),
     }
@@ -678,6 +692,30 @@ fn emit_instr(
                 }
             }
         }
+        Instruction::StringLen { value } => {
+            // v0.12: restrict to `LocalGet(string_param)`. General case would
+            // need a synthesized i32 temp to drop ptr while keeping len.
+            let uid = match value.as_ref() {
+                Instruction::LocalGet { uid } => uid,
+                _ => {
+                    return Err(CompileError::Unsupported(
+                        "StringLen only supports LocalGet of a string local for now".into(),
+                    ));
+                }
+            };
+            let (first_idx, _, ty) = slot_info(uid, scope, type_map)?;
+            match resolve_type(ty, type_map)? {
+                ResolvedType::String => {
+                    // String layout: slot 0 = ptr, slot 1 = len. Read len directly.
+                    out.push_str(&format!("      local.get {}\n", first_idx + 1));
+                }
+                other => {
+                    return Err(CompileError::InvalidInput(format!(
+                        "StringLen applied to non-string local {uid:?} (resolved as {other:?})"
+                    )));
+                }
+            }
+        }
         Instruction::Some { value } => {
             emit_variant_ctor(
                 expected,
@@ -937,7 +975,10 @@ fn branch_result_clause<'a>(
         Some(ty) => {
             let core = match resolve_type(ty, type_map)? {
                 ResolvedType::Primitive(p) => wit_to_core(&p)?.to_string(),
-                ResolvedType::Option(_) | ResolvedType::Result(_, _) => "i32".to_string(),
+                // Compound & string both use indirect return (single i32 ptr).
+                ResolvedType::String | ResolvedType::Option(_) | ResolvedType::Result(_, _) => {
+                    "i32".to_string()
+                }
             };
             Ok((format!(" (result {core})"), Some(ty)))
         }
@@ -961,6 +1002,7 @@ fn infer_wit_type(
             .or_else(|| infer_wit_type(rhs, scope, func_map, type_map)),
         Instruction::Compare { .. } => Some("bool".to_string()),
         Instruction::IsErr { .. } => Some("bool".to_string()),
+        Instruction::StringLen { .. } => Some("u32".to_string()),
         Instruction::Call { func_uid, .. } => func_map.get(func_uid).and_then(|f| f.result.clone()),
         _ => None,
     }

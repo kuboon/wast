@@ -108,6 +108,11 @@ pub enum Instruction {
         value: Box<Instruction>,
     },
 
+    // String operations
+    StringLen {
+        value: Box<Instruction>,
+    },
+
     // Other
     Nop,
 }

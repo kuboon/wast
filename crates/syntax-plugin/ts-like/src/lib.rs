@@ -303,6 +303,10 @@ fn render_instruction(
             let val = render_expr(value, local_names, func_names);
             format!("{}isErr({})", indent, val)
         }
+        Instruction::StringLen { value } => {
+            let val = render_expr(value, local_names, func_names);
+            format!("{}{}.length", indent, val)
+        }
         Instruction::MatchOption {
             value,
             some_binding,

@@ -30,7 +30,7 @@ See [crates/file-manager/PLAN.md](crates/file-manager/PLAN.md) for the SQLite mi
 | file-manager | `crates/file-manager/` | **Done** (JSON, row-oriented) | SQLite migration |
 | file-manager-hosted | `crates/file-manager-hosted/` | **Done** (JSON, row-oriented) | — |
 | wast-types (shared serde types) | `crates/wast-types/` | **Done** | — |
-| compiler | `crates/compiler/` | **v0.11 done** (core-only emit + `wit-component` wrap) | string/list/record/variant |
+| compiler | `crates/compiler/` | **v0.12 done** (+ `string` param + `StringLen` IR) | `StringLiteral` + data segments → `string` return → list/record/variant |
 | pattern-analyzer | `crates/syntax-plugin/internal/pattern-analyzer/` | **Done** | — |
 | raw syntax | `crates/syntax-plugin/raw/` | **Done** | — |
 | ruby-like syntax | `crates/syntax-plugin/ruby-like/` | **Partial** | `from_text` body parsing, body roundtrip tests |
@@ -60,7 +60,8 @@ See [crates/file-manager/PLAN.md](crates/file-manager/PLAN.md) for the SQLite mi
 - [x] v0.9: `MatchOption` / `MatchResult` destructuring. Bindings (`some_binding`, `ok_binding`, `err_binding`) are collected as function-scope locals with the payload WIT type. MatchOption `local.set`s payload into the binding then branches on disc. MatchResult uses `local.tee`+`local.set` to seed both ok/err bindings in one go, then branches. MatchResult currently requires ok/err to share a core type (heterogeneous join + truncation deferred).
 - [x] v0.10 spike: validated `wit-component` + `wit-parser` (v0.219, matching wasmtime 27's wasmparser) can wrap our core module output into a Component. Spike covers both `identity(u32)->u32` and indirect-return `mk-some(u32)->option<u32>`.
 - [x] v0.11: rewrote emit.rs. `compile_component` now emits **core-only WAT** (single `(module …)`), synthesizes a WIT world from `db`'s exports/imports (inline type refs for option/result), embeds the `component-type` custom section via `embed_component_metadata`, and wraps via `ComponentEncoder`. Consequences: hand-rolled `canon lift`/`canon lower` + outer `(component …)` + memory-option threading are all gone. Imports use `"$root"` namespace convention. `canon lower` circular-reference problem is solved (wit-component handles it). All 25 tests pass end-to-end unchanged. Core body emit (IR → core WAT instructions) is unchanged — only the shell changed.
-- [ ] Roadmap: `string` (ptr+len, mostly automatic via wit-component once IR gains `StringLiteral`/`StringLen`/etc.) → `list<T>` → `record/variant/tuple/resource`
+- [x] v0.12: `string` in **param** position + `StringLen` IR instruction. `ResolvedType::String` separated from `Primitive`; flat_slots=`["i32","i32"]` (ptr,len), size_align=(8,4). `StringLen` on `LocalGet(string_local)` reads the `len` slot directly. Syntax plugins (raw/ruby-like/ts-like/rust-like) got StringLen render stubs. Host→guest string passing verified with ASCII + multi-byte UTF-8 (`"あいう"` → 9 bytes).
+- [ ] Roadmap: v0.13 `StringLiteral` + data segments → v0.14 string **return** (indirect) → `list<T>` → `record/variant/tuple/resource`
 - See [crates/compiler/PLAN.md](crates/compiler/PLAN.md) for full context
 
 ### file-manager (`crates/file-manager/src/lib.rs`)
