@@ -1,232 +1,131 @@
 # compiler — wast → wasm Component コンパイラ
 
-**このドキュメントはセッション引き継ぎ用**。前回までの議論の結論と v0 実装計画をまとめている。
+**現状: v0.16 完了**。numeric / control flow / calls / option / result / string / list / record まで端から端まで動く。以降は variant (一般ケース) / tuple / resource / nested compound / ListLiteral。
 
-## 現状
-
-- **未実装**。`crates/compiler/` ディレクトリも未作成
-- compiler は最優先タスク。wast プロジェクトの**一番やりたいこと**
-- 他の crate（file-manager, partial-manager, pattern-analyzer）は実装済み
-- 直前のセッションで `wast.db` → `wast.json` のリネーム + JSON 構造の row 指向への再設計が完了（している想定 — 未完了なら先にそれを終わらせる）
-
-## 方針（確定事項）
-
-### compilation target / toolchain
-
-- **出力**: WASM Component バイナリ（`.wasm`）
-- **手段**: Component WAT テキストを自前で組み立て → [`wat`](https://crates.io/crates/wat) crate で `.wasm` に変換
-- **`wit-component` は不使用**。Component 外殻（`(component ...)` + `canon lift` + 内側 component wrapping）も自前で WAT に書き出す
-- **`wasm-encoder` も不使用**（当面）。WAT テキスト経由のほうが可読性・デバッグ性が高い
-
-### 採用しない選択肢とその理由
-
-- ❌ core WASM → `wit-component` で Component 化: 外部ツールに依存するが `wit-component` は validator/packager に近く、Canonical ABI の実装は結局 compiler 側でやる必要がある。透明性のため自前で書く
-- ❌ `wasm-encoder` 直接: 型安全だがバイナリ出力を後から `wasm-tools print` で WAT 化してデバッグする必要あり。最初から WAT で書くほうが開発効率が良い
-- ❌ LLVM バックエンド: overkill、起動コスト大
-
-### crate の位置づけ
-
-- **v0: plain Rust library crate**（`rlib`）
-- `file-manager`（および `file-manager-hosted`）から関数コールで呼ばれる純粋関数
-- **将来的に wasm component 化予定**（swap 不要なので機械的ラップで済む）
-- `-hosted` suffix は付けない（syntax-plugin のようにプラグイン差し替えする予定がないため）
-
-### Component Model 基礎知識（次セッション向け）
-
-- **core WASM と WASM Component は別フォーマット**（ファイルヘッダで区別）
-- core WASM: `i32/i64/f32/f64` のみ、関数・メモリ・テーブル等のプリミティブ
-- Component: core モジュールを `(component ...)` で包み、WIT 型（string/list/record/variant/option/result/resource）を公開
-- **Canonical ABI** = WIT 型 ↔ core WASM メモリ表現の変換規約。core module 側が従う必要がある
-- compiler の作業 = **Canonical ABI 規約に従った core .wasm の生成 + Component 外殻の組み立て**
-
-### pattern-analyzer の役割（次セッション向け）
-
-`crates/syntax-plugin/internal/pattern-analyzer/` は名前に反して**プラグイン非依存の共通ライブラリ**:
-1. body の IR 定義（`Instruction` enum）
-2. body の serialize/deserialize（postcard バイナリ）
-3. 高レベル制御構文の検出（text 復元用）
-
-compiler は (1) と (2) を利用する。(3) は不要（WASM 生成時は `Loop + BrIf` のまま WAT 命令にマップするだけ）。
-
-## 前提となる作業（compiler 開始前に必要）
-
-### 案 B: `wast-types` crate の抽出（⚠️ 未着手・必須）
-
-現状、serde 型（`WastDb`, `WastFunc`, `WastTypeDef`, `WitType`, `PrimitiveType`, `FuncSource`, `TypeSource`, `Syms`, `SymEntry`）が以下 **2 箇所で重複**している:
-
-- `crates/file-manager/src/serde_types.rs`
-- `crates/file-manager-hosted/src/serde_types.rs`
-
-compiler も同じ型を扱うので、3 箇所目を作らないため **事前に `crates/wast-types/` を新設**し、両既存 crate を移行する。
-
-**手順**:
-1. `crates/wast-types/` 新設（plain rlib）
-2. 既存 2 crate の `serde_types.rs` の内容を移動
-3. 既存 2 crate を `wast-types` 依存に切り替え、`use wast_types::WastDb;` 等に書き換え
-4. WIT bindings ↔ native types の変換関数（`db_to_binding` など）は各 crate に残す
-5. workspace テスト全通過を確認
-
-## v0 スコープ: WASI CLI empty run
-
-### 入力
-- `world.wit`: WASI CLI 0.2.0 を include する world
-- `WastComponent`: `wasi:cli/run@0.2.0` interface の `run` 関数を 1 つ export、body は `Return` のみ（`result<_, _>` で常に ok）
-
-### 出力（期待する Component WAT）
-
-```wat
-(component
-  (core module $Mod
-    (func (export "mod-main") (result i32)
-      (i32.const 0)))
-  (core instance $m (instantiate $Mod))
-  (func $main_lifted (result (result))
-    (canon lift (core func $m "mod-main")))
-  (component $Comp
-    (import "main" (func $g (result (result))))
-    (export "run" (func $g)))
-  (instance $c (instantiate $Comp
-      (with "main" (func $main_lifted))))
-  (export "wasi:cli/run@0.2.0" (instance $c)))
-```
-
-### 検証
-- `wat::parse_str(...)` → `.wasm` バイナリ生成成功
-- `wasmtime run output.wasm` → exit code 0
-- 統合テスト `tests/v0_smoke.rs`
-
-### 学習ポイント
-- `(component ...)` 外殻の構造
-- `canon lift` 宣言（unit 型なので最小構成）
-- WASI CLI 向け内側 component wrapping パターン
-
-### 学ばないこと（v0 ではスコープ外）
-- Canonical ABI の実体（unit 型同士なので実質 passthrough）
-- core 命令列の本格生成（`i32.const 0` 固定）
-
-## v0.1: `u32 -> u32` 恒等関数
-
-### 入力
-- `world.wit`:
-  ```wit
-  package example:foo@0.1.0;
-  world t {
-    export identity: func(x: u32) -> u32;
-  }
-  ```
-- `WastComponent`: `identity` 関数、body は param を `LocalGet` して `Return`
-
-### 期待出力
-```wat
-(component
-  (core module $Mod
-    (func (export "identity") (param i32) (result i32)
-      local.get 0))
-  (core instance $m (instantiate $Mod))
-  (func $identity_lifted (param "x" u32) (result u32)
-    (canon lift (core func $m "identity")))
-  (export "identity" (func $identity_lifted)))
-```
-
-### 検証
-- Rust テストハーネスで `wasmtime::component::Component` をロード → `identity(42)` 呼び出し → `42` が返る
-
-### 学習ポイント
-- IR `LocalGet { uid }` → core `local.get N`（param index への変換）
-- プリミティブ型の canonical ABI（ほぼ passthrough）
-- Rust からの Component インスタンス化と呼び出し
-
-## 以降のロードマップ
-
-v0 / v0.1 完了後、以下を 1 つずつ段階的に実装・検証:
-
-1. 数値型拡張: `i32/i64/f32/f64/u32/u64/bool` の `Const`, `Arithmetic`, `Compare`
-2. `Call`（Internal / Imported / Exported）
-3. 制御フロー: `If`, `Loop`, `Block`, `Br`, `BrIf`
-4. `Option` / `Result` 型（variant の単純ケース）
-5. `string` — realloc + memory エクスポートが必要。`cabi_realloc` 実装
-6. `list<T>`
-7. `record`
-8. `variant`（一般ケース）
-9. `tuple`
-10. `resource` 型（handle）
-
-各ステップで **wasmtime で実際に動かして検証**。シンプルな型から順に積み上げ、回帰テストで退行を防ぐ。
-
-## crate スケルトン
+## 全体アーキテクチャ (v0.11 以降)
 
 ```
-crates/compiler/
-  Cargo.toml
-  PLAN.md          ← このドキュメント
-  src/
-    lib.rs         # pub fn compile(...) -> Result<Vec<u8>, Error>
-    emit.rs        # Component WAT 文字列組み立て
-    core_emit.rs   # core module 内の命令列生成（IR → core WAT）
-    error.rs       # CompileError
-  tests/
-    v0_smoke.rs    # WASI CLI empty run 統合テスト
+WastDb + 合成 WIT world
+    ↓
+  emit_core_module  (core-only WAT)
+    ↓  wat::parse_str
+  core .wasm バイナリ
+    ↓  wit_component::embed_component_metadata (WIT 世界を custom section に埋込)
+    ↓  wit_component::ComponentEncoder::module(...).encode()
+  Component .wasm バイナリ
 ```
 
-### Cargo.toml 案
+**外殻 (`(component …)`, `canon lift`, `canon lower`, memory option, with-instance 配線) は全部 wit-component に任せる**。こちらは core module だけを作る。
 
-```toml
-[package]
-name = "wast-compiler"
-version.workspace = true
-edition.workspace = true
-license.workspace = true
+wit-component / wit-parser は 0.219 に pin (wasmtime 27 と wasmparser バージョンを合わせるため)。
 
-[dependencies]
-wast-types = { path = "../wast-types" }
-wast-pattern-analyzer = { path = "../syntax-plugin/internal/pattern-analyzer" }
-wat = "1"
-postcard = { version = "1", features = ["alloc"] }
+## Core module の中身
 
-[dev-dependencies]
-wasmtime = { version = "...", features = ["component-model"] }
-```
+- `(memory (export "memory") 1)` 1 ページ
+- `(global $heap_end (mut i32) (i32.const X))` bump allocator のトップ。X は static data (literal) の終端
+- `(func $cabi_realloc (export "cabi_realloc") …)` bump allocator。`memory.copy` で realloc-grow に対応
+- `(data (i32.const OFF) "\HH…")` StringLiteral を連続配置 (重複排除、`STATIC_DATA_BASE=1024` 開始)
+- `(import "$root" "NAME" (func $NAME …))` FuncSource::Imported のぶん
+- `(func $UID (export "NAME") …)` 各 exported / internal 関数
+  - core 署名: 各 WIT 型の flat 形を連結 (primitive=1スロット、compound=2+スロット)
+  - compound 戻り値 (flat > `MAX_FLAT_RESULTS=1`) は indirect return: `(result i32)` (ポインタ返し)
 
-### API 案
+## IR (pattern-analyzer) と emit 対応表
+
+| IR | 意味 | core emit |
+|---|---|---|
+| `Nop` / `Return` | | `nop` / `return` |
+| `Const { value }` | i64 リテラル、型はコンテキスト推論 | `<core>.const <value>` |
+| `LocalGet { uid }` | param/local 読み出し | 1+ slots ぶん `local.get N` |
+| `LocalSet { uid, value }` | local 書き込み (compound 不可) | `<value>; local.set N` |
+| `Arithmetic` / `Compare` | 型推論から signed/float を切替 | `<t>.add` / `<t>.lt_s` 等 |
+| `Call { func_uid, args }` | args を callee param 順に並べる | `<args>; call $func_uid` |
+| `If / Block / Loop / Br / BrIf` | 制御フロー | `if / block / loop` + ラベル |
+| `Some / None / Ok / Err` | (return-position のみ) indirect return wrap | alloc 8B + disc + payload store |
+| `IsErr { LocalGet }` | result param の disc スロットを読み出し | `local.get disc_idx` |
+| `MatchOption / MatchResult` | 分岐 + binding | `local.set binding; if`で分岐 |
+| `StringLiteral { bytes }` | データセグメントに埋込んだ定数 | `i32.const <offset>; i32.const <len>` |
+| `StringLen { LocalGet | StringLiteral }` | byte 長取得 (literal は compile-time fold) | `local.get len_idx` |
+| `ListLen { LocalGet }` | element 数取得 | `local.get len_idx` |
+| `RecordGet { LocalGet, field }` | フィールド読み出し | `local.get base+slot_offset` |
+| `RecordLiteral { fields }` | (return-position のみ) コンストラクタ | alloc + per-field store |
+
+## 型解決 (`ResolvedType`)
 
 ```rust
-pub fn compile(
-    component: &wast_types::WastComponent,
-    world_wit: &str,
-) -> Result<Vec<u8>, CompileError>;
+enum ResolvedType {
+    Primitive(String),          // u32/u64/i32/i64/f32/f64/bool/char
+    String,                     // (ptr, len)   size/align (8, 4)
+    List(String),               // (ptr, len)   size/align (8, 4)
+    Option(String),             // 2 slots (disc, payload)
+    Result(String, String),     // 2 slots (disc, join<ok,err>)
+    Record(Vec<(String, String)>), // concat of fields' flats
+}
 ```
 
-## 次セッションの着手順
+`flat_slots` / `size_align` / `format_wit_type` / `lifted_type_wat` などが `ResolvedType` で分岐。`TypeMap` (`HashMap<uid, &WitType>`) を compile 開始時に構築。
 
-1. **（前作業確認）** `wast.db` → `wast.json` リネームと JSON row 指向化が完了しているか確認
-2. **`crates/wast-types/` 新設**（案 B 実施）
-3. **`crates/compiler/` 骨組み作成**（Cargo.toml, lib.rs, emit.rs の空枠）
-4. **v0 emitter**: 固定 WAT を返すだけの `compile()` を実装（入力はまだ見ない）
-5. **v0 統合テスト**: `wasmtime run` で exit 0 を確認
-6. **v0.1 に進む**: `u32 -> u32` を入力 IR から動的生成できるように拡張
+## 指示 return の wrap
 
-各ステップで必ずテストを書き、緑のまま進む。
+関数戻り値が indirect の時、`emit_body` は body の最後の命令を切り出して wrap する:
 
-## 参考: Canonical ABI のポイント（深掘り時）
+- **PtrLen wrap** (string / list): alloc 8B → `(ptr, len)` を offset 0/4 に store → buffer ptr を返す。値源: LocalGet(string/list) または StringLiteral
+- **Record wrap**: alloc size(record) → 各フィールドを byte offset に store → buffer ptr を返す。値源: RecordLiteral のみ
 
-- プリミティブ型（i32/u32/i64/u64/f32/f64/bool）: core 型に直接マップ、ABI 変換なし
-- `char`: core `i32`（Unicode scalar value）
-- `string`: `(i32 ptr, i32 len)` 2 つの引数/戻り値に展開、memory とリンク
-- `list<T>`: `(i32 ptr, i32 len)`、T が fixed-size でないと再帰的に計算
-- `record`: 各フィールドを平坦化、またはメモリ経由
-- `variant`: `i32 discriminant` + ペイロード
-- `option<T>`: `variant { none, some(T) }` として扱う
-- `result<T, E>`: `variant { ok(T), err(E) }`
-- Returning non-primitive: realloc を通じて呼び出し側のメモリに書き込む
+## ret_ptr_slot
 
-詳細は [Component Model Canonical ABI spec](https://github.com/WebAssembly/component-model/blob/main/design/mvp/CanonicalABI.md) を参照。
+Compound 戻り or body 内に Some/None/Ok/Err があるとき、**param+local の末尾に `i32` local を 1 個予約**して buffer pointer 保持に使う。`emit_core_func` で判定。
 
-## コンテキスト: なぜ WAT 直接か
+## WIT world 合成 (`synthesize_world`)
 
-前セッションでの結論:
+- `package wast:generated;` + `world generated { … }`
+- Record 型は `record NAME { fields }` を world 内で宣言
+- 他の型参照 (option/result/list/string) は use site でインライン展開
+- Func source に応じて `export NAME: func(…) -> …;` / `import NAME: func(…) -> …;` を emit
+- Internal func は WIT に出さない (core module 内部のみ)
+- `synthesize_world` → `wit_parser::Resolve::push_str` → `embed_component_metadata` → `ComponentEncoder`
 
-- WAT と wasm-encoder はどちらも core WASM 生成手段。どちらも WIT ネイティブではない
-- 最終的な Component 化の作業（`canon lift` / 外殻） は WAT テキストで直接表現できる
-- `wit-component` はほぼ packager なので、自前で WAT を組み立てれば不要
-- WAT 出力は目視・diff・スナップショットテストしやすい
-- デバッグ時に「このバイト列は何？」を悩まなくて済む
+## マイルストーン表
+
+| ver | スコープ | 追加 |
+|---|---|---|
+| v0 | WASI CLI 空 run 固定 WAT | 定数 WAT 返すだけ |
+| v0.1 | identity(u32) -> u32 | 動的 core WAT 生成 |
+| v0.2 | Arithmetic / Compare 全数値型 | signedness 対応 |
+| v0.3 | internal Call | FuncMap、引数並べ替え |
+| v0.4 | If/Block/Loop/Br/BrIf + LocalSet | 関数スコープ local 自動登録 |
+| v0.5 | imported Call | canon lower 経由 (当時は手書き; v0.11 で wit-component 任せに) |
+| v0.6 | option/result **param** + IsErr | flat layout、2 スロット展開 |
+| v0.7 | memory + cabi_realloc 基盤 | bump allocator |
+| v0.8 | option/result **return** | indirect-return wrap、variant layout |
+| v0.9 | MatchOption / MatchResult | binding を local に `local.set/local.tee` |
+| v0.10 | **wit-component spike** | 手書き外殻が不要と判明 |
+| v0.11 | **core-only emit + wit-component wrap** | 大幅に行数減、canon lower 循環参照も解決 |
+| v0.12 | string **param** + StringLen | flat 2 slot |
+| v0.13 | StringLiteral + data segments | 定数配置、compile-time fold |
+| v0.14 | string **return** | ptr-len 汎用 wrap |
+| v0.15 | list<T> param/return + ListLen | string と同じ構造を再利用 |
+| v0.16 | record (primitive fields) | flat 連結、バイトオフセット配置 |
+
+## 残タスク (優先順)
+
+1. **variant (general)** — option/result の一般化。任意 N ケース、各ケース optional payload。Canonical ABI 的には option/result より汎用だが、実装は似たパターン
+2. **tuple** — record の無名版 (`tuple<u32, u32>`)。WIT では inline 可、field 名は `0`/`1`/…
+3. **ListLiteral** — 実行時に list を構築。要素数ぶん realloc + 各要素 store ループ。cabi_realloc の grow パスを本格に使う初ケース
+4. **nested compound** — record のフィールドが string/list/record/option、option<string>、list<record>、等。`emit_record_return_wrap` で primitive 以外の field store を扱えるようにする
+5. **flags / enum / char** — 軽め
+6. **resource** — ハンドル型。最大の難物。`own<T>`/`borrow<T>` + resource テーブル + ドロップ関数
+
+## 設計原則 (変わらず)
+
+- IR は**高レベル意味表現**を保つ (core opcode 列ではない)。syntax plugin との往復のため
+- 型定義は Component Model spec の構造に寄せる、body IR は寄せない (memory: WAST binary alignment — `project_wast_binary_spec_alignment.md`)
+- wit-component で済むことは wit-component に任せる、手書き WAT は core module の body 命令列のみ (memory: `project_moonbit_rejected.md`)
+
+## 外部依存
+
+- `wat = "1"` — WAT テキスト → core wasm バイナリ
+- `wit-component = "0.219"` — Component 外殻合成 + custom section 埋込
+- `wit-parser = "0.219"` — WIT 世界文字列のパース
+- `wasmtime = "27"` (dev-dependency のみ) — テストで component を実行
+- `wasmtime-wasi = "27"` (dev-dependency) — WASI CLI smoke test 用

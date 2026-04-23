@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>WAST — WASM Component showcase</title>
+    <link rel="stylesheet" href="./src/styles.css" />
+  </head>
+  <body>
+    <header>
+      <h1>WAST <span class="subtitle">— wast IR → WASM Component</span></h1>
+      <p class="intro">
+        Every card below is a live <strong>WASM Component</strong> built from a
+        high-level WAST IR description, wrapped via
+        <code>wit-component</code>, transpiled with <code>jco</code>, and
+        running in this page as an ES module. No server round-trip.
+      </p>
+      <p class="links">
+        <a href="https://github.com/kuboon/wast">source on GitHub</a>
+      </p>
+    </header>
+
+    <main id="demos"></main>
+
+    <footer>
+      <p>
+        Built from
+        <a href="https://github.com/kuboon/wast/blob/main/crates/compiler/PLAN.md">
+          crates/compiler/PLAN.md
+        </a>
+        — v0.1 through v0.16 shipped. See individual cards for what each
+        milestone added.
+      </p>
+    </footer>
+
+    <script type="module" src="./src/main.js"></script>
+  </body>
+</html>

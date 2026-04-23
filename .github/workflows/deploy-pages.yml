@@ -1,0 +1,54 @@
+name: Deploy web-demo to Pages
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - "crates/**"
+      - "packages/web-demo/**"
+      - ".github/workflows/deploy-pages.yml"
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build
+    runs-on: ubuntu-latest
+    env:
+      HOME: /root
+    defaults:
+      run:
+        shell: bash
+    container:
+      image: ghcr.io/kuboon/wast/wast-dev-container:latest
+      credentials:
+        username: ${{ github.actor }}
+        password: ${{ secrets.github_token }}
+    steps:
+      - uses: actions/checkout@v6
+      - name: Install pnpm deps
+        run: mise x -- pnpm install --frozen-lockfile
+      - name: Build web-demo
+        run: mise x -- pnpm --filter @wast/web-demo build
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: packages/web-demo/dist
+
+  deploy:
+    name: Deploy
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

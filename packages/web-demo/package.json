@@ -1,0 +1,15 @@
+{
+  "name": "@wast/web-demo",
+  "private": true,
+  "type": "module",
+  "version": "0.0.0",
+  "scripts": {
+    "generate": "cargo run -p wast-demo-gen --release -- ../../tmp/demos && node scripts/transpile-all.mjs",
+    "build": "pnpm generate && node scripts/copy-site.mjs",
+    "dev": "pnpm build && python3 -m http.server --directory dist 8123",
+    "clean": "rm -rf dist ../../tmp/demos"
+  },
+  "devDependencies": {
+    "@bytecodealliance/jco": "^1.19.0"
+  }
+}
