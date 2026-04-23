@@ -197,6 +197,172 @@ async function main() {
       h("p", { class: "desc" }, String(err)),
     ]));
   }
+
+  await initPluginShowcase();
+}
+
+// ---------------------------------------------------------------------------
+// Syntax plugin showcase
+// ---------------------------------------------------------------------------
+
+const PLUGINS = [
+  { id: "raw", label: "raw", module: "raw/raw.js" },
+  { id: "ruby-like", label: "ruby-like", module: "ruby-like/ruby_like.js" },
+  { id: "ts-like", label: "ts-like", module: "ts-like/ts_like.js" },
+  { id: "rust-like", label: "rust-like", module: "rust-like/rust_like.js" },
+];
+
+async function initPluginShowcase() {
+  const host = document.getElementById("plugin-showcase");
+  if (!host) return;
+  let samples;
+  try {
+    const res = await fetch(
+      new URL("../public/components/samples.json", import.meta.url),
+    );
+    samples = await res.json();
+  } catch (err) {
+    host.append(h("p", { class: "err" }, `samples load failed: ${err}`));
+    return;
+  }
+
+  const pluginMods = {};
+  for (const p of PLUGINS) {
+    try {
+      const m = await import(
+        /* @vite-ignore */ new URL(
+          `../public/plugins/${p.module}`,
+          import.meta.url,
+        ).href
+      );
+      pluginMods[p.id] = m.syntaxPlugin;
+    } catch (err) {
+      console.warn(`plugin ${p.id} load failed:`, err);
+    }
+  }
+
+  const picker = h("select", { class: "sample-picker" });
+  for (const s of samples) {
+    const opt = h("option", { value: s.id }, `${s.milestone} · ${s.title}`);
+    picker.append(opt);
+  }
+
+  const grid = h("div", { class: "plugin-grid" });
+  const symsEditor = h("div", { class: "syms-editor" });
+
+  host.append(
+    h("p", { class: "desc" }, [
+      "Pick a wast component from any milestone, then see it rendered by each ",
+      h("code", {}, "to_text"),
+      " plugin. Editing the symbol table re-renders live — the plugins look up display names via ",
+      h("code", {}, "syms"),
+      " when producing text.",
+    ]),
+    h("div", { class: "plugin-controls" }, [
+      h("label", {}, ["sample: ", picker]),
+    ]),
+    symsEditor,
+    grid,
+  );
+
+  function currentSample() {
+    return samples.find((s) => s.id === picker.value) ?? samples[0];
+  }
+
+  function render() {
+    grid.innerHTML = "";
+    const sample = currentSample();
+    for (const p of PLUGINS) {
+      const box = h("div", { class: "plugin-box" });
+      box.append(h("h3", {}, p.label));
+      const pre = h("pre", {});
+      try {
+        const plugin = pluginMods[p.id];
+        if (!plugin) throw new Error("plugin module not loaded");
+        pre.textContent = plugin.toText(sample.wastComponent);
+        box.classList.add("ok");
+      } catch (err) {
+        pre.textContent = `error: ${err.message || err}`;
+        box.classList.add("err");
+      }
+      box.append(pre);
+      grid.append(box);
+    }
+    renderSymsEditor(sample);
+  }
+
+  function renderSymsEditor(sample) {
+    symsEditor.innerHTML = "";
+    const syms = sample.wastComponent.syms;
+    const rows = [];
+
+    // Show every referenced func uid + internal-func uids + param names.
+    const funcUids = sample.wastComponent.funcs.map(([uid]) => uid);
+    for (const uid of funcUids) {
+      const current = syms.internal.find((e) => e.uid === uid);
+      rows.push([uid, current?.displayName ?? ""]);
+    }
+
+    if (rows.length === 0) {
+      symsEditor.append(h("p", { class: "desc" }, "(no symbols to edit)"));
+      return;
+    }
+
+    symsEditor.append(h("h3", {}, "symbols (internal func names)"));
+    const table = h("table", { class: "syms-table" });
+    for (const [uid, current] of rows) {
+      const tr = h("tr", {});
+      tr.append(h("td", { class: "uid" }, uid));
+      const input = h("input", {
+        type: "text",
+        placeholder: `(default: ${uid})`,
+      });
+      input.value = current;
+      input.addEventListener("input", () => {
+        const entry = syms.internal.find((e) => e.uid === uid);
+        const val = input.value.trim();
+        if (val === "") {
+          sample.wastComponent.syms.internal = syms.internal.filter(
+            (e) => e.uid !== uid,
+          );
+        } else if (entry) {
+          entry.displayName = val;
+        } else {
+          syms.internal.push({ uid, displayName: val });
+        }
+        // Re-render only the plugin grid; keep the syms editor DOM alive so
+        // the input keeps focus.
+        renderGridOnly();
+      });
+      tr.append(h("td", {}, input));
+      table.append(tr);
+    }
+    symsEditor.append(table);
+  }
+
+  function renderGridOnly() {
+    grid.innerHTML = "";
+    const sample = currentSample();
+    for (const p of PLUGINS) {
+      const box = h("div", { class: "plugin-box" });
+      box.append(h("h3", {}, p.label));
+      const pre = h("pre", {});
+      try {
+        const plugin = pluginMods[p.id];
+        if (!plugin) throw new Error("plugin module not loaded");
+        pre.textContent = plugin.toText(sample.wastComponent);
+        box.classList.add("ok");
+      } catch (err) {
+        pre.textContent = `error: ${err.message || err}`;
+        box.classList.add("err");
+      }
+      box.append(pre);
+      grid.append(box);
+    }
+  }
+
+  picker.addEventListener("change", render);
+  render();
 }
 
 main();

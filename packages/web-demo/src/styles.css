@@ -149,6 +149,96 @@ main {
 .output.ok { border-color: var(--ok); }
 .output.err { border-color: var(--err); color: var(--err); }
 
+#plugin-showcase-wrap {
+  max-width: 1080px;
+  margin: 2rem auto 0;
+  padding: 1.5rem;
+  border-top: 1px solid var(--border);
+}
+#plugin-showcase-wrap h2 {
+  margin: 0 0 0.75rem;
+}
+.plugin-controls {
+  margin: 0.75rem 0;
+}
+.plugin-controls select {
+  background: var(--code-bg);
+  color: var(--fg);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 0.35rem 0.5rem;
+  font-family: ui-monospace, monospace;
+  font-size: 0.9rem;
+  min-width: 300px;
+}
+
+.syms-editor {
+  margin: 0.75rem 0;
+}
+.syms-editor h3 {
+  margin: 0 0 0.4rem;
+  font-size: 0.95rem;
+  color: var(--muted);
+}
+.syms-table {
+  border-collapse: collapse;
+  width: 100%;
+  max-width: 500px;
+}
+.syms-table td {
+  padding: 0.2rem 0.4rem;
+  border-bottom: 1px solid var(--border);
+  font-size: 0.85rem;
+}
+.syms-table td.uid {
+  font-family: ui-monospace, monospace;
+  color: var(--muted);
+  width: 200px;
+}
+.syms-table input {
+  width: 100%;
+  background: var(--code-bg);
+  color: var(--fg);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 0.25rem 0.4rem;
+  font-family: ui-monospace, monospace;
+  font-size: 0.85rem;
+}
+
+.plugin-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(360px, 1fr));
+  gap: 1rem;
+}
+.plugin-box {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 0.75rem 1rem;
+}
+.plugin-box h3 {
+  margin: 0 0 0.5rem;
+  font-family: ui-monospace, monospace;
+  font-size: 0.85rem;
+  color: var(--accent);
+}
+.plugin-box pre {
+  margin: 0;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-family: ui-monospace, monospace;
+  font-size: 0.8rem;
+  background: var(--code-bg);
+  padding: 0.5rem 0.75rem;
+  border-radius: 4px;
+  max-height: 320px;
+  overflow: auto;
+}
+.plugin-box.err pre {
+  color: var(--err);
+}
+
 footer {
   color: var(--muted);
   font-size: 0.85rem;

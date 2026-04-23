@@ -22,6 +22,7 @@ fn main() {
     let demos = all_demos();
 
     let mut manifest_entries = Vec::new();
+    let mut sample_entries = Vec::new();
     for demo in &demos {
         let wasm = wast_compiler::compile(&demo.db, "").expect(&demo.id);
         let path = out.join(format!("{}.wasm", demo.id));
@@ -29,14 +30,152 @@ fn main() {
         println!("wrote {} ({} bytes)", path.display(), wasm.len());
 
         manifest_entries.push(demo.manifest_entry());
+
+        // Dump the underlying WastDb as a wast-component for the syntax
+        // plugins to render. Embedded bodies stay as postcard bytes (the
+        // plugin deserializes them via pattern-analyzer).
+        sample_entries.push(format!(
+            "{{ \"id\": \"{id}\", \"milestone\": \"{milestone}\", \"title\": {title}, \"wastComponent\": {wc} }}",
+            id = demo.id,
+            milestone = demo.milestone,
+            title = json_string(demo.title),
+            wc = serialize_wast_component(&demo.db),
+        ));
     }
 
-    let manifest = format!(
-        "[\n  {}\n]\n",
-        manifest_entries.join(",\n  ")
-    );
+    let manifest = format!("[\n  {}\n]\n", manifest_entries.join(",\n  "));
     fs::write(out.join("manifest.json"), manifest).expect("write manifest");
     println!("wrote manifest with {} demos", demos.len());
+
+    let samples = format!("[\n  {}\n]\n", sample_entries.join(",\n  "));
+    fs::write(out.join("samples.json"), samples).expect("write samples");
+    println!("wrote samples.json with {} entries", demos.len());
+}
+
+// ---------------------------------------------------------------------------
+// WastDb → wast-component (jco-shaped JSON) serialization
+// ---------------------------------------------------------------------------
+
+fn serialize_wast_component(db: &WastDb) -> String {
+    let funcs = db
+        .funcs
+        .iter()
+        .map(|row| {
+            format!(
+                "[\"{uid}\", {{ \"source\": {source}, \"params\": {params}, \"result\": {result}, \"body\": {body} }}]",
+                uid = row.uid,
+                source = serialize_func_source(&row.func.source),
+                params = serialize_params(&row.func.params),
+                result = row.func.result.as_deref().map_or("null".to_string(), |t| format!("\"{t}\"")),
+                body = row
+                    .func
+                    .body
+                    .as_deref()
+                    .map_or("null".to_string(), |b| format!(
+                        "[{}]",
+                        b.iter().map(|x| x.to_string()).collect::<Vec<_>>().join(",")
+                    )),
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+
+    let types = db
+        .types
+        .iter()
+        .map(|row| {
+            format!(
+                "[\"{uid}\", {{ \"source\": {source}, \"definition\": {def} }}]",
+                uid = row.uid,
+                source = serialize_type_source(&row.def.source),
+                def = serialize_wit_type(&row.def.definition),
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+
+    format!(
+        "{{ \"funcs\": [{funcs}], \"types\": [{types}], \"syms\": {{ \"witSyms\": [], \"internal\": [], \"local\": [] }} }}"
+    )
+}
+
+fn serialize_func_source(s: &FuncSource) -> String {
+    let (tag, val) = match s {
+        FuncSource::Internal(v) => ("internal", v),
+        FuncSource::Imported(v) => ("imported", v),
+        FuncSource::Exported(v) => ("exported", v),
+    };
+    format!("{{ \"tag\": \"{tag}\", \"val\": \"{val}\" }}")
+}
+
+fn serialize_type_source(s: &TypeSource) -> String {
+    let (tag, val) = match s {
+        TypeSource::Internal(v) => ("internal", v),
+        TypeSource::Imported(v) => ("imported", v),
+        TypeSource::Exported(v) => ("exported", v),
+    };
+    format!("{{ \"tag\": \"{tag}\", \"val\": \"{val}\" }}")
+}
+
+fn serialize_params(params: &[(String, String)]) -> String {
+    let parts = params
+        .iter()
+        .map(|(n, t)| format!("[\"{n}\", \"{t}\"]"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!("[{parts}]")
+}
+
+fn serialize_wit_type(t: &WitType) -> String {
+    use wast_types::PrimitiveType as P;
+    match t {
+        WitType::Primitive(p) => {
+            let tag = match p {
+                P::U32 => "u32",
+                P::U64 => "u64",
+                P::I32 => "i32",
+                P::I64 => "i64",
+                P::F32 => "f32",
+                P::F64 => "f64",
+                P::Bool => "bool",
+                P::Char => "char",
+                P::String => "string",
+            };
+            format!("{{ \"tag\": \"primitive\", \"val\": \"{tag}\" }}")
+        }
+        WitType::Option(inner) => format!("{{ \"tag\": \"option\", \"val\": \"{inner}\" }}"),
+        WitType::Result(ok, err) => {
+            format!("{{ \"tag\": \"result\", \"val\": [\"{ok}\", \"{err}\"] }}")
+        }
+        WitType::List(inner) => format!("{{ \"tag\": \"list\", \"val\": \"{inner}\" }}"),
+        WitType::Record(fields) => {
+            let parts = fields
+                .iter()
+                .map(|(n, t)| format!("[\"{n}\", \"{t}\"]"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("{{ \"tag\": \"record\", \"val\": [{parts}] }}")
+        }
+        WitType::Variant(cases) => {
+            let parts = cases
+                .iter()
+                .map(|(n, ty)| {
+                    let ty_json = ty.as_deref().map_or("null".to_string(), |t| format!("\"{t}\""));
+                    format!("[\"{n}\", {ty_json}]")
+                })
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("{{ \"tag\": \"variant\", \"val\": [{parts}] }}")
+        }
+        WitType::Tuple(elems) => {
+            let parts = elems
+                .iter()
+                .map(|t| format!("\"{t}\""))
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("{{ \"tag\": \"tuple\", \"val\": [{parts}] }}")
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
