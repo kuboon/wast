@@ -26,12 +26,14 @@ pub type FuncMap<'a> = HashMap<String, &'a WastFunc>;
 pub type TypeMap<'a> = HashMap<String, &'a WitType>;
 
 /// Structural view of a WIT type reference (resolved through a `TypeMap`).
-/// Scope: primitives (numeric + bool/char), string (ptr+len pair), and
-/// option/result with primitive payload.
+/// Scope: primitives (numeric + bool/char), string (ptr+len pair),
+/// list<T> (ptr+len pair where len is element count), and option/result
+/// with primitive payload.
 #[derive(Debug, Clone)]
 pub enum ResolvedType {
     Primitive(String),
     String,
+    List(String),
     Option(String),
     Result(String, String),
 }
@@ -55,6 +57,7 @@ pub fn resolve_type(ty_ref: &str, type_map: &TypeMap) -> Result<ResolvedType, Co
                 Ok(ResolvedType::Primitive(name.to_string()))
             }
         }
+        WitType::List(inner) => Ok(ResolvedType::List(inner.clone())),
         WitType::Option(inner) => Ok(ResolvedType::Option(inner.clone())),
         WitType::Result(ok, err) => Ok(ResolvedType::Result(ok.clone(), err.clone())),
         other => Err(CompileError::Unsupported(format!(
@@ -86,11 +89,12 @@ fn primitive_name(p: &wast_types::PrimitiveType) -> &'static str {
 }
 
 /// Core-flat slot types for a WIT type reference (one core type per slot).
-/// primitive → 1 slot; option<P>/result<A,B>/string → 2 slots.
+/// primitive → 1 slot; option<P>/result<A,B>/string/list<T> → 2 slots.
 pub fn flat_slots(ty_ref: &str, type_map: &TypeMap) -> Result<Vec<&'static str>, CompileError> {
     match resolve_type(ty_ref, type_map)? {
         ResolvedType::Primitive(p) => Ok(vec![wit_to_core(&p)?]),
         ResolvedType::String => Ok(vec!["i32", "i32"]),
+        ResolvedType::List(_) => Ok(vec!["i32", "i32"]),
         ResolvedType::Option(inner) => {
             let payload = wit_to_core(&inner)?;
             Ok(vec!["i32", payload])
@@ -140,6 +144,7 @@ pub fn size_align(ty_ref: &str, type_map: &TypeMap) -> Result<(usize, usize), Co
             }
         }),
         ResolvedType::String => Ok((8, 4)),
+        ResolvedType::List(_) => Ok((8, 4)),
         ResolvedType::Option(inner) => variant_layout(&[Some(inner)], type_map),
         ResolvedType::Result(ok, err) => variant_layout(&[Some(ok), Some(err)], type_map),
     }
@@ -439,15 +444,20 @@ pub fn emit_body(
     let scope: Vec<(String, String)> = params.iter().chain(locals.iter()).cloned().collect();
     let mut out = String::new();
 
-    // If the function returns `string`, the last body instruction is expected
-    // to produce the string value (LocalGet of a string local, or
-    // StringLiteral). We wrap that last instruction in an indirect-return
+    // If the function returns `string` or `list<T>`, the last body
+    // instruction is expected to produce that value (LocalGet of the
+    // corresponding local, or a literal). Wrap it in an indirect-return
     // sequence — allocate 8 bytes, store (ptr, len), push the buffer ptr.
-    let needs_string_wrap = result_ty
-        .map(|ty| matches!(resolve_type(ty, type_map), Ok(ResolvedType::String)))
+    let needs_ptrlen_wrap = result_ty
+        .map(|ty| {
+            matches!(
+                resolve_type(ty, type_map),
+                Ok(ResolvedType::String) | Ok(ResolvedType::List(_))
+            )
+        })
         .unwrap_or(false);
 
-    let (init, last) = if needs_string_wrap {
+    let (init, last) = if needs_ptrlen_wrap {
         instructions
             .split_last()
             .map(|(last, init)| (init, Some(last)))
@@ -470,7 +480,7 @@ pub fn emit_body(
     }
 
     if let Some(last) = last {
-        emit_string_return_wrap(
+        emit_ptrlen_return_wrap(
             last,
             &scope,
             type_map,
@@ -483,10 +493,10 @@ pub fn emit_body(
     Ok(out)
 }
 
-/// Wrap a string-producing instruction into an indirect-return sequence:
-/// allocate an 8-byte buffer via `cabi_realloc`, write (data_ptr, len) to
-/// offsets 0 and 4, then push the buffer pointer as the core return value.
-fn emit_string_return_wrap(
+/// Wrap a (ptr, len)-producing instruction (for string or list return) into
+/// an indirect-return sequence: allocate an 8-byte buffer via `cabi_realloc`,
+/// write (data_ptr, len) to offsets 0 and 4, then push the buffer pointer.
+fn emit_ptrlen_return_wrap(
     instr: &Instruction,
     scope: &[(String, String)],
     type_map: &TypeMap,
@@ -496,7 +506,7 @@ fn emit_string_return_wrap(
 ) -> Result<(), CompileError> {
     let ret_ptr = ret_ptr_slot.ok_or_else(|| {
         CompileError::Unsupported(
-            "ret_ptr_slot missing for indirect string return (collect_locals should have reserved one)".into(),
+            "ret_ptr_slot missing for indirect (ptr,len) return (collect_locals should have reserved one)".into(),
         )
     })?;
 
@@ -508,12 +518,15 @@ fn emit_string_return_wrap(
     match instr {
         Instruction::LocalGet { uid } => {
             let (first_idx, _, ty) = slot_info(uid, scope, type_map)?;
-            if !matches!(resolve_type(ty, type_map)?, ResolvedType::String) {
-                return Err(CompileError::InvalidInput(format!(
-                    "string return wrap applied to non-string local {uid:?}"
-                )));
+            match resolve_type(ty, type_map)? {
+                ResolvedType::String | ResolvedType::List(_) => {}
+                other => {
+                    return Err(CompileError::InvalidInput(format!(
+                        "(ptr,len) return wrap applied to non-string/list local {uid:?} \
+                         (resolved as {other:?})"
+                    )));
+                }
             }
-            // Store data ptr at [ret+0], len at [ret+4].
             out.push_str(&format!(
                 "      local.get {ret_ptr}\n      local.get {first_idx}\n      i32.store offset=0 align=2\n"
             ));
@@ -538,7 +551,8 @@ fn emit_string_return_wrap(
         }
         other => {
             return Err(CompileError::Unsupported(format!(
-                "string return from {other:?} not supported yet (v0.14 handles LocalGet or StringLiteral)"
+                "(ptr,len) return from {other:?} not supported yet \
+                 (v0.14/v0.15 handles LocalGet or StringLiteral)"
             )));
         }
     }
@@ -864,6 +878,28 @@ fn emit_instr(
                 }
             }
         }
+        Instruction::ListLen { value } => {
+            // v0.15: read the element count from the list local's `len` slot.
+            let uid = match value.as_ref() {
+                Instruction::LocalGet { uid } => uid,
+                _ => {
+                    return Err(CompileError::Unsupported(
+                        "ListLen only supports LocalGet of a list local for now".into(),
+                    ));
+                }
+            };
+            let (first_idx, _, ty) = slot_info(uid, scope, type_map)?;
+            match resolve_type(ty, type_map)? {
+                ResolvedType::List(_) => {
+                    out.push_str(&format!("      local.get {}\n", first_idx + 1));
+                }
+                other => {
+                    return Err(CompileError::InvalidInput(format!(
+                        "ListLen applied to non-list local {uid:?} (resolved as {other:?})"
+                    )));
+                }
+            }
+        }
         Instruction::Some { value } => {
             emit_variant_ctor(
                 expected,
@@ -1173,9 +1209,10 @@ fn branch_result_clause<'a>(
             let core = match resolve_type(ty, type_map)? {
                 ResolvedType::Primitive(p) => wit_to_core(&p)?.to_string(),
                 // Compound & string both use indirect return (single i32 ptr).
-                ResolvedType::String | ResolvedType::Option(_) | ResolvedType::Result(_, _) => {
-                    "i32".to_string()
-                }
+                ResolvedType::String
+                | ResolvedType::List(_)
+                | ResolvedType::Option(_)
+                | ResolvedType::Result(_, _) => "i32".to_string(),
             };
             Ok((format!(" (result {core})"), Some(ty)))
         }
@@ -1201,6 +1238,7 @@ fn infer_wit_type(
         Instruction::IsErr { .. } => Some("bool".to_string()),
         Instruction::StringLen { .. } => Some("u32".to_string()),
         Instruction::StringLiteral { .. } => Some("string".to_string()),
+        Instruction::ListLen { .. } => Some("u32".to_string()),
         Instruction::Call { func_uid, .. } => func_map.get(func_uid).and_then(|f| f.result.clone()),
         _ => None,
     }

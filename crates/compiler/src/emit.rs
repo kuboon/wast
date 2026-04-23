@@ -357,6 +357,7 @@ fn format_wit_type(ty: &str, type_map: &TypeMap) -> Result<String, CompileError>
             other => other.to_string(),
         }),
         ResolvedType::String => Ok("string".to_string()),
+        ResolvedType::List(inner) => Ok(format!("list<{}>", format_wit_type(&inner, type_map)?)),
         ResolvedType::Option(inner) => {
             Ok(format!("option<{}>", format_wit_type(&inner, type_map)?))
         }

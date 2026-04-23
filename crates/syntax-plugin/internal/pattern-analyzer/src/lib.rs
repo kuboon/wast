@@ -116,6 +116,11 @@ pub enum Instruction {
         value: Box<Instruction>,
     },
 
+    // List operations
+    ListLen {
+        value: Box<Instruction>,
+    },
+
     // Other
     Nop,
 }

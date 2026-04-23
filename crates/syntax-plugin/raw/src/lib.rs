@@ -274,6 +274,13 @@ fn render_instruction(instr: &Instruction, indent: &str) -> String {
             let escaped: String = bytes.iter().map(|b| format!("\\{b:02x}")).collect();
             format!("{indent}(string.literal \"{escaped}\")")
         }
+        Instruction::ListLen { value } => {
+            format!(
+                "{}(list.len\n{})",
+                indent,
+                render_instruction(value, &inner)
+            )
+        }
         Instruction::MatchOption {
             value,
             some_binding,
