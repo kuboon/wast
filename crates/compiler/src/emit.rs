@@ -304,12 +304,32 @@ fn flat_result_clause(result: Option<&str>, type_map: &TypeMap) -> Result<String
     }
 }
 
-/// Synthesize a WIT world string from the db's exports + imports. Type refs
-/// are inlined (no `type` declarations) — `option<u32>` / `result<u32, u32>`
-/// are emitted directly at each use site.
+/// Synthesize a WIT world string from the db's exports + imports. Records
+/// are emitted as named `type` declarations (WIT doesn't allow inline
+/// anonymous records at use sites). Other compounds (option/result/list) are
+/// inlined at the use site.
 fn synthesize_world(db: &WastDb, type_map: &TypeMap) -> Result<String, CompileError> {
     let mut out = String::new();
     out.push_str("package wast:generated;\n\nworld generated {\n");
+
+    // Type declarations: records must be named in WIT. Syntax:
+    //   record NAME { field: ty, … }
+    // (no `type NAME = record { … }` alias form — that's not valid WIT).
+    for row in &db.types {
+        if let wast_types::WitType::Record(fields) = &row.def.definition {
+            let fields_wit = fields
+                .iter()
+                .map(|(fname, ftype)| {
+                    format_wit_type(ftype, type_map).map(|t| format!("{fname}: {t}"))
+                })
+                .collect::<Result<Vec<_>, _>>()?
+                .join(", ");
+            out.push_str(&format!(
+                "  record {name} {{ {fields_wit} }}\n",
+                name = wit_name(&row.uid)
+            ));
+        }
+    }
 
     for row in &db.funcs {
         match &row.func.source {
@@ -327,6 +347,11 @@ fn synthesize_world(db: &WastDb, type_map: &TypeMap) -> Result<String, CompileEr
 
     out.push_str("}\n");
     Ok(out)
+}
+
+/// Normalize a WIT identifier — `_` → `-` (WIT is kebab-case, not snake).
+fn wit_name(name: &str) -> String {
+    name.replace('_', "-")
 }
 
 fn format_wit_sig(
@@ -366,6 +391,9 @@ fn format_wit_type(ty: &str, type_map: &TypeMap) -> Result<String, CompileError>
             format_wit_type(&ok, type_map)?,
             format_wit_type(&err, type_map)?
         )),
+        // Records must be named (WIT disallows anonymous inline records at
+        // use sites). `ty` is the uid declared via `type foo = record { … }`.
+        ResolvedType::Record(_) => Ok(wit_name(ty)),
     }
 }
 

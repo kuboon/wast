@@ -27,8 +27,8 @@ pub type TypeMap<'a> = HashMap<String, &'a WitType>;
 
 /// Structural view of a WIT type reference (resolved through a `TypeMap`).
 /// Scope: primitives (numeric + bool/char), string (ptr+len pair),
-/// list<T> (ptr+len pair where len is element count), and option/result
-/// with primitive payload.
+/// list<T> (ptr+len pair where len is element count), option/result
+/// with primitive payload, and record with primitive fields.
 #[derive(Debug, Clone)]
 pub enum ResolvedType {
     Primitive(String),
@@ -36,6 +36,7 @@ pub enum ResolvedType {
     List(String),
     Option(String),
     Result(String, String),
+    Record(Vec<(String, String)>),
 }
 
 pub fn resolve_type(ty_ref: &str, type_map: &TypeMap) -> Result<ResolvedType, CompileError> {
@@ -60,6 +61,7 @@ pub fn resolve_type(ty_ref: &str, type_map: &TypeMap) -> Result<ResolvedType, Co
         WitType::List(inner) => Ok(ResolvedType::List(inner.clone())),
         WitType::Option(inner) => Ok(ResolvedType::Option(inner.clone())),
         WitType::Result(ok, err) => Ok(ResolvedType::Result(ok.clone(), err.clone())),
+        WitType::Record(fields) => Ok(ResolvedType::Record(fields.clone())),
         other => Err(CompileError::Unsupported(format!(
             "type {ty_ref:?} with definition {other:?} is not supported yet"
         ))),
@@ -107,6 +109,14 @@ pub fn flat_slots(ty_ref: &str, type_map: &TypeMap) -> Result<Vec<&'static str>,
             let payload = join_core_type(ok_core, err_core)?;
             Ok(vec!["i32", payload])
         }
+        ResolvedType::Record(fields) => {
+            // Flat form of a record is the concatenation of its fields' flats.
+            let mut out = Vec::new();
+            for (_, ftype) in fields {
+                out.extend(flat_slots(&ftype, type_map)?);
+            }
+            Ok(out)
+        }
     }
 }
 
@@ -147,7 +157,64 @@ pub fn size_align(ty_ref: &str, type_map: &TypeMap) -> Result<(usize, usize), Co
         ResolvedType::List(_) => Ok((8, 4)),
         ResolvedType::Option(inner) => variant_layout(&[Some(inner)], type_map),
         ResolvedType::Result(ok, err) => variant_layout(&[Some(ok), Some(err)], type_map),
+        ResolvedType::Record(fields) => record_layout(&fields, type_map),
     }
+}
+
+/// Canonical ABI layout for a record — each field starts at an aligned
+/// offset, total size is padded to the record's alignment.
+fn record_layout(
+    fields: &[(String, String)],
+    type_map: &TypeMap,
+) -> Result<(usize, usize), CompileError> {
+    let mut size = 0usize;
+    let mut align = 1usize;
+    for (_, ftype) in fields {
+        let (fs, fa) = size_align(ftype, type_map)?;
+        size = align_up(size, fa) + fs;
+        align = align.max(fa);
+    }
+    size = align_up(size, align);
+    Ok((size, align))
+}
+
+/// Byte offset of a named field within a record, plus its WIT type ref.
+pub fn record_field_info(
+    fields: &[(String, String)],
+    field_name: &str,
+    type_map: &TypeMap,
+) -> Result<(usize, String), CompileError> {
+    let mut offset = 0usize;
+    for (fname, ftype) in fields {
+        let (fs, fa) = size_align(ftype, type_map)?;
+        offset = align_up(offset, fa);
+        if fname == field_name {
+            return Ok((offset, ftype.clone()));
+        }
+        offset += fs;
+    }
+    Err(CompileError::InvalidInput(format!(
+        "field {field_name:?} not found in record"
+    )))
+}
+
+/// Flat-slot offset of a named field within a record's concatenated flat form.
+pub fn record_field_slot_info(
+    fields: &[(String, String)],
+    field_name: &str,
+    type_map: &TypeMap,
+) -> Result<(usize, Vec<&'static str>), CompileError> {
+    let mut slot_offset = 0usize;
+    for (fname, ftype) in fields {
+        let slots = flat_slots(ftype, type_map)?;
+        if fname == field_name {
+            return Ok((slot_offset, slots));
+        }
+        slot_offset += slots.len();
+    }
+    Err(CompileError::InvalidInput(format!(
+        "field {field_name:?} not found in record"
+    )))
 }
 
 /// Layout of a variant with the given case payload types (`None` = no payload).
@@ -191,16 +258,18 @@ pub fn return_is_indirect(ty: &str, type_map: &TypeMap) -> Result<bool, CompileE
     Ok(flat_slots(ty, type_map)?.len() > MAX_FLAT_RESULTS)
 }
 
-/// Core store instruction + natural-alignment power-of-two for a primitive.
-/// `bool` stores a single byte via `i32.store8`. Integers and floats use
-/// their natural width.
+/// Core store instruction + natural alignment (byte count, always a power of
+/// two) for a primitive. `bool` stores a single byte via `i32.store8`.
+/// Integers and floats use their natural width. The alignment value is used
+/// as the `align=` WAT memarg — it must be a power of 2 in bytes, not the
+/// exponent.
 pub fn store_op(ty: &str) -> Result<(&'static str, u32), CompileError> {
     Ok(match ty {
-        "bool" => ("i32.store8", 0),
-        "u32" | "i32" | "char" => ("i32.store", 2),
-        "u64" | "i64" => ("i64.store", 3),
-        "f32" => ("f32.store", 2),
-        "f64" => ("f64.store", 3),
+        "bool" => ("i32.store8", 1),
+        "u32" | "i32" | "char" => ("i32.store", 4),
+        "u64" | "i64" => ("i64.store", 8),
+        "f32" => ("f32.store", 4),
+        "f64" => ("f64.store", 8),
         other => {
             return Err(CompileError::Unsupported(format!("store op for {other}")));
         }
@@ -444,20 +513,21 @@ pub fn emit_body(
     let scope: Vec<(String, String)> = params.iter().chain(locals.iter()).cloned().collect();
     let mut out = String::new();
 
-    // If the function returns `string` or `list<T>`, the last body
-    // instruction is expected to produce that value (LocalGet of the
-    // corresponding local, or a literal). Wrap it in an indirect-return
-    // sequence — allocate 8 bytes, store (ptr, len), push the buffer ptr.
-    let needs_ptrlen_wrap = result_ty
-        .map(|ty| {
-            matches!(
-                resolve_type(ty, type_map),
-                Ok(ResolvedType::String) | Ok(ResolvedType::List(_))
-            )
-        })
-        .unwrap_or(false);
+    // If the function returns a (ptr, len) compound (string/list) or a
+    // record, the last body instruction is expected to produce that value.
+    // Wrap it in the appropriate indirect-return sequence.
+    #[derive(Clone, Copy)]
+    enum WrapKind {
+        PtrLen,
+        Record,
+    }
+    let wrap_kind = result_ty.and_then(|ty| match resolve_type(ty, type_map) {
+        Ok(ResolvedType::String) | Ok(ResolvedType::List(_)) => Some(WrapKind::PtrLen),
+        Ok(ResolvedType::Record(_)) => Some(WrapKind::Record),
+        _ => None,
+    });
 
-    let (init, last) = if needs_ptrlen_wrap {
+    let (init, last) = if wrap_kind.is_some() {
         instructions
             .split_last()
             .map(|(last, init)| (init, Some(last)))
@@ -480,14 +550,27 @@ pub fn emit_body(
     }
 
     if let Some(last) = last {
-        emit_ptrlen_return_wrap(
-            last,
-            &scope,
-            type_map,
-            literal_table,
-            ret_ptr_slot,
-            &mut out,
-        )?;
+        match wrap_kind {
+            Some(WrapKind::PtrLen) => emit_ptrlen_return_wrap(
+                last,
+                &scope,
+                type_map,
+                literal_table,
+                ret_ptr_slot,
+                &mut out,
+            )?,
+            Some(WrapKind::Record) => emit_record_return_wrap(
+                last,
+                result_ty.unwrap(),
+                &scope,
+                func_map,
+                type_map,
+                literal_table,
+                ret_ptr_slot,
+                &mut out,
+            )?,
+            None => unreachable!(),
+        }
     }
 
     Ok(out)
@@ -554,6 +637,93 @@ fn emit_ptrlen_return_wrap(
                 "(ptr,len) return from {other:?} not supported yet \
                  (v0.14/v0.15 handles LocalGet or StringLiteral)"
             )));
+        }
+    }
+
+    // Push the buffer pointer as the core function's return value.
+    out.push_str(&format!("      local.get {ret_ptr}\n"));
+    Ok(())
+}
+
+/// Wrap a record-producing instruction (must be `RecordLiteral`) into an
+/// indirect-return sequence: allocate record size bytes, store each field at
+/// its Canonical-ABI offset, then push the buffer pointer.
+#[allow(clippy::too_many_arguments)]
+fn emit_record_return_wrap(
+    instr: &Instruction,
+    record_ty: &str,
+    scope: &[(String, String)],
+    func_map: &FuncMap,
+    type_map: &TypeMap,
+    literal_table: &LiteralTable,
+    ret_ptr_slot: Option<usize>,
+    out: &mut String,
+) -> Result<(), CompileError> {
+    let ret_ptr = ret_ptr_slot.ok_or_else(|| {
+        CompileError::Unsupported(
+            "ret_ptr_slot missing for indirect record return (collect_locals should have reserved one)".into(),
+        )
+    })?;
+
+    let ResolvedType::Record(declared_fields) = resolve_type(record_ty, type_map)? else {
+        return Err(CompileError::InvalidInput(format!(
+            "record return wrap on non-record type {record_ty:?}"
+        )));
+    };
+
+    let (size, align) = size_align(record_ty, type_map)?;
+
+    let user_fields = match instr {
+        Instruction::RecordLiteral { fields } => fields,
+        other => {
+            return Err(CompileError::Unsupported(format!(
+                "record return from {other:?} not supported yet (v0.16 handles RecordLiteral)"
+            )));
+        }
+    };
+
+    // Allocate record bytes.
+    out.push_str(&format!(
+        "      i32.const 0\n      i32.const 0\n      i32.const {align}\n      i32.const {size}\n      call $cabi_realloc\n      local.set {ret_ptr}\n"
+    ));
+
+    // Write each declared field in order. Caller may supply fields out of
+    // order — find by name.
+    for (fname, ftype) in &declared_fields {
+        let (field_offset, _) = record_field_info(&declared_fields, fname, type_map)?;
+        let value = user_fields
+            .iter()
+            .find(|(n, _)| n == fname)
+            .map(|(_, v)| v)
+            .ok_or_else(|| {
+                CompileError::InvalidInput(format!(
+                    "RecordLiteral missing field {fname:?} for record {record_ty:?}"
+                ))
+            })?;
+        // v0.16: primitive fields only.
+        match resolve_type(ftype, type_map)? {
+            ResolvedType::Primitive(p) => {
+                let (store, align_pow2) = store_op(&p)?;
+                out.push_str(&format!("      local.get {ret_ptr}\n"));
+                emit_instr(
+                    value,
+                    Some(ftype),
+                    scope,
+                    func_map,
+                    type_map,
+                    literal_table,
+                    ret_ptr_slot,
+                    out,
+                )?;
+                out.push_str(&format!(
+                    "      {store} offset={field_offset} align={align_pow2}\n"
+                ));
+            }
+            other => {
+                return Err(CompileError::Unsupported(format!(
+                    "record field {fname:?} of type {ftype:?} (resolved {other:?}) not supported yet — v0.16 handles primitives only"
+                )));
+            }
         }
     }
 
@@ -900,6 +1070,36 @@ fn emit_instr(
                 }
             }
         }
+        Instruction::RecordGet { value, field } => {
+            // v0.16: restrict to `LocalGet(record_local)`. Read the field's
+            // flat slots from the concatenated flat layout.
+            let uid = match value.as_ref() {
+                Instruction::LocalGet { uid } => uid,
+                _ => {
+                    return Err(CompileError::Unsupported(
+                        "RecordGet only supports LocalGet of a record local for now".into(),
+                    ));
+                }
+            };
+            let (base_idx, _, ty) = slot_info(uid, scope, type_map)?;
+            let ResolvedType::Record(fields) = resolve_type(ty, type_map)? else {
+                return Err(CompileError::InvalidInput(format!(
+                    "RecordGet applied to non-record local {uid:?}"
+                )));
+            };
+            let (slot_offset, field_slots) = record_field_slot_info(&fields, field, type_map)?;
+            for i in 0..field_slots.len() {
+                out.push_str(&format!("      local.get {}\n", base_idx + slot_offset + i));
+            }
+        }
+        Instruction::RecordLiteral { .. } => {
+            // RecordLiteral is handled at the return-position wrap. Seeing it
+            // in a non-return context means it would be consumed as a flat
+            // value stream — not supported yet (need memory alloc + stores).
+            return Err(CompileError::Unsupported(
+                "RecordLiteral outside of return position not supported yet".into(),
+            ));
+        }
         Instruction::Some { value } => {
             emit_variant_ctor(
                 expected,
@@ -1208,11 +1408,12 @@ fn branch_result_clause<'a>(
         Some(ty) => {
             let core = match resolve_type(ty, type_map)? {
                 ResolvedType::Primitive(p) => wit_to_core(&p)?.to_string(),
-                // Compound & string both use indirect return (single i32 ptr).
+                // Compound types all use indirect return (single i32 ptr).
                 ResolvedType::String
                 | ResolvedType::List(_)
                 | ResolvedType::Option(_)
-                | ResolvedType::Result(_, _) => "i32".to_string(),
+                | ResolvedType::Result(_, _)
+                | ResolvedType::Record(_) => "i32".to_string(),
             };
             Ok((format!(" (result {core})"), Some(ty)))
         }
@@ -1239,6 +1440,18 @@ fn infer_wit_type(
         Instruction::StringLen { .. } => Some("u32".to_string()),
         Instruction::StringLiteral { .. } => Some("string".to_string()),
         Instruction::ListLen { .. } => Some("u32".to_string()),
+        Instruction::RecordGet { value, field } => {
+            let record_ty = infer_wit_type(value, scope, func_map, type_map)?;
+            let resolved = resolve_type(&record_ty, type_map).ok()?;
+            if let ResolvedType::Record(fields) = resolved {
+                fields
+                    .iter()
+                    .find(|(n, _)| n == field)
+                    .map(|(_, t)| t.clone())
+            } else {
+                None
+            }
+        }
         Instruction::Call { func_uid, .. } => func_map.get(func_uid).and_then(|f| f.result.clone()),
         _ => None,
     }

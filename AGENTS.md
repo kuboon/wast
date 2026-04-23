@@ -30,7 +30,7 @@ See [crates/file-manager/PLAN.md](crates/file-manager/PLAN.md) for the SQLite mi
 | file-manager | `crates/file-manager/` | **Done** (JSON, row-oriented) | SQLite migration |
 | file-manager-hosted | `crates/file-manager-hosted/` | **Done** (JSON, row-oriented) | — |
 | wast-types (shared serde types) | `crates/wast-types/` | **Done** | — |
-| compiler | `crates/compiler/` | **v0.15 done** (+ `list<T>` param/return + `ListLen`) | ListLiteral + record/variant |
+| compiler | `crates/compiler/` | **v0.16 done** (+ `record` with primitive fields: RecordGet/RecordLiteral) | variant → tuple → resource |
 | pattern-analyzer | `crates/syntax-plugin/internal/pattern-analyzer/` | **Done** | — |
 | raw syntax | `crates/syntax-plugin/raw/` | **Done** | — |
 | ruby-like syntax | `crates/syntax-plugin/ruby-like/` | **Partial** | `from_text` body parsing, body roundtrip tests |
@@ -64,7 +64,8 @@ See [crates/file-manager/PLAN.md](crates/file-manager/PLAN.md) for the SQLite mi
 - [x] v0.13: `StringLiteral { bytes }` IR + data segments. `collect_literal_table` pre-scans every body; each unique literal is assigned a memory offset starting at `STATIC_DATA_BASE=1024` (dedup'd). `$heap_end` initial value bumps past all literals so the bump allocator doesn't clobber static data. `(data (i32.const OFFSET) "\HH…")` emitted per literal. `StringLen(StringLiteral(..))` compile-time folds to `i32.const bytes.len()`. Tested: compile-time fold, cross-Call literal arg, multi-byte UTF-8 (`"こんにちは"` → 15 bytes).
 - [x] v0.14: **string return** via indirect return. `emit_body` detects string-returning functions and wraps the body's last instruction (LocalGet of a string local, or StringLiteral) in: allocate 8-byte return area via `cabi_realloc(0, 0, 4, 8)`, store (ptr, len) at offsets 0/4, push the buffer pointer as the core result. `ret_ptr_slot` is now reserved whenever the return type is indirect (not just when the body contains Some/Ok/Err). Tests: echo(s) passthrough, greeting() from literal, UTF-8 round-trip.
 - [x] v0.15: `list<T>` param + return + `ListLen` IR. Same (ptr, len) flat layout as string; `len` is the element count. `ResolvedType::List(inner)` variant; `emit_body`'s string-return wrap generalized to `emit_ptrlen_return_wrap` which now handles both String and List returns with the same 8-byte return area pattern. `ListLen(LocalGet(list_local))` reads the len slot directly. Tests: len-of(xs: list<u32>) across empty/small/100-element cases, echo-list passthrough, list<i64> round-trip with 8-byte-aligned elements. `ListLiteral` (construction from element list) deferred.
-- [ ] Roadmap: `ListLiteral` for in-guest list construction → `record` → `variant` (general cases) → `tuple` / `resource`
+- [x] v0.16: `record` with primitive fields. Flat form is concatenation of fields' flats. WIT world declarations use `record NAME { … }` syntax (not `type NAME = record { … }` — WIT disallows that). IR: `RecordGet { value, field }` reads a field's flat slots from a record local; `RecordLiteral { fields }` at return position triggers `emit_record_return_wrap` which allocates record size bytes and writes each field at its Canonical-ABI byte offset via the appropriate `{ty}.store offset=N align=M` (align is actual byte count — fixed `store_op` to return power-of-two byte value, not the exponent). Tests: get-x/get-y field access on `point`, make-point constructor, heterogeneous `mixed { flag: bool, big: u64, small: u32 }` with non-trivial padding.
+- [ ] Roadmap: `variant` (general cases beyond option/result) → `tuple` → `resource`
 - See [crates/compiler/PLAN.md](crates/compiler/PLAN.md) for full context
 
 ### file-manager (`crates/file-manager/src/lib.rs`)

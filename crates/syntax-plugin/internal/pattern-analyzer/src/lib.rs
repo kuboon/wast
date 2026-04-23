@@ -121,6 +121,15 @@ pub enum Instruction {
         value: Box<Instruction>,
     },
 
+    // Record operations
+    RecordGet {
+        value: Box<Instruction>,
+        field: String,
+    },
+    RecordLiteral {
+        fields: Vec<(String, Instruction)>,
+    },
+
     // Other
     Nop,
 }

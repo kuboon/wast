@@ -281,6 +281,27 @@ fn render_instruction(instr: &Instruction, indent: &str) -> String {
                 render_instruction(value, &inner)
             )
         }
+        Instruction::RecordGet { value, field } => {
+            format!(
+                "{}(record.get ${}\n{})",
+                indent,
+                field,
+                render_instruction(value, &inner)
+            )
+        }
+        Instruction::RecordLiteral { fields } => {
+            let fields_str = fields
+                .iter()
+                .map(|(fname, fval)| {
+                    format!(
+                        "{inner}(; ${fname} ;)\n{}",
+                        render_instruction(fval, &inner)
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            format!("{indent}(record.literal\n{fields_str})")
+        }
         Instruction::MatchOption {
             value,
             some_binding,

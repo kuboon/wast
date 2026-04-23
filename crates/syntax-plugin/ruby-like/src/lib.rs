@@ -325,6 +325,20 @@ fn render_instruction(
             let val = render_expr(value, local_names, func_names);
             format!("{}{}.size", indent, val)
         }
+        Instruction::RecordGet { value, field } => {
+            let val = render_expr(value, local_names, func_names);
+            format!("{}{}.{}", indent, val, field)
+        }
+        Instruction::RecordLiteral { fields } => {
+            let pairs = fields
+                .iter()
+                .map(|(fname, fval)| {
+                    format!("{}: {}", fname, render_expr(fval, local_names, func_names))
+                })
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("{indent}{{ {pairs} }}")
+        }
         Instruction::MatchOption {
             value,
             some_binding,
