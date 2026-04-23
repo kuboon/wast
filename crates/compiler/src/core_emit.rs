@@ -438,7 +438,25 @@ pub fn emit_body(
 ) -> Result<String, CompileError> {
     let scope: Vec<(String, String)> = params.iter().chain(locals.iter()).cloned().collect();
     let mut out = String::new();
-    for instr in instructions {
+
+    // If the function returns `string`, the last body instruction is expected
+    // to produce the string value (LocalGet of a string local, or
+    // StringLiteral). We wrap that last instruction in an indirect-return
+    // sequence — allocate 8 bytes, store (ptr, len), push the buffer ptr.
+    let needs_string_wrap = result_ty
+        .map(|ty| matches!(resolve_type(ty, type_map), Ok(ResolvedType::String)))
+        .unwrap_or(false);
+
+    let (init, last) = if needs_string_wrap {
+        instructions
+            .split_last()
+            .map(|(last, init)| (init, Some(last)))
+            .unwrap_or((instructions, None))
+    } else {
+        (instructions, None)
+    };
+
+    for instr in init {
         emit_instr(
             instr,
             result_ty,
@@ -450,7 +468,84 @@ pub fn emit_body(
             &mut out,
         )?;
     }
+
+    if let Some(last) = last {
+        emit_string_return_wrap(
+            last,
+            &scope,
+            type_map,
+            literal_table,
+            ret_ptr_slot,
+            &mut out,
+        )?;
+    }
+
     Ok(out)
+}
+
+/// Wrap a string-producing instruction into an indirect-return sequence:
+/// allocate an 8-byte buffer via `cabi_realloc`, write (data_ptr, len) to
+/// offsets 0 and 4, then push the buffer pointer as the core return value.
+fn emit_string_return_wrap(
+    instr: &Instruction,
+    scope: &[(String, String)],
+    type_map: &TypeMap,
+    literal_table: &LiteralTable,
+    ret_ptr_slot: Option<usize>,
+    out: &mut String,
+) -> Result<(), CompileError> {
+    let ret_ptr = ret_ptr_slot.ok_or_else(|| {
+        CompileError::Unsupported(
+            "ret_ptr_slot missing for indirect string return (collect_locals should have reserved one)".into(),
+        )
+    })?;
+
+    // Allocate 8-byte return area for the (ptr, len) struct.
+    out.push_str(&format!(
+        "      i32.const 0\n      i32.const 0\n      i32.const 4\n      i32.const 8\n      call $cabi_realloc\n      local.set {ret_ptr}\n"
+    ));
+
+    match instr {
+        Instruction::LocalGet { uid } => {
+            let (first_idx, _, ty) = slot_info(uid, scope, type_map)?;
+            if !matches!(resolve_type(ty, type_map)?, ResolvedType::String) {
+                return Err(CompileError::InvalidInput(format!(
+                    "string return wrap applied to non-string local {uid:?}"
+                )));
+            }
+            // Store data ptr at [ret+0], len at [ret+4].
+            out.push_str(&format!(
+                "      local.get {ret_ptr}\n      local.get {first_idx}\n      i32.store offset=0 align=2\n"
+            ));
+            out.push_str(&format!(
+                "      local.get {ret_ptr}\n      local.get {}\n      i32.store offset=4 align=2\n",
+                first_idx + 1
+            ));
+        }
+        Instruction::StringLiteral { bytes } => {
+            let offset = literal_table.get(bytes).ok_or_else(|| {
+                CompileError::InvalidInput(
+                    "StringLiteral missing from literal table (collector bug)".into(),
+                )
+            })?;
+            out.push_str(&format!(
+                "      local.get {ret_ptr}\n      i32.const {offset}\n      i32.store offset=0 align=2\n"
+            ));
+            out.push_str(&format!(
+                "      local.get {ret_ptr}\n      i32.const {}\n      i32.store offset=4 align=2\n",
+                bytes.len()
+            ));
+        }
+        other => {
+            return Err(CompileError::Unsupported(format!(
+                "string return from {other:?} not supported yet (v0.14 handles LocalGet or StringLiteral)"
+            )));
+        }
+    }
+
+    // Push the buffer pointer as the core function's return value.
+    out.push_str(&format!("      local.get {ret_ptr}\n"));
+    Ok(())
 }
 
 /// Scan a body for any compound constructor (`Some`/`None`/`Ok`/`Err`) that

@@ -214,7 +214,17 @@ fn emit_core_func(
         .iter()
         .map(|(_, ty)| flat_slots(ty, type_map).map(|s| s.len()).unwrap_or(0))
         .sum();
-    let needs_ret_ptr = body_needs_ret_ptr(&body_instr);
+    // Reserve a ret_ptr slot for either:
+    //   (1) a body that contains Some/None/Ok/Err — variant ctor writes to it
+    //   (2) a function whose return type is indirect (string/option/result) —
+    //       the return-area wrap in emit_body uses it
+    let return_indirect = row
+        .func
+        .result
+        .as_deref()
+        .map(|ty| return_is_indirect(ty, type_map).unwrap_or(false))
+        .unwrap_or(false);
+    let needs_ret_ptr = body_needs_ret_ptr(&body_instr) || return_indirect;
     let ret_ptr_slot = if needs_ret_ptr {
         Some(param_slot_count + local_slot_count)
     } else {
