@@ -306,6 +306,10 @@ fn render_instruction(
             let val = render_expr(value, local_names, func_names);
             format!("{}{}.len()", indent, val)
         }
+        Instruction::StringLiteral { bytes } => {
+            let s = String::from_utf8_lossy(bytes);
+            format!("{indent}{:?}", &*s)
+        }
         Instruction::MatchOption {
             value,
             some_binding,

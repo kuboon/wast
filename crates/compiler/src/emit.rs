@@ -21,11 +21,17 @@ use crate::core_emit::{
 };
 use crate::error::CompileError;
 
+/// Base offset for static data (string literals). Bump allocator starts its
+/// heap at or past the end of the collected literals.
+const STATIC_DATA_BASE: usize = 1024;
+
 /// Memory + `cabi_realloc` infrastructure injected into every non-empty core
-/// module. Bump allocator over a single memory page starting at offset 1024;
-/// `memory.copy` handles realloc-grow.
-const CABI_REALLOC_WAT: &str = r#"  (memory (export "memory") 1)
-  (global $heap_end (mut i32) (i32.const 1024))
+/// module. Bump allocator over a single memory page; `memory.copy` handles
+/// realloc-grow. `heap_end` initial value is set past any string literals.
+fn cabi_realloc_wat(heap_end_init: usize) -> String {
+    format!(
+        r#"  (memory (export "memory") 1)
+  (global $heap_end (mut i32) (i32.const {heap_end_init}))
   (func $cabi_realloc (export "cabi_realloc")
     (param $orig_ptr i32) (param $orig_size i32) (param $align i32) (param $new_size i32)
     (result i32)
@@ -54,7 +60,9 @@ const CABI_REALLOC_WAT: &str = r#"  (memory (export "memory") 1)
     end
     local.get $aligned
   )
-"#;
+"#
+    )
+}
 
 /// Fixed Component binary for the v0 WASI CLI empty-run case. Kept as a
 /// verbatim Component WAT (not synthesized via wit-component) because the
@@ -102,7 +110,8 @@ pub fn compile_component(db: &WastDb, _world_wit: &str) -> Result<Vec<u8>, Compi
         .map(|r| (r.uid.clone(), &r.def.definition))
         .collect::<HashMap<_, _>>();
 
-    let core_wat = emit_core_module(db, &func_map, &type_map)?;
+    let literal_table = collect_literal_table(db)?;
+    let core_wat = emit_core_module(db, &func_map, &type_map, &literal_table)?;
     let mut core_bytes = wat::parse_str(&core_wat)
         .map_err(|e| CompileError::WatParse(format!("{e}\n--- WAT ---\n{core_wat}")))?;
 
@@ -129,12 +138,14 @@ pub fn compile_component(db: &WastDb, _world_wit: &str) -> Result<Vec<u8>, Compi
 }
 
 /// Emit a single `(module …)` containing memory + realloc + imports +
-/// internal + exported funcs. Exports use the unmangled WIT name so
-/// `wit-component` matches them to the WIT world.
+/// data segments (string literals) + internal + exported funcs. Exports
+/// use the unmangled WIT name so `wit-component` matches them to the WIT
+/// world.
 fn emit_core_module(
     db: &WastDb,
     func_map: &FuncMap,
     type_map: &TypeMap,
+    literal_table: &LiteralTable,
 ) -> Result<String, CompileError> {
     let mut imports = String::new();
     for row in db
@@ -158,11 +169,15 @@ fn emit_core_module(
             FuncSource::Internal(_) | FuncSource::Exported(_)
         )
     }) {
-        body_funcs.push_str(&emit_core_func(row, func_map, type_map)?);
+        body_funcs.push_str(&emit_core_func(row, func_map, type_map, literal_table)?);
     }
 
+    let heap_end_init = literal_table.heap_start.max(STATIC_DATA_BASE);
+    let infra = cabi_realloc_wat(heap_end_init);
+    let data_segments = emit_data_segments(literal_table);
+
     Ok(format!(
-        "(module\n{imports}{CABI_REALLOC_WAT}{body_funcs})\n"
+        "(module\n{imports}{infra}{data_segments}{body_funcs})\n"
     ))
 }
 
@@ -173,6 +188,7 @@ fn emit_core_func(
     row: &WastFuncRow,
     func_map: &FuncMap,
     type_map: &TypeMap,
+    literal_table: &LiteralTable,
 ) -> Result<String, CompileError> {
     let name = source_key(&row.func.source);
     let mangled = mangle(name);
@@ -228,6 +244,7 @@ fn emit_core_func(
         row.func.result.as_deref(),
         func_map,
         type_map,
+        literal_table,
         ret_ptr_slot,
     )?;
 
@@ -355,4 +372,132 @@ pub(crate) fn mangle(name: &str) -> String {
     name.chars()
         .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
         .collect()
+}
+
+// ---------------------------------------------------------------------------
+// String literal collection & data segment emission
+// ---------------------------------------------------------------------------
+
+/// Static layout of every `Instruction::StringLiteral` encountered across all
+/// function bodies. `offsets` maps byte-string → memory offset (dedup'd);
+/// `heap_start` is the offset the bump allocator should begin at.
+pub(crate) struct LiteralTable {
+    pub offsets: std::collections::HashMap<Vec<u8>, usize>,
+    pub heap_start: usize,
+}
+
+impl LiteralTable {
+    pub fn get(&self, bytes: &[u8]) -> Option<usize> {
+        self.offsets.get(bytes).copied()
+    }
+}
+
+fn collect_literal_table(db: &WastDb) -> Result<LiteralTable, CompileError> {
+    let mut seen: Vec<Vec<u8>> = Vec::new();
+    let mut seen_set: std::collections::HashSet<Vec<u8>> = std::collections::HashSet::new();
+
+    for row in &db.funcs {
+        let Some(bytes) = row.func.body.as_ref() else {
+            continue;
+        };
+        if bytes.is_empty() {
+            continue;
+        }
+        let instrs = deserialize_body(bytes)
+            .map_err(|e| CompileError::InvalidInput(format!("body decode failed: {e}")))?;
+        collect_literals_rec(&instrs, &mut seen, &mut seen_set);
+    }
+
+    let mut offsets = std::collections::HashMap::new();
+    let mut cur = STATIC_DATA_BASE;
+    for lit in &seen {
+        offsets.insert(lit.clone(), cur);
+        cur += lit.len();
+    }
+
+    Ok(LiteralTable {
+        offsets,
+        heap_start: cur,
+    })
+}
+
+fn collect_literals_rec(
+    instrs: &[wast_pattern_analyzer::Instruction],
+    out: &mut Vec<Vec<u8>>,
+    seen: &mut std::collections::HashSet<Vec<u8>>,
+) {
+    use wast_pattern_analyzer::Instruction;
+    for i in instrs {
+        match i {
+            Instruction::StringLiteral { bytes } => {
+                if seen.insert(bytes.clone()) {
+                    out.push(bytes.clone());
+                }
+            }
+            Instruction::Block { body, .. } | Instruction::Loop { body, .. } => {
+                collect_literals_rec(body, out, seen);
+            }
+            Instruction::If {
+                condition,
+                then_body,
+                else_body,
+            } => {
+                collect_literals_rec(std::slice::from_ref(condition.as_ref()), out, seen);
+                collect_literals_rec(then_body, out, seen);
+                collect_literals_rec(else_body, out, seen);
+            }
+            Instruction::BrIf { condition, .. } => {
+                collect_literals_rec(std::slice::from_ref(condition.as_ref()), out, seen);
+            }
+            Instruction::Call { args, .. } => {
+                for (_, arg) in args {
+                    collect_literals_rec(std::slice::from_ref(arg), out, seen);
+                }
+            }
+            Instruction::LocalSet { value, .. }
+            | Instruction::Some { value }
+            | Instruction::Ok { value }
+            | Instruction::Err { value }
+            | Instruction::IsErr { value }
+            | Instruction::StringLen { value } => {
+                collect_literals_rec(std::slice::from_ref(value.as_ref()), out, seen);
+            }
+            Instruction::Arithmetic { lhs, rhs, .. } | Instruction::Compare { lhs, rhs, .. } => {
+                collect_literals_rec(std::slice::from_ref(lhs.as_ref()), out, seen);
+                collect_literals_rec(std::slice::from_ref(rhs.as_ref()), out, seen);
+            }
+            Instruction::MatchOption {
+                value,
+                some_body,
+                none_body,
+                ..
+            } => {
+                collect_literals_rec(std::slice::from_ref(value.as_ref()), out, seen);
+                collect_literals_rec(some_body, out, seen);
+                collect_literals_rec(none_body, out, seen);
+            }
+            Instruction::MatchResult {
+                value,
+                ok_body,
+                err_body,
+                ..
+            } => {
+                collect_literals_rec(std::slice::from_ref(value.as_ref()), out, seen);
+                collect_literals_rec(ok_body, out, seen);
+                collect_literals_rec(err_body, out, seen);
+            }
+            _ => {}
+        }
+    }
+}
+
+fn emit_data_segments(table: &LiteralTable) -> String {
+    let mut entries: Vec<(&Vec<u8>, &usize)> = table.offsets.iter().collect();
+    entries.sort_by_key(|(_, off)| **off);
+    let mut out = String::new();
+    for (bytes, offset) in entries {
+        let escaped: String = bytes.iter().map(|b| format!("\\{b:02x}")).collect();
+        out.push_str(&format!("  (data (i32.const {offset}) \"{escaped}\")\n"));
+    }
+    out
 }

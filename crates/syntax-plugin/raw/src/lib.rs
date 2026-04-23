@@ -268,6 +268,12 @@ fn render_instruction(instr: &Instruction, indent: &str) -> String {
                 render_instruction(value, &inner)
             )
         }
+        Instruction::StringLiteral { bytes } => {
+            // Escape as hex for round-trip safety (raw syntax shouldn't
+            // interpret UTF-8 specially — it's just bytes).
+            let escaped: String = bytes.iter().map(|b| format!("\\{b:02x}")).collect();
+            format!("{indent}(string.literal \"{escaped}\")")
+        }
         Instruction::MatchOption {
             value,
             some_binding,

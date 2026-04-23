@@ -14,7 +14,7 @@ use std::collections::HashMap;
 use wast_pattern_analyzer::{ArithOp, CompareOp, Instruction};
 use wast_types::{WastFunc, WitType};
 
-use crate::emit::mangle;
+use crate::emit::{LiteralTable, mangle};
 use crate::error::CompileError;
 
 /// Map from a callable func's uid to its definition. Used by `emit_body` to
@@ -433,6 +433,7 @@ pub fn emit_body(
     result_ty: Option<&str>,
     func_map: &FuncMap,
     type_map: &TypeMap,
+    literal_table: &LiteralTable,
     ret_ptr_slot: Option<usize>,
 ) -> Result<String, CompileError> {
     let scope: Vec<(String, String)> = params.iter().chain(locals.iter()).cloned().collect();
@@ -444,6 +445,7 @@ pub fn emit_body(
             &scope,
             func_map,
             type_map,
+            literal_table,
             ret_ptr_slot,
             &mut out,
         )?;
@@ -495,6 +497,7 @@ fn emit_instr(
     scope: &[(String, String)],
     func_map: &FuncMap,
     type_map: &TypeMap,
+    literal_table: &LiteralTable,
     ret_ptr_slot: Option<usize>,
     out: &mut String,
 ) -> Result<(), CompileError> {
@@ -522,8 +525,26 @@ fn emit_instr(
                 .or_else(|| infer_wit_type(lhs, scope, func_map, type_map))
                 .or_else(|| infer_wit_type(rhs, scope, func_map, type_map))
                 .unwrap_or_else(|| "i32".to_string());
-            emit_instr(lhs, Some(&ty), scope, func_map, type_map, ret_ptr_slot, out)?;
-            emit_instr(rhs, Some(&ty), scope, func_map, type_map, ret_ptr_slot, out)?;
+            emit_instr(
+                lhs,
+                Some(&ty),
+                scope,
+                func_map,
+                type_map,
+                literal_table,
+                ret_ptr_slot,
+                out,
+            )?;
+            emit_instr(
+                rhs,
+                Some(&ty),
+                scope,
+                func_map,
+                type_map,
+                literal_table,
+                ret_ptr_slot,
+                out,
+            )?;
             out.push_str(&format!("      {}\n", arith_op(op.clone(), &ty)?));
         }
         Instruction::Compare { op, lhs, rhs } => {
@@ -536,6 +557,7 @@ fn emit_instr(
                 scope,
                 func_map,
                 type_map,
+                literal_table,
                 ret_ptr_slot,
                 out,
             )?;
@@ -545,6 +567,7 @@ fn emit_instr(
                 scope,
                 func_map,
                 type_map,
+                literal_table,
                 ret_ptr_slot,
                 out,
             )?;
@@ -566,6 +589,7 @@ fn emit_instr(
                     scope,
                     func_map,
                     type_map,
+                    literal_table,
                     ret_ptr_slot,
                     out,
                 )?;
@@ -586,6 +610,7 @@ fn emit_instr(
                 scope,
                 func_map,
                 type_map,
+                literal_table,
                 ret_ptr_slot,
                 out,
             )?;
@@ -602,6 +627,7 @@ fn emit_instr(
                 scope,
                 func_map,
                 type_map,
+                literal_table,
                 ret_ptr_slot,
                 out,
             )?;
@@ -620,6 +646,7 @@ fn emit_instr(
                     scope,
                     func_map,
                     type_map,
+                    literal_table,
                     ret_ptr_slot,
                     out,
                 )?;
@@ -633,6 +660,7 @@ fn emit_instr(
                         scope,
                         func_map,
                         type_map,
+                        literal_table,
                         ret_ptr_slot,
                         out,
                     )?;
@@ -644,7 +672,16 @@ fn emit_instr(
             let lbl = label_clause(label.as_deref());
             out.push_str(&format!("      block{lbl}\n"));
             for i in body {
-                emit_instr(i, None, scope, func_map, type_map, ret_ptr_slot, out)?;
+                emit_instr(
+                    i,
+                    None,
+                    scope,
+                    func_map,
+                    type_map,
+                    literal_table,
+                    ret_ptr_slot,
+                    out,
+                )?;
             }
             out.push_str("      end\n");
         }
@@ -652,7 +689,16 @@ fn emit_instr(
             let lbl = label_clause(label.as_deref());
             out.push_str(&format!("      loop{lbl}\n"));
             for i in body {
-                emit_instr(i, None, scope, func_map, type_map, ret_ptr_slot, out)?;
+                emit_instr(
+                    i,
+                    None,
+                    scope,
+                    func_map,
+                    type_map,
+                    literal_table,
+                    ret_ptr_slot,
+                    out,
+                )?;
             }
             out.push_str("      end\n");
         }
@@ -666,6 +712,7 @@ fn emit_instr(
                 scope,
                 func_map,
                 type_map,
+                literal_table,
                 ret_ptr_slot,
                 out,
             )?;
@@ -693,26 +740,32 @@ fn emit_instr(
             }
         }
         Instruction::StringLen { value } => {
-            // v0.12: restrict to `LocalGet(string_param)`. General case would
-            // need a synthesized i32 temp to drop ptr while keeping len.
-            let uid = match value.as_ref() {
-                Instruction::LocalGet { uid } => uid,
+            match value.as_ref() {
+                // Compile-time folding: byte length of a literal is known now.
+                Instruction::StringLiteral { bytes } => {
+                    out.push_str(&format!("      i32.const {}\n", bytes.len()));
+                }
+                // v0.12: inline read of a string local's `len` slot.
+                Instruction::LocalGet { uid } => {
+                    let (first_idx, _, ty) = slot_info(uid, scope, type_map)?;
+                    match resolve_type(ty, type_map)? {
+                        ResolvedType::String => {
+                            out.push_str(&format!("      local.get {}\n", first_idx + 1));
+                        }
+                        other => {
+                            return Err(CompileError::InvalidInput(format!(
+                                "StringLen applied to non-string local {uid:?} \
+                                 (resolved as {other:?})"
+                            )));
+                        }
+                    }
+                }
                 _ => {
                     return Err(CompileError::Unsupported(
-                        "StringLen only supports LocalGet of a string local for now".into(),
+                        "StringLen only supports LocalGet of a string local or a \
+                         StringLiteral value for now"
+                            .into(),
                     ));
-                }
-            };
-            let (first_idx, _, ty) = slot_info(uid, scope, type_map)?;
-            match resolve_type(ty, type_map)? {
-                ResolvedType::String => {
-                    // String layout: slot 0 = ptr, slot 1 = len. Read len directly.
-                    out.push_str(&format!("      local.get {}\n", first_idx + 1));
-                }
-                other => {
-                    return Err(CompileError::InvalidInput(format!(
-                        "StringLen applied to non-string local {uid:?} (resolved as {other:?})"
-                    )));
                 }
             }
         }
@@ -725,6 +778,7 @@ fn emit_instr(
                 scope,
                 func_map,
                 type_map,
+                literal_table,
                 ret_ptr_slot,
                 out,
             )?;
@@ -738,6 +792,7 @@ fn emit_instr(
                 scope,
                 func_map,
                 type_map,
+                literal_table,
                 ret_ptr_slot,
                 out,
             )?;
@@ -751,6 +806,7 @@ fn emit_instr(
                 scope,
                 func_map,
                 type_map,
+                literal_table,
                 ret_ptr_slot,
                 out,
             )?;
@@ -764,6 +820,7 @@ fn emit_instr(
                 scope,
                 func_map,
                 type_map,
+                literal_table,
                 ret_ptr_slot,
                 out,
             )?;
@@ -778,7 +835,16 @@ fn emit_instr(
             // `some_binding`'s local slot so LocalGet(some_binding) in
             // some_body reads it. `none_body` inherits a zero (or prior)
             // value there — caller responsibility to respect scoping.
-            emit_instr(value, None, scope, func_map, type_map, ret_ptr_slot, out)?;
+            emit_instr(
+                value,
+                None,
+                scope,
+                func_map,
+                type_map,
+                literal_table,
+                ret_ptr_slot,
+                out,
+            )?;
 
             let (bind_idx, bind_slots, _) = slot_info(some_binding, scope, type_map)?;
             if bind_slots.len() != 1 {
@@ -797,6 +863,7 @@ fn emit_instr(
                     scope,
                     func_map,
                     type_map,
+                    literal_table,
                     ret_ptr_slot,
                     out,
                 )?;
@@ -809,6 +876,7 @@ fn emit_instr(
                     scope,
                     func_map,
                     type_map,
+                    literal_table,
                     ret_ptr_slot,
                     out,
                 )?;
@@ -838,7 +906,16 @@ fn emit_instr(
                      (ok={ok_ty}, err={err_ty}) not supported yet"
                 )));
             }
-            emit_instr(value, None, scope, func_map, type_map, ret_ptr_slot, out)?;
+            emit_instr(
+                value,
+                None,
+                scope,
+                func_map,
+                type_map,
+                literal_table,
+                ret_ptr_slot,
+                out,
+            )?;
             // Seed both bindings: tee copies to one while keeping on stack.
             out.push_str(&format!("      local.tee {err_idx}\n"));
             out.push_str(&format!("      local.set {ok_idx}\n"));
@@ -853,6 +930,7 @@ fn emit_instr(
                     scope,
                     func_map,
                     type_map,
+                    literal_table,
                     ret_ptr_slot,
                     out,
                 )?;
@@ -865,11 +943,25 @@ fn emit_instr(
                     scope,
                     func_map,
                     type_map,
+                    literal_table,
                     ret_ptr_slot,
                     out,
                 )?;
             }
             out.push_str("      end\n");
+        }
+        Instruction::StringLiteral { bytes } => {
+            // Literal bytes live in a pre-allocated data segment assigned by
+            // `collect_literal_table`. Push (ptr, len) as two i32 consts.
+            let offset = literal_table.get(bytes).ok_or_else(|| {
+                CompileError::InvalidInput(
+                    "StringLiteral missing from literal table (collector bug)".into(),
+                )
+            })?;
+            out.push_str(&format!(
+                "      i32.const {offset}\n      i32.const {}\n",
+                bytes.len()
+            ));
         }
     }
     Ok(())
@@ -891,6 +983,7 @@ fn emit_variant_ctor(
     scope: &[(String, String)],
     func_map: &FuncMap,
     type_map: &TypeMap,
+    literal_table: &LiteralTable,
     ret_ptr_slot: Option<usize>,
     out: &mut String,
 ) -> Result<(), CompileError> {
@@ -933,7 +1026,16 @@ fn emit_variant_ctor(
         let payload_offset = align_up(1, pay_align);
         let (store, align_pow2) = store_op(pty)?;
         out.push_str(&format!("      local.get {ret_ptr}\n"));
-        emit_instr(v, Some(pty), scope, func_map, type_map, ret_ptr_slot, out)?;
+        emit_instr(
+            v,
+            Some(pty),
+            scope,
+            func_map,
+            type_map,
+            literal_table,
+            ret_ptr_slot,
+            out,
+        )?;
         out.push_str(&format!(
             "      {store} offset={payload_offset} align={align_pow2}\n"
         ));
@@ -1003,6 +1105,7 @@ fn infer_wit_type(
         Instruction::Compare { .. } => Some("bool".to_string()),
         Instruction::IsErr { .. } => Some("bool".to_string()),
         Instruction::StringLen { .. } => Some("u32".to_string()),
+        Instruction::StringLiteral { .. } => Some("string".to_string()),
         Instruction::Call { func_uid, .. } => func_map.get(func_uid).and_then(|f| f.result.clone()),
         _ => None,
     }

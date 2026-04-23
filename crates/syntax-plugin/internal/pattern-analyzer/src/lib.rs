@@ -109,6 +109,9 @@ pub enum Instruction {
     },
 
     // String operations
+    StringLiteral {
+        bytes: Vec<u8>,
+    },
     StringLen {
         value: Box<Instruction>,
     },
