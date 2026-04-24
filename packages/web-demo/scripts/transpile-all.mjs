@@ -15,9 +15,12 @@ const outRoot = join(here, "..", "public", "components");
 await rm(outRoot, { recursive: true, force: true });
 await mkdir(outRoot, { recursive: true });
 
-// Copy manifest + samples straight through.
+// Copy manifest + showcase sample straight through.
 await copyFile(join(demosDir, "manifest.json"), join(outRoot, "manifest.json"));
-await copyFile(join(demosDir, "samples.json"), join(outRoot, "samples.json"));
+await copyFile(
+  join(demosDir, "plugin_showcase.json"),
+  join(outRoot, "plugin_showcase.json"),
+);
 
 const entries = (await readdir(demosDir)).filter((n) => n.endsWith(".wasm"));
 for (const entry of entries) {

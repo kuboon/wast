@@ -149,61 +149,117 @@ main {
 .output.ok { border-color: var(--ok); }
 .output.err { border-color: var(--err); color: var(--err); }
 
+main {
+  display: block;
+}
+
 #plugin-showcase-wrap {
-  max-width: 1080px;
-  margin: 2rem auto 0;
-  padding: 1.5rem;
-  border-top: 1px solid var(--border);
+  max-width: 1200px;
+  margin: 0 auto;
+  padding: 0.5rem 1.5rem 2rem;
 }
 #plugin-showcase-wrap h2 {
   margin: 0 0 0.75rem;
 }
-.plugin-controls {
-  margin: 0.75rem 0;
+
+#run-demos-wrap {
+  max-width: 1200px;
+  margin: 0 auto 2rem;
+  padding: 0.5rem 1.5rem;
+  border-top: 1px solid var(--border);
 }
-.plugin-controls select {
-  background: var(--code-bg);
-  color: var(--fg);
-  border: 1px solid var(--border);
-  border-radius: 4px;
-  padding: 0.35rem 0.5rem;
-  font-family: ui-monospace, monospace;
-  font-size: 0.9rem;
-  min-width: 300px;
+#run-demos-wrap details summary {
+  cursor: pointer;
+  list-style: none;
+}
+#run-demos-wrap details summary::-webkit-details-marker {
+  display: none;
+}
+#run-demos-wrap summary h2 {
+  display: inline;
+  margin: 0;
+}
+#run-demos-wrap summary .hint {
+  color: var(--muted);
+  font-size: 0.85rem;
+  font-weight: normal;
+  margin-left: 0.5rem;
+}
+#run-demos-wrap details[open] summary .hint::after {
+  content: " — click to collapse";
+}
+#run-demos-wrap #demos {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(420px, 1fr));
+  gap: 1rem;
+  margin-top: 1rem;
 }
 
-.syms-editor {
-  margin: 0.75rem 0;
+.func-controls {
+  margin: 0.75rem 0 1rem;
+  overflow-x: auto;
 }
-.syms-editor h3 {
-  margin: 0 0 0.4rem;
-  font-size: 0.95rem;
-  color: var(--muted);
-}
-.syms-table {
+.funcs-table {
   border-collapse: collapse;
+  font-size: 0.85rem;
   width: 100%;
-  max-width: 500px;
 }
-.syms-table td {
-  padding: 0.2rem 0.4rem;
+.funcs-table th {
+  text-align: left;
+  font-weight: 500;
+  color: var(--muted);
+  font-size: 0.75rem;
+  padding: 0.3rem 0.5rem;
+  border-bottom: 1px solid var(--border);
+}
+.funcs-table td {
+  padding: 0.25rem 0.5rem;
   border-bottom: 1px solid var(--border);
   font-size: 0.85rem;
+  vertical-align: middle;
 }
-.syms-table td.uid {
+.funcs-table td.uid {
   font-family: ui-monospace, monospace;
   color: var(--muted);
-  width: 200px;
+  min-width: 120px;
 }
-.syms-table input {
+.funcs-table input[type="checkbox"] {
+  accent-color: var(--accent);
+  cursor: pointer;
+}
+.funcs-table input[type="checkbox"]:disabled {
+  cursor: not-allowed;
+}
+.funcs-table input[type="text"] {
   width: 100%;
+  min-width: 180px;
   background: var(--code-bg);
   color: var(--fg);
   border: 1px solid var(--border);
   border-radius: 4px;
-  padding: 0.25rem 0.4rem;
+  padding: 0.2rem 0.4rem;
   font-family: ui-monospace, monospace;
-  font-size: 0.85rem;
+  font-size: 0.8rem;
+}
+.source-tag {
+  display: inline-block;
+  font-family: ui-monospace, monospace;
+  font-size: 0.7rem;
+  padding: 0.1rem 0.4rem;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  color: var(--muted);
+}
+.source-tag.source-exported {
+  color: var(--ok);
+  border-color: var(--ok);
+}
+.source-tag.source-internal {
+  color: var(--muted);
+}
+.source-tag.source-imported {
+  color: var(--accent);
+  border-color: var(--accent);
 }
 
 .plugin-grid {

@@ -47,7 +47,7 @@ function formatResult(tag, value) {
 
 function buildInputField(param) {
   // Each field renders to a single input element. Users edit as JSON so we
-  // don't need type-specific widgets for Option / Record / List.
+  // don't need type-specific widgets for Option / Record / List / Tuple etc.
   const wrapper = h("div", { class: "field" }, [
     h("label", {}, `${param.name}: ${paramTypeLabel(param)}`),
   ]);
@@ -65,6 +65,10 @@ function paramTypeLabel(param) {
     case "option": return `option<${param.inner}>`;
     case "list": return `list<${param.inner}>`;
     case "record": return `record { ${param.fields.map(([n, t]) => `${n}: ${t}`).join(", ")} }`;
+    case "tuple": return `tuple<${param.elems.join(", ")}>`;
+    case "variant": return `variant<${param.name ?? "..."}>`;
+    case "enum": return `enum<${param.name ?? "..."}>`;
+    case "flags": return `flags<${param.name ?? "..."}>`;
     default: return param.kind;
   }
 }
@@ -82,6 +86,8 @@ function defaultInputFor(param) {
       return JSON.stringify(
         Object.fromEntries(param.fields.map(([n]) => [n, 0])),
       );
+    case "tuple":
+      return JSON.stringify(param.elems.map(() => 0));
     default: return "null";
   }
 }
@@ -91,22 +97,14 @@ function parseInputField(param, raw) {
   const trimmed = raw.trim();
   switch (param.kind) {
     case "u32": case "i32": case "u64": case "i64":
-      return Number(trimmed);
     case "f32": case "f64":
       return Number(trimmed);
     case "bool":
       return trimmed === "true";
-    case "char":
+    default:
+      // Everything else is a JSON literal: strings, option, list, record,
+      // tuple, variant, etc.
       return JSON.parse(trimmed);
-    case "string":
-      return JSON.parse(trimmed);
-    case "option":
-      return JSON.parse(trimmed);
-    case "list":
-      return JSON.parse(trimmed);
-    case "record":
-      return JSON.parse(trimmed);
-    default: return JSON.parse(trimmed);
   }
 }
 
@@ -185,6 +183,11 @@ function exportOf(mod, name) {
 }
 
 async function main() {
+  // Plugin showcase is the primary content, so render it first (it also
+  // owns the sample picker everyone's eyes go to).
+  await initPluginShowcase();
+
+  // Then the compile-and-run cards, which live behind a <details> below.
   const root = document.getElementById("demos");
   try {
     const demos = await loadManifest();
@@ -197,12 +200,10 @@ async function main() {
       h("p", { class: "desc" }, String(err)),
     ]));
   }
-
-  await initPluginShowcase();
 }
 
 // ---------------------------------------------------------------------------
-// Syntax plugin showcase
+// Syntax plugin showcase (single rich sample, per-func show/caller toggles)
 // ---------------------------------------------------------------------------
 
 const PLUGINS = [
@@ -215,14 +216,15 @@ const PLUGINS = [
 async function initPluginShowcase() {
   const host = document.getElementById("plugin-showcase");
   if (!host) return;
-  let samples;
+
+  let showcase;
   try {
     const res = await fetch(
-      new URL("../public/components/samples.json", import.meta.url),
+      new URL("../public/components/plugin_showcase.json", import.meta.url),
     );
-    samples = await res.json();
+    showcase = await res.json();
   } catch (err) {
-    host.append(h("p", { class: "err" }, `samples load failed: ${err}`));
+    host.append(h("p", { class: "err" }, `showcase load failed: ${err}`));
     return;
   }
 
@@ -241,37 +243,79 @@ async function initPluginShowcase() {
     }
   }
 
-  const picker = h("select", { class: "sample-picker" });
-  for (const s of samples) {
-    const opt = h("option", { value: s.id }, `${s.milestone} · ${s.title}`);
-    picker.append(opt);
+  const wc = showcase.wastComponent;
+
+  // callGraph is keyed by source-inner name; normalize both ways so we can
+  // map UIDs <-> names and find callers.
+  const uidBySourceName = Object.fromEntries(
+    wc.funcs.map(([uid, row]) => [row.source.val, uid]),
+  );
+  const sourceNameByUid = Object.fromEntries(
+    wc.funcs.map(([uid, row]) => [uid, row.source.val]),
+  );
+  const callersBySourceName = {};
+  for (const [caller, callees] of Object.entries(showcase.callGraph)) {
+    for (const callee of callees) {
+      (callersBySourceName[callee] ||= []).push(caller);
+    }
+  }
+  function callersOf(uid) {
+    const name = sourceNameByUid[uid];
+    return (callersBySourceName[name] ?? [])
+      .map((cn) => uidBySourceName[cn])
+      .filter(Boolean);
   }
 
-  const grid = h("div", { class: "plugin-grid" });
-  const symsEditor = h("div", { class: "syms-editor" });
+  // Per-func UI state: { uid -> { show, withCallers } }. Default: show every
+  // EXPORTED func, don't auto-include callers.
+  const toggles = {};
+  for (const [uid, row] of wc.funcs) {
+    toggles[uid] = {
+      show: row.source.tag === "exported",
+      withCallers: false,
+    };
+  }
 
   host.append(
     h("p", { class: "desc" }, [
-      "Pick a wast component from any milestone, then see it rendered by each ",
-      h("code", {}, "to_text"),
-      " plugin. Editing the symbol table re-renders live — the plugins look up display names via ",
-      h("code", {}, "syms"),
-      " when producing text.",
+      "This is ",
+      h("strong", {}, "one wast component"),
+      " with 12 functions that call each other. Toggle which ones appear, rename any, and watch the same IR render as four different surface syntaxes. The four plugins are WASM Components themselves, transpiled by ",
+      h("code", {}, "jco"),
+      " and loaded as ES modules.",
     ]),
-    h("div", { class: "plugin-controls" }, [
-      h("label", {}, ["sample: ", picker]),
-    ]),
-    symsEditor,
-    grid,
   );
 
-  function currentSample() {
-    return samples.find((s) => s.id === picker.value) ?? samples[0];
+  const controls = h("div", { class: "func-controls" });
+  const grid = h("div", { class: "plugin-grid" });
+  host.append(controls, grid);
+
+  function filteredUids() {
+    const out = new Set();
+    for (const [uid, t] of Object.entries(toggles)) {
+      if (t.show) out.add(uid);
+      if (t.withCallers) {
+        for (const c of callersOf(uid)) out.add(c);
+      }
+    }
+    return out;
   }
 
-  function render() {
+  function filteredComponent() {
+    const keep = filteredUids();
+    return {
+      ...wc,
+      funcs: wc.funcs.filter(([uid]) => keep.has(uid)),
+    };
+  }
+
+  function renderGrid() {
     grid.innerHTML = "";
-    const sample = currentSample();
+    const comp = filteredComponent();
+    if (comp.funcs.length === 0) {
+      grid.append(h("p", { class: "desc" }, "(nothing selected — toggle a func above)"));
+      return;
+    }
     for (const p of PLUGINS) {
       const box = h("div", { class: "plugin-box" });
       box.append(h("h3", {}, p.label));
@@ -279,7 +323,7 @@ async function initPluginShowcase() {
       try {
         const plugin = pluginMods[p.id];
         if (!plugin) throw new Error("plugin module not loaded");
-        pre.textContent = plugin.toText(sample.wastComponent);
+        pre.textContent = plugin.toText(comp);
         box.classList.add("ok");
       } catch (err) {
         pre.textContent = `error: ${err.message || err}`;
@@ -288,81 +332,79 @@ async function initPluginShowcase() {
       box.append(pre);
       grid.append(box);
     }
-    renderSymsEditor(sample);
   }
 
-  function renderSymsEditor(sample) {
-    symsEditor.innerHTML = "";
-    const syms = sample.wastComponent.syms;
-    const rows = [];
-
-    // Show every referenced func uid + internal-func uids + param names.
-    const funcUids = sample.wastComponent.funcs.map(([uid]) => uid);
-    for (const uid of funcUids) {
-      const current = syms.internal.find((e) => e.uid === uid);
-      rows.push([uid, current?.displayName ?? ""]);
-    }
-
-    if (rows.length === 0) {
-      symsEditor.append(h("p", { class: "desc" }, "(no symbols to edit)"));
-      return;
-    }
-
-    symsEditor.append(h("h3", {}, "symbols (internal func names)"));
-    const table = h("table", { class: "syms-table" });
-    for (const [uid, current] of rows) {
+  function renderControls() {
+    controls.innerHTML = "";
+    const table = h("table", { class: "funcs-table" });
+    table.append(
+      h("thead", {}, h("tr", {}, [
+        h("th", {}, "show"),
+        h("th", {}, "+ callers"),
+        h("th", {}, "uid"),
+        h("th", {}, "display name (syms override)"),
+        h("th", {}, "source"),
+      ])),
+    );
+    const tbody = h("tbody", {});
+    for (const [uid, row] of wc.funcs) {
       const tr = h("tr", {});
+
+      const showBox = h("input", { type: "checkbox" });
+      showBox.checked = toggles[uid].show;
+      showBox.addEventListener("change", () => {
+        toggles[uid].show = showBox.checked;
+        renderGrid();
+      });
+      tr.append(h("td", {}, showBox));
+
+      const callerBox = h("input", { type: "checkbox" });
+      callerBox.checked = toggles[uid].withCallers;
+      const nCallers = callersOf(uid).length;
+      callerBox.disabled = nCallers === 0;
+      callerBox.title =
+        nCallers === 0
+          ? "no callers"
+          : `pull in ${nCallers} caller(s): ${callersOf(uid).join(", ")}`;
+      callerBox.addEventListener("change", () => {
+        toggles[uid].withCallers = callerBox.checked;
+        renderGrid();
+      });
+      tr.append(h("td", {}, callerBox));
+
       tr.append(h("td", { class: "uid" }, uid));
-      const input = h("input", {
+
+      const nameInput = h("input", {
         type: "text",
         placeholder: `(default: ${uid})`,
       });
-      input.value = current;
-      input.addEventListener("input", () => {
-        const entry = syms.internal.find((e) => e.uid === uid);
-        const val = input.value.trim();
-        if (val === "") {
-          sample.wastComponent.syms.internal = syms.internal.filter(
-            (e) => e.uid !== uid,
-          );
-        } else if (entry) {
-          entry.displayName = val;
-        } else {
-          syms.internal.push({ uid, displayName: val });
+      const existing = wc.syms.internal.find((e) => e.uid === uid);
+      nameInput.value = existing?.displayName ?? "";
+      nameInput.addEventListener("input", () => {
+        const val = nameInput.value.trim();
+        wc.syms.internal = wc.syms.internal.filter((e) => e.uid !== uid);
+        if (val !== "") {
+          wc.syms.internal.push({ uid, displayName: val });
         }
-        // Re-render only the plugin grid; keep the syms editor DOM alive so
-        // the input keeps focus.
-        renderGridOnly();
+        renderGrid();
       });
-      tr.append(h("td", {}, input));
-      table.append(tr);
+      tr.append(h("td", {}, nameInput));
+
+      const tag = row.source.tag;
+      tr.append(
+        h("td", { class: "source" }, [
+          h("span", { class: `source-tag source-${tag}` }, tag),
+        ]),
+      );
+
+      tbody.append(tr);
     }
-    symsEditor.append(table);
+    table.append(tbody);
+    controls.append(table);
   }
 
-  function renderGridOnly() {
-    grid.innerHTML = "";
-    const sample = currentSample();
-    for (const p of PLUGINS) {
-      const box = h("div", { class: "plugin-box" });
-      box.append(h("h3", {}, p.label));
-      const pre = h("pre", {});
-      try {
-        const plugin = pluginMods[p.id];
-        if (!plugin) throw new Error("plugin module not loaded");
-        pre.textContent = plugin.toText(sample.wastComponent);
-        box.classList.add("ok");
-      } catch (err) {
-        pre.textContent = `error: ${err.message || err}`;
-        box.classList.add("err");
-      }
-      box.append(pre);
-      grid.append(box);
-    }
-  }
-
-  picker.addEventListener("change", render);
-  render();
+  renderControls();
+  renderGrid();
 }
 
 main();

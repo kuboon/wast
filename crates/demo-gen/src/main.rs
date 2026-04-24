@@ -22,7 +22,6 @@ fn main() {
     let demos = all_demos();
 
     let mut manifest_entries = Vec::new();
-    let mut sample_entries = Vec::new();
     for demo in &demos {
         let wasm = wast_compiler::compile(&demo.db, "").expect(&demo.id);
         let path = out.join(format!("{}.wasm", demo.id));
@@ -30,26 +29,157 @@ fn main() {
         println!("wrote {} ({} bytes)", path.display(), wasm.len());
 
         manifest_entries.push(demo.manifest_entry());
-
-        // Dump the underlying WastDb as a wast-component for the syntax
-        // plugins to render. Embedded bodies stay as postcard bytes (the
-        // plugin deserializes them via pattern-analyzer).
-        sample_entries.push(format!(
-            "{{ \"id\": \"{id}\", \"milestone\": \"{milestone}\", \"title\": {title}, \"wastComponent\": {wc} }}",
-            id = demo.id,
-            milestone = demo.milestone,
-            title = json_string(demo.title),
-            wc = serialize_wast_component(&demo.db),
-        ));
     }
 
     let manifest = format!("[\n  {}\n]\n", manifest_entries.join(",\n  "));
     fs::write(out.join("manifest.json"), manifest).expect("write manifest");
     println!("wrote manifest with {} demos", demos.len());
 
-    let samples = format!("[\n  {}\n]\n", sample_entries.join(",\n  "));
-    fs::write(out.join("samples.json"), samples).expect("write samples");
-    println!("wrote samples.json with {} entries", demos.len());
+    // Emit a separate "plugin showcase" sample: one rich WastDb the UI drives
+    // via per-func show/caller toggles. Embeds the call graph so the JS side
+    // can compute caller sets without deserializing postcard bodies.
+    let showcase = plugin_showcase_sample();
+    let showcase_json = format!(
+        "{{ \"id\": \"{id}\", \"title\": {title}, \"wastComponent\": {wc}, \"callGraph\": {cg} }}\n",
+        id = showcase.id,
+        title = json_string(showcase.title),
+        wc = serialize_wast_component(&showcase.db),
+        cg = serialize_call_graph(&showcase.db),
+    );
+    fs::write(out.join("plugin_showcase.json"), showcase_json).expect("write showcase");
+    println!(
+        "wrote plugin_showcase.json ({} funcs)",
+        showcase.db.funcs.len()
+    );
+}
+
+fn serialize_call_graph(db: &WastDb) -> String {
+    // Map func_uid (matches source-inner name) -> list of callee names
+    // referenced by its body via Instruction::Call.
+    use wast_pattern_analyzer::Instruction as I;
+    fn collect(i: &I, out: &mut Vec<String>) {
+        match i {
+            I::Call { func_uid, args } => {
+                out.push(func_uid.clone());
+                for (_, a) in args {
+                    collect(a, out);
+                }
+            }
+            I::LocalSet { value, .. }
+            | I::Some { value }
+            | I::Ok { value }
+            | I::Err { value }
+            | I::IsErr { value }
+            | I::StringLen { value }
+            | I::ListLen { value } => collect(value, out),
+            I::Arithmetic { lhs, rhs, .. } | I::Compare { lhs, rhs, .. } => {
+                collect(lhs, out);
+                collect(rhs, out);
+            }
+            I::If {
+                condition,
+                then_body,
+                else_body,
+            } => {
+                collect(condition, out);
+                for c in then_body {
+                    collect(c, out);
+                }
+                for c in else_body {
+                    collect(c, out);
+                }
+            }
+            I::Block { body, .. } | I::Loop { body, .. } => {
+                for c in body {
+                    collect(c, out);
+                }
+            }
+            I::BrIf { condition, .. } => collect(condition, out),
+            I::MatchOption {
+                value,
+                some_body,
+                none_body,
+                ..
+            } => {
+                collect(value, out);
+                for c in some_body {
+                    collect(c, out);
+                }
+                for c in none_body {
+                    collect(c, out);
+                }
+            }
+            I::MatchResult {
+                value,
+                ok_body,
+                err_body,
+                ..
+            } => {
+                collect(value, out);
+                for c in ok_body {
+                    collect(c, out);
+                }
+                for c in err_body {
+                    collect(c, out);
+                }
+            }
+            I::RecordLiteral { fields } => {
+                for (_, v) in fields {
+                    collect(v, out);
+                }
+            }
+            I::TupleLiteral { values } | I::ListLiteral { values } => {
+                for v in values {
+                    collect(v, out);
+                }
+            }
+            I::VariantCtor { value, .. } => {
+                if let Some(v) = value {
+                    collect(v, out);
+                }
+            }
+            I::MatchVariant { value, arms } => {
+                collect(value, out);
+                for arm in arms {
+                    for c in &arm.body {
+                        collect(c, out);
+                    }
+                }
+            }
+            I::RecordGet { value, .. } | I::TupleGet { value, .. } => collect(value, out),
+            I::ResourceNew { rep, .. } => collect(rep, out),
+            I::ResourceRep { handle, .. } | I::ResourceDrop { handle, .. } => collect(handle, out),
+            _ => {}
+        }
+    }
+    let mut entries = Vec::new();
+    for row in &db.funcs {
+        let Some(bytes) = row.func.body.as_ref() else {
+            continue;
+        };
+        if bytes.is_empty() {
+            continue;
+        }
+        let Ok(instrs) = wast_pattern_analyzer::deserialize_body(bytes) else {
+            continue;
+        };
+        let mut callees = Vec::new();
+        for i in &instrs {
+            collect(i, &mut callees);
+        }
+        callees.sort();
+        callees.dedup();
+        let name = match &row.func.source {
+            FuncSource::Internal(n) | FuncSource::Imported(n) | FuncSource::Exported(n) => n,
+        };
+        let list = callees
+            .iter()
+            .map(|c| format!("\"{c}\""))
+            .collect::<Vec<_>>()
+            .join(", ");
+        entries.push(format!("\"{name}\": [{list}]"));
+    }
+    format!("{{ {} }}", entries.join(", "))
 }
 
 // ---------------------------------------------------------------------------
@@ -256,6 +386,7 @@ fn all_demos() -> Vec<Demo> {
         is_zero(),
         max_demo(),
         sum_loop(),
+        sum_of_squares(),
         unwrap_or(),
         mk_some(),
         strlen_demo(),
@@ -266,6 +397,13 @@ fn all_demos() -> Vec<Demo> {
         echo_list_demo(),
         get_x_demo(),
         make_point_demo(),
+        mk_shape(),
+        make_pair_demo(),
+        color_kind(),
+        perms_mask(),
+        wrap_greeting(),
+        numbers_literal(),
+        make_pair_from_points(),
     ]
 }
 
@@ -781,6 +919,587 @@ fn point_type_row() -> WastTypeRow {
                 ("y".into(), "u32".into()),
             ]),
         },
+    }
+}
+
+// ---- v0.3 internal Call ------------------------------------------------
+
+fn sum_of_squares() -> Demo {
+    // square is an internal (not exported) helper; sum-of-squares calls it
+    // twice and adds the results. Exercises the func-to-func call path
+    // (v0.3 internal Call) — callers pass args by name, callee's param order
+    // determines the core stack ordering.
+    Demo {
+        id: "v0_3_sum_of_squares",
+        milestone: "v0.3",
+        title: "sum-of-squares(a, b) = a²+b²",
+        description: "Exported `sum-of-squares` calls an internal `square` helper twice and adds the results. Demonstrates func-to-func call: callers push args in the callee's declared param order, and both funcs live in the same core module.",
+        export: "sum-of-squares",
+        params_js: "[{\"name\":\"a\",\"kind\":\"u32\"},{\"name\":\"b\",\"kind\":\"u32\"}]",
+        result_js: "u32",
+        presets: &["[3, 4]", "[5, 12]", "[0, 7]"],
+        db: WastDb {
+            funcs: vec![
+                WastFuncRow {
+                    uid: "square".into(),
+                    func: WastFunc {
+                        source: FuncSource::Internal("square".into()),
+                        params: vec![("x".into(), "u32".into())],
+                        result: Some("u32".into()),
+                        body: Some(serialize_body(&[Instruction::Arithmetic {
+                            op: ArithOp::Mul,
+                            lhs: Box::new(local("x")),
+                            rhs: Box::new(local("x")),
+                        }])),
+                    },
+                },
+                WastFuncRow {
+                    uid: "sum_of_squares".into(),
+                    func: WastFunc {
+                        source: FuncSource::Exported("sum-of-squares".into()),
+                        params: vec![("a".into(), "u32".into()), ("b".into(), "u32".into())],
+                        result: Some("u32".into()),
+                        body: Some(serialize_body(&[Instruction::Arithmetic {
+                            op: ArithOp::Add,
+                            lhs: Box::new(Instruction::Call {
+                                func_uid: "square".into(),
+                                args: vec![("x".into(), local("a"))],
+                            }),
+                            rhs: Box::new(Instruction::Call {
+                                func_uid: "square".into(),
+                                args: vec![("x".into(), local("b"))],
+                            }),
+                        }])),
+                    },
+                },
+            ],
+            types: vec![],
+        },
+    }
+}
+
+// ---- v0.17 variant -----------------------------------------------------
+
+fn mk_shape() -> Demo {
+    // variant shape { circle(u32), square(u32), unit }. Keeping the body a
+    // single VariantCtor (the current return-wrap requires the top-level
+    // instruction to be a literal ctor — no branching). Flip the comment/
+    // body to try the other cases.
+    Demo {
+        id: "v0_17_mk_shape",
+        milestone: "v0.17",
+        title: "mk-shape(n: u32) → shape",
+        description: "General variant with three cases (two carry a u32 payload, one is unit). This body constructs `circle(n)`; emits u8 disc + payload into an indirect return buffer.",
+        export: "mk-shape",
+        params_js: "[{\"name\":\"n\",\"kind\":\"u32\"}]",
+        result_js: "variant<shape>",
+        presets: &["[5]", "[0]", "[42]"],
+        db: WastDb {
+            funcs: vec![WastFuncRow {
+                uid: "mk_shape".into(),
+                func: WastFunc {
+                    source: FuncSource::Exported("mk-shape".into()),
+                    params: vec![("n".into(), "u32".into())],
+                    result: Some("shape".into()),
+                    body: Some(serialize_body(&[Instruction::VariantCtor {
+                        case: "circle".into(),
+                        value: Some(Box::new(local("n"))),
+                    }])),
+                },
+            }],
+            types: vec![WastTypeRow {
+                uid: "shape".into(),
+                def: WastTypeDef {
+                    source: TypeSource::Internal("shape".into()),
+                    definition: WitType::Variant(vec![
+                        ("circle".into(), Some("u32".into())),
+                        ("square".into(), Some("u32".into())),
+                        ("unit".into(), None),
+                    ]),
+                },
+            }],
+        },
+    }
+}
+
+// ---- v0.18 tuple -------------------------------------------------------
+
+fn make_pair_demo() -> Demo {
+    Demo {
+        id: "v0_18_make_pair",
+        milestone: "v0.18",
+        title: "make-pair(u32, u32) → tuple<u32, u32>",
+        description: "Anonymous positional record. Same byte layout as a record with fields \"0\", \"1\" — WIT inlines it as `tuple<u32, u32>` at the use site.",
+        export: "make-pair",
+        params_js: "[{\"name\":\"a\",\"kind\":\"u32\"},{\"name\":\"b\",\"kind\":\"u32\"}]",
+        result_js: "tuple<u32, u32>",
+        presets: &["[11, 22]", "[0, 0]"],
+        db: WastDb {
+            funcs: vec![WastFuncRow {
+                uid: "make_pair".into(),
+                func: WastFunc {
+                    source: FuncSource::Exported("make-pair".into()),
+                    params: vec![("a".into(), "u32".into()), ("b".into(), "u32".into())],
+                    result: Some("u32_pair".into()),
+                    body: Some(serialize_body(&[Instruction::TupleLiteral {
+                        values: vec![local("a"), local("b")],
+                    }])),
+                },
+            }],
+            types: vec![WastTypeRow {
+                uid: "u32_pair".into(),
+                def: WastTypeDef {
+                    source: TypeSource::Internal("u32_pair".into()),
+                    definition: WitType::Tuple(vec!["u32".into(), "u32".into()]),
+                },
+            }],
+        },
+    }
+}
+
+// ---- v0.19 enum & flags ------------------------------------------------
+
+fn color_kind() -> Demo {
+    Demo {
+        id: "v0_19_color_kind",
+        milestone: "v0.19",
+        title: "favorite() → color",
+        description: "Enum = payload-less variant. `VariantCtor { case: red }` emits a bare `i32.const 0` — no memory needed because the flat form is a single i32 disc.",
+        export: "favorite",
+        params_js: "[]",
+        result_js: "enum<color>",
+        presets: &["[]"],
+        db: WastDb {
+            funcs: vec![WastFuncRow {
+                uid: "favorite".into(),
+                func: WastFunc {
+                    source: FuncSource::Exported("favorite".into()),
+                    params: vec![],
+                    result: Some("color".into()),
+                    body: Some(serialize_body(&[Instruction::VariantCtor {
+                        case: "green".into(),
+                        value: None,
+                    }])),
+                },
+            }],
+            types: vec![WastTypeRow {
+                uid: "color".into(),
+                def: WastTypeDef {
+                    source: TypeSource::Internal("color".into()),
+                    definition: WitType::Enum(vec!["red".into(), "green".into(), "blue".into()]),
+                },
+            }],
+        },
+    }
+}
+
+fn perms_mask() -> Demo {
+    Demo {
+        id: "v0_19_perms",
+        milestone: "v0.19",
+        title: "perms() → flags<perms>",
+        description: "`FlagsCtor { flags: [read, write] }` compile-time folds to a bitmask (1 | 2 = 3). ≤32 flags fit in an i32.",
+        export: "perms",
+        params_js: "[]",
+        result_js: "flags<perms>",
+        presets: &["[]"],
+        db: WastDb {
+            funcs: vec![WastFuncRow {
+                uid: "perms".into(),
+                func: WastFunc {
+                    source: FuncSource::Exported("perms".into()),
+                    params: vec![],
+                    result: Some("perms_t".into()),
+                    body: Some(serialize_body(&[Instruction::FlagsCtor {
+                        flags: vec!["read".into(), "write".into()],
+                    }])),
+                },
+            }],
+            types: vec![WastTypeRow {
+                uid: "perms_t".into(),
+                def: WastTypeDef {
+                    source: TypeSource::Internal("perms_t".into()),
+                    definition: WitType::Flags(vec![
+                        "read".into(),
+                        "write".into(),
+                        "execute".into(),
+                    ]),
+                },
+            }],
+        },
+    }
+}
+
+// ---- v0.20 nested compound (string field in record) --------------------
+
+fn wrap_greeting() -> Demo {
+    Demo {
+        id: "v0_20_wrap_greeting",
+        milestone: "v0.20",
+        title: "wrap(msg: string, count: u32) → greeting",
+        description: "Record with a string field (not just primitives). `emit_field_store` handles the (ptr, len) pair at the field's byte offset inside the record buffer.",
+        export: "wrap",
+        params_js: "[{\"name\":\"msg\",\"kind\":\"string\"},{\"name\":\"n\",\"kind\":\"u32\"}]",
+        result_js: "record<greeting>",
+        presets: &["[\"hello\", 3]", "[\"\", 0]", "[\"日本語\", 42]"],
+        db: WastDb {
+            funcs: vec![WastFuncRow {
+                uid: "wrap".into(),
+                func: WastFunc {
+                    source: FuncSource::Exported("wrap".into()),
+                    params: vec![("msg".into(), "string".into()), ("n".into(), "u32".into())],
+                    result: Some("greeting".into()),
+                    body: Some(serialize_body(&[Instruction::RecordLiteral {
+                        fields: vec![
+                            ("message".into(), local("msg")),
+                            ("count".into(), local("n")),
+                        ],
+                    }])),
+                },
+            }],
+            types: vec![WastTypeRow {
+                uid: "greeting".into(),
+                def: WastTypeDef {
+                    source: TypeSource::Internal("greeting".into()),
+                    definition: WitType::Record(vec![
+                        ("message".into(), "string".into()),
+                        ("count".into(), "u32".into()),
+                    ]),
+                },
+            }],
+        },
+    }
+}
+
+// ---- v0.21 ListLiteral -------------------------------------------------
+
+fn numbers_literal() -> Demo {
+    Demo {
+        id: "v0_21_numbers",
+        milestone: "v0.21",
+        title: "numbers() → list<u32>",
+        description: "Runtime list construction. Allocates count·size bytes via cabi_realloc, stores each element at offset i·size, returns (ptr, count).",
+        export: "numbers",
+        params_js: "[]",
+        result_js: "list<u32>",
+        presets: &["[]"],
+        db: WastDb {
+            funcs: vec![WastFuncRow {
+                uid: "numbers".into(),
+                func: WastFunc {
+                    source: FuncSource::Exported("numbers".into()),
+                    params: vec![],
+                    result: Some("list_u32".into()),
+                    body: Some(serialize_body(&[Instruction::ListLiteral {
+                        values: vec![
+                            Instruction::Const { value: 2 },
+                            Instruction::Const { value: 3 },
+                            Instruction::Const { value: 5 },
+                            Instruction::Const { value: 7 },
+                            Instruction::Const { value: 11 },
+                        ],
+                    }])),
+                },
+            }],
+            types: vec![WastTypeRow {
+                uid: "list_u32".into(),
+                def: WastTypeDef {
+                    source: TypeSource::Internal("list_u32".into()),
+                    definition: WitType::List("u32".into()),
+                },
+            }],
+        },
+    }
+}
+
+// ---- v0.24 LocalGet of compound in field position ----------------------
+
+fn make_pair_from_points() -> Demo {
+    // record pair { a: point, b: point } built by copying two point-typed
+    // locals directly into the parent buffer via emit_copy_from_local.
+    Demo {
+        id: "v0_24_pair_of_points",
+        milestone: "v0.24",
+        title: "make-pair(p1: point, p2: point) → pair",
+        description: "Each field's source is `LocalGet(point_local)` — v0.24's `emit_copy_from_local` walks the point type and writes x/y as direct i32 stores at the Canonical-ABI byte offsets.",
+        export: "make-pair",
+        params_js: "[{\"name\":\"p1\",\"kind\":\"record\",\"fields\":[[\"x\",\"u32\"],[\"y\",\"u32\"]]},{\"name\":\"p2\",\"kind\":\"record\",\"fields\":[[\"x\",\"u32\"],[\"y\",\"u32\"]]}]",
+        result_js: "record<pair>",
+        presets: &["[{\"x\":1,\"y\":2}, {\"x\":3,\"y\":4}]"],
+        db: WastDb {
+            funcs: vec![WastFuncRow {
+                uid: "make_pair".into(),
+                func: WastFunc {
+                    source: FuncSource::Exported("make-pair".into()),
+                    params: vec![("p1".into(), "point".into()), ("p2".into(), "point".into())],
+                    result: Some("pair".into()),
+                    body: Some(serialize_body(&[Instruction::RecordLiteral {
+                        fields: vec![("a".into(), local("p1")), ("b".into(), local("p2"))],
+                    }])),
+                },
+            }],
+            types: vec![
+                point_type_row(),
+                WastTypeRow {
+                    uid: "pair".into(),
+                    def: WastTypeDef {
+                        source: TypeSource::Internal("pair".into()),
+                        definition: WitType::Record(vec![
+                            ("a".into(), "point".into()),
+                            ("b".into(), "point".into()),
+                        ]),
+                    },
+                },
+            ],
+        },
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Plugin showcase sample — one rich WastDb exercising calls, control flow,
+// records, options, lists, strings, and cross-func composition.
+// ---------------------------------------------------------------------------
+
+struct Showcase {
+    id: &'static str,
+    title: &'static str,
+    db: WastDb,
+}
+
+fn plugin_showcase_sample() -> Showcase {
+    // Intertwined toolkit: 12 funcs showing off the IR surface area.
+    //
+    //   square(x)               = x * x
+    //   cube(x)                 = square(x) * x
+    //   sum2(a, b)              = a + b
+    //   max2(a, b)              = if a > b then a else b
+    //   poly(x)                 = sum2(square(x), cube(x))
+    //   sum_of_squares(a, b)    = sum2(square(a), square(b))        [EXPORT]
+    //   max3(a, b, c)           = max2(max2(a, b), c)               [EXPORT]
+    //   evaluate(x)             = poly(x)                           [EXPORT]
+    //   make_point(x, y)        = { x, y }                          [EXPORT]
+    //   get_x(p)                = p.x                               [EXPORT]
+    //   unwrap_or(o, d)         = match o { some(v) -> v; none -> d } [EXPORT]
+    //   greeting()              = "hello, wast!"                    [EXPORT]
+    let funcs = vec![
+        WastFuncRow {
+            uid: "square".into(),
+            func: WastFunc {
+                source: FuncSource::Internal("square".into()),
+                params: vec![("x".into(), "u32".into())],
+                result: Some("u32".into()),
+                body: Some(serialize_body(&[Instruction::Arithmetic {
+                    op: ArithOp::Mul,
+                    lhs: Box::new(local("x")),
+                    rhs: Box::new(local("x")),
+                }])),
+            },
+        },
+        WastFuncRow {
+            uid: "cube".into(),
+            func: WastFunc {
+                source: FuncSource::Internal("cube".into()),
+                params: vec![("x".into(), "u32".into())],
+                result: Some("u32".into()),
+                body: Some(serialize_body(&[Instruction::Arithmetic {
+                    op: ArithOp::Mul,
+                    lhs: Box::new(Instruction::Call {
+                        func_uid: "square".into(),
+                        args: vec![("x".into(), local("x"))],
+                    }),
+                    rhs: Box::new(local("x")),
+                }])),
+            },
+        },
+        WastFuncRow {
+            uid: "sum2".into(),
+            func: WastFunc {
+                source: FuncSource::Internal("sum2".into()),
+                params: vec![("a".into(), "u32".into()), ("b".into(), "u32".into())],
+                result: Some("u32".into()),
+                body: Some(serialize_body(&[Instruction::Arithmetic {
+                    op: ArithOp::Add,
+                    lhs: Box::new(local("a")),
+                    rhs: Box::new(local("b")),
+                }])),
+            },
+        },
+        WastFuncRow {
+            uid: "max2".into(),
+            func: WastFunc {
+                source: FuncSource::Internal("max2".into()),
+                params: vec![("a".into(), "u32".into()), ("b".into(), "u32".into())],
+                result: Some("u32".into()),
+                body: Some(serialize_body(&[Instruction::If {
+                    condition: Box::new(Instruction::Compare {
+                        op: CompareOp::Gt,
+                        lhs: Box::new(local("a")),
+                        rhs: Box::new(local("b")),
+                    }),
+                    then_body: vec![local("a")],
+                    else_body: vec![local("b")],
+                }])),
+            },
+        },
+        WastFuncRow {
+            uid: "poly".into(),
+            func: WastFunc {
+                source: FuncSource::Internal("poly".into()),
+                params: vec![("x".into(), "u32".into())],
+                result: Some("u32".into()),
+                body: Some(serialize_body(&[Instruction::Call {
+                    func_uid: "sum2".into(),
+                    args: vec![
+                        (
+                            "a".into(),
+                            Instruction::Call {
+                                func_uid: "square".into(),
+                                args: vec![("x".into(), local("x"))],
+                            },
+                        ),
+                        (
+                            "b".into(),
+                            Instruction::Call {
+                                func_uid: "cube".into(),
+                                args: vec![("x".into(), local("x"))],
+                            },
+                        ),
+                    ],
+                }])),
+            },
+        },
+        WastFuncRow {
+            uid: "sum_of_squares".into(),
+            func: WastFunc {
+                source: FuncSource::Exported("sum-of-squares".into()),
+                params: vec![("a".into(), "u32".into()), ("b".into(), "u32".into())],
+                result: Some("u32".into()),
+                body: Some(serialize_body(&[Instruction::Call {
+                    func_uid: "sum2".into(),
+                    args: vec![
+                        (
+                            "a".into(),
+                            Instruction::Call {
+                                func_uid: "square".into(),
+                                args: vec![("x".into(), local("a"))],
+                            },
+                        ),
+                        (
+                            "b".into(),
+                            Instruction::Call {
+                                func_uid: "square".into(),
+                                args: vec![("x".into(), local("b"))],
+                            },
+                        ),
+                    ],
+                }])),
+            },
+        },
+        WastFuncRow {
+            uid: "max3".into(),
+            func: WastFunc {
+                source: FuncSource::Exported("max3".into()),
+                params: vec![
+                    ("a".into(), "u32".into()),
+                    ("b".into(), "u32".into()),
+                    ("c".into(), "u32".into()),
+                ],
+                result: Some("u32".into()),
+                body: Some(serialize_body(&[Instruction::Call {
+                    func_uid: "max2".into(),
+                    args: vec![
+                        (
+                            "a".into(),
+                            Instruction::Call {
+                                func_uid: "max2".into(),
+                                args: vec![("a".into(), local("a")), ("b".into(), local("b"))],
+                            },
+                        ),
+                        ("b".into(), local("c")),
+                    ],
+                }])),
+            },
+        },
+        WastFuncRow {
+            uid: "evaluate".into(),
+            func: WastFunc {
+                source: FuncSource::Exported("evaluate".into()),
+                params: vec![("x".into(), "u32".into())],
+                result: Some("u32".into()),
+                body: Some(serialize_body(&[Instruction::Call {
+                    func_uid: "poly".into(),
+                    args: vec![("x".into(), local("x"))],
+                }])),
+            },
+        },
+        WastFuncRow {
+            uid: "make_point".into(),
+            func: WastFunc {
+                source: FuncSource::Exported("make-point".into()),
+                params: vec![("x".into(), "u32".into()), ("y".into(), "u32".into())],
+                result: Some("point".into()),
+                body: Some(serialize_body(&[Instruction::RecordLiteral {
+                    fields: vec![("x".into(), local("x")), ("y".into(), local("y"))],
+                }])),
+            },
+        },
+        WastFuncRow {
+            uid: "get_x".into(),
+            func: WastFunc {
+                source: FuncSource::Exported("get-x".into()),
+                params: vec![("p".into(), "point".into())],
+                result: Some("u32".into()),
+                body: Some(serialize_body(&[Instruction::RecordGet {
+                    value: Box::new(local("p")),
+                    field: "x".into(),
+                }])),
+            },
+        },
+        WastFuncRow {
+            uid: "unwrap_or".into(),
+            func: WastFunc {
+                source: FuncSource::Exported("unwrap-or".into()),
+                params: vec![
+                    ("o".into(), "opt_u32".into()),
+                    ("default".into(), "u32".into()),
+                ],
+                result: Some("u32".into()),
+                body: Some(serialize_body(&[Instruction::MatchOption {
+                    value: Box::new(local("o")),
+                    some_binding: "v".into(),
+                    some_body: vec![local("v")],
+                    none_body: vec![local("default")],
+                }])),
+            },
+        },
+        WastFuncRow {
+            uid: "greeting".into(),
+            func: WastFunc {
+                source: FuncSource::Exported("greeting".into()),
+                params: vec![],
+                result: Some("string".into()),
+                body: Some(serialize_body(&[Instruction::StringLiteral {
+                    bytes: b"hello, wast!".to_vec(),
+                }])),
+            },
+        },
+    ];
+
+    let types = vec![
+        point_type_row(),
+        WastTypeRow {
+            uid: "opt_u32".into(),
+            def: WastTypeDef {
+                source: TypeSource::Internal("opt_u32".into()),
+                definition: WitType::Option("u32".into()),
+            },
+        },
+    ];
+
+    Showcase {
+        id: "toolkit",
+        title: "toolkit · 12 functions, cross-calls, records, options, strings",
+        db: WastDb { funcs, types },
     }
 }
 
