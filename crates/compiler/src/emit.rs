@@ -344,6 +344,20 @@ fn synthesize_world(db: &WastDb, type_map: &TypeMap) -> Result<String, CompileEr
                     name = wit_name(&row.uid)
                 ));
             }
+            wast_types::WitType::Enum(cases) => {
+                let cases_wit = cases.join(", ");
+                out.push_str(&format!(
+                    "  enum {name} {{ {cases_wit} }}\n",
+                    name = wit_name(&row.uid)
+                ));
+            }
+            wast_types::WitType::Flags(names) => {
+                let names_wit = names.join(", ");
+                out.push_str(&format!(
+                    "  flags {name} {{ {names_wit} }}\n",
+                    name = wit_name(&row.uid)
+                ));
+            }
             _ => {}
         }
     }
@@ -421,6 +435,8 @@ fn format_wit_type(ty: &str, type_map: &TypeMap) -> Result<String, CompileError>
                 .join(", ");
             Ok(format!("tuple<{parts}>"))
         }
+        // Enums and flags need named declarations, like record/variant.
+        ResolvedType::Enum(_) | ResolvedType::Flags(_) => Ok(wit_name(ty)),
     }
 }
 

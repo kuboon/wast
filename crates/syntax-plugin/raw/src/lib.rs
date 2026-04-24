@@ -92,6 +92,14 @@ fn render_wit_type_with_guard(
                 .collect();
             format!("(tuple {})", parts.join(" "))
         }
+        WitType::Enum(cases) => {
+            let parts: Vec<String> = cases.iter().map(|c| format!("(case ${c})")).collect();
+            format!("(enum {})", parts.join(" "))
+        }
+        WitType::Flags(names) => {
+            let parts: Vec<String> = names.iter().map(|n| format!("(flag ${n})")).collect();
+            format!("(flags {})", parts.join(" "))
+        }
     }
 }
 
@@ -350,6 +358,10 @@ fn render_instruction(instr: &Instruction, indent: &str) -> String {
                 .collect::<Vec<_>>()
                 .join("\n");
             format!("{indent}(tuple.literal\n{vals})")
+        }
+        Instruction::FlagsCtor { flags } => {
+            let parts: Vec<String> = flags.iter().map(|f| format!("${f}")).collect();
+            format!("{indent}(flags.ctor {})", parts.join(" "))
         }
         Instruction::MatchOption {
             value,

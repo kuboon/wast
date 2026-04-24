@@ -151,6 +151,12 @@ pub enum Instruction {
         values: Vec<Instruction>,
     },
 
+    // Flags operations (WIT `flags name { a, b, c }`). Stored as a bitmask
+    // in an i32/i64 depending on flag count.
+    FlagsCtor {
+        flags: Vec<String>,
+    },
+
     // Other
     Nop,
 }

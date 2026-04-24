@@ -118,6 +118,8 @@ fn format_wit_type(
                 .collect();
             format!("tuple<{}>", parts.join(", "))
         }
+        WitType::Enum(cases) => format!("enum {{ {} }}", cases.join(", ")),
+        WitType::Flags(names) => format!("flags {{ {} }}", names.join(", ")),
     }
 }
 
@@ -373,6 +375,10 @@ fn render_instruction(
                 .collect::<Vec<_>>()
                 .join(", ");
             format!("{indent}[{parts}]")
+        }
+        Instruction::FlagsCtor { flags } => {
+            let parts: Vec<String> = flags.iter().map(|f| format!(":{f}")).collect();
+            format!("{indent}[{}]", parts.join(", "))
         }
         Instruction::MatchOption {
             value,

@@ -114,6 +114,8 @@ fn format_wit_type(
                 .collect();
             format!("({})", parts.join(", "))
         }
+        WitType::Enum(cases) => format!("enum {{ {} }}", cases.join(", ")),
+        WitType::Flags(names) => format!("bitflags! {{ {} }}", names.join(", ")),
     }
 }
 
@@ -362,6 +364,9 @@ fn render_instruction(
                 .collect::<Vec<_>>()
                 .join(", ");
             format!("{indent}({parts})")
+        }
+        Instruction::FlagsCtor { flags } => {
+            format!("{indent}Flags::{}", flags.join(" | "))
         }
         Instruction::MatchOption {
             value,

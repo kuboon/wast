@@ -33,6 +33,11 @@ pub enum WitType {
     Record(Vec<(String, String)>),
     Variant(Vec<(String, Option<String>)>),
     Tuple(Vec<String>),
+    /// Named enumeration — all cases are payload-less. Stored as a u8 disc
+    /// (for ≤256 cases) in the Canonical ABI.
+    Enum(Vec<String>),
+    /// Bitflag set — up to 32 flags for a single i32, 33-64 for i64.
+    Flags(Vec<String>),
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]

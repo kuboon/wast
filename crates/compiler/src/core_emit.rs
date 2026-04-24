@@ -43,6 +43,11 @@ pub enum ResolvedType {
     Variant(Vec<(String, Option<String>)>),
     /// Anonymous positional record. Fields indexed by position.
     Tuple(Vec<String>),
+    /// Named payload-less enumeration (a variant where every case has no
+    /// payload; disc only).
+    Enum(Vec<String>),
+    /// Bitflag set. Up to 32 flags fit in i32, 33-64 in i64 (v0.19 scope).
+    Flags(Vec<String>),
 }
 
 pub fn resolve_type(ty_ref: &str, type_map: &TypeMap) -> Result<ResolvedType, CompileError> {
@@ -70,6 +75,8 @@ pub fn resolve_type(ty_ref: &str, type_map: &TypeMap) -> Result<ResolvedType, Co
         WitType::Record(fields) => Ok(ResolvedType::Record(fields.clone())),
         WitType::Variant(cases) => Ok(ResolvedType::Variant(cases.clone())),
         WitType::Tuple(elems) => Ok(ResolvedType::Tuple(elems.clone())),
+        WitType::Enum(cases) => Ok(ResolvedType::Enum(cases.clone())),
+        WitType::Flags(names) => Ok(ResolvedType::Flags(names.clone())),
     }
 }
 
@@ -151,6 +158,19 @@ pub fn flat_slots(ty_ref: &str, type_map: &TypeMap) -> Result<Vec<&'static str>,
             }
             Ok(out)
         }
+        ResolvedType::Enum(_) => Ok(vec!["i32"]),
+        ResolvedType::Flags(names) => {
+            if names.len() <= 32 {
+                Ok(vec!["i32"])
+            } else if names.len() <= 64 {
+                Ok(vec!["i64"])
+            } else {
+                Err(CompileError::Unsupported(format!(
+                    "flags with {} fields (>64) not supported yet",
+                    names.len()
+                )))
+            }
+        }
     }
 }
 
@@ -207,6 +227,36 @@ pub fn size_align(ty_ref: &str, type_map: &TypeMap) -> Result<(usize, usize), Co
                 .map(|(i, t)| (i.to_string(), t.clone()))
                 .collect();
             record_layout(&synthetic, type_map)
+        }
+        ResolvedType::Enum(cases) => {
+            // Canonical ABI enum uses the smallest integer type that can
+            // hold `count` discriminants, aligned the same.
+            let n = cases.len();
+            if n <= 256 {
+                Ok((1, 1))
+            } else if n <= 65536 {
+                Ok((2, 2))
+            } else {
+                Ok((4, 4))
+            }
+        }
+        ResolvedType::Flags(names) => {
+            let n = names.len();
+            if n == 0 {
+                Ok((0, 1))
+            } else if n <= 8 {
+                Ok((1, 1))
+            } else if n <= 16 {
+                Ok((2, 2))
+            } else if n <= 32 {
+                Ok((4, 4))
+            } else if n <= 64 {
+                Ok((8, 8))
+            } else {
+                Err(CompileError::Unsupported(format!(
+                    "flags with {n} fields (>64) not supported yet"
+                )))
+            }
         }
     }
 }
@@ -1411,12 +1461,56 @@ fn emit_instr(
                 "RecordLiteral outside of return position not supported yet".into(),
             ));
         }
-        Instruction::VariantCtor { .. } => {
-            // Same rationale as RecordLiteral: handled only via
-            // emit_variant_return_wrap at function-return position.
-            return Err(CompileError::Unsupported(
-                "VariantCtor outside of return position not supported yet".into(),
-            ));
+        Instruction::VariantCtor { case, value } => {
+            // Enum case: flat = single disc slot, no memory needed. Emit an
+            // `i32.const <disc>` directly instead of going through the
+            // return-wrap path.
+            if let Some(ty) = expected
+                && let Ok(ResolvedType::Enum(cases)) = resolve_type(ty, type_map)
+            {
+                if value.is_some() {
+                    return Err(CompileError::InvalidInput(format!(
+                        "enum case {case:?} has no payload but ctor supplied one"
+                    )));
+                }
+                let disc = cases.iter().position(|n| n == case).ok_or_else(|| {
+                    CompileError::InvalidInput(format!("case {case:?} not found in enum {ty:?}"))
+                })?;
+                out.push_str(&format!("      i32.const {disc}\n"));
+            } else {
+                // Full variants go through emit_variant_return_wrap at
+                // return position; seeing VariantCtor mid-body isn't
+                // supported yet (would need memory alloc inline).
+                return Err(CompileError::Unsupported(
+                    "VariantCtor outside of return position / non-enum not supported yet".into(),
+                ));
+            }
+        }
+        Instruction::FlagsCtor { flags } => {
+            let ty = expected.ok_or_else(|| {
+                CompileError::Unsupported(
+                    "FlagsCtor needs an expected flags type in context".into(),
+                )
+            })?;
+            let ResolvedType::Flags(names) = resolve_type(ty, type_map)? else {
+                return Err(CompileError::InvalidInput(format!(
+                    "FlagsCtor applied to non-flags type {ty:?}"
+                )));
+            };
+            let mut mask: u64 = 0;
+            for flag in flags {
+                let bit = names.iter().position(|n| n == flag).ok_or_else(|| {
+                    CompileError::InvalidInput(format!(
+                        "flag {flag:?} not declared in flags {ty:?}"
+                    ))
+                })?;
+                mask |= 1u64 << bit;
+            }
+            if names.len() <= 32 {
+                out.push_str(&format!("      i32.const {}\n", mask as u32));
+            } else {
+                out.push_str(&format!("      i64.const {mask}\n"));
+            }
         }
         Instruction::TupleLiteral { .. } => {
             return Err(CompileError::Unsupported(
@@ -1474,11 +1568,13 @@ fn emit_instr(
                 }
             };
             let (first_idx, slots, ty) = slot_info(uid, scope, type_map)?;
-            let cases = match resolve_type(ty, type_map)? {
+            let cases: Vec<(String, Option<String>)> = match resolve_type(ty, type_map)? {
                 ResolvedType::Variant(cs) => cs,
+                // Enum is just a variant where every case has no payload.
+                ResolvedType::Enum(names) => names.into_iter().map(|n| (n, None)).collect(),
                 other => {
                     return Err(CompileError::InvalidInput(format!(
-                        "MatchVariant applied to non-variant local {uid:?} (resolved {other:?})"
+                        "MatchVariant applied to non-variant/enum local {uid:?} (resolved {other:?})"
                     )));
                 }
             };
@@ -1902,6 +1998,16 @@ fn branch_result_clause<'a>(
                 | ResolvedType::Record(_)
                 | ResolvedType::Variant(_)
                 | ResolvedType::Tuple(_) => "i32".to_string(),
+                // Enum and small-flags fit in a single flat slot — direct
+                // core type.
+                ResolvedType::Enum(_) => "i32".to_string(),
+                ResolvedType::Flags(names) => {
+                    if names.len() <= 32 {
+                        "i32".to_string()
+                    } else {
+                        "i64".to_string()
+                    }
+                }
             };
             Ok((format!(" (result {core})"), Some(ty)))
         }

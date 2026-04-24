@@ -108,14 +108,13 @@ Compound 戻り or body 内に Some/None/Ok/Err があるとき、**param+local 
 | v0.16 | record (primitive fields) | flat 連結、バイトオフセット配置 |
 | v0.17 | 一般 variant (N ケース、payload optional) | VariantCtor / MatchVariant、option/result は専用 IR のまま |
 | v0.18 | tuple (位置インデックスの無名 record) | TupleGet / TupleLiteral、layout は record と同じ、WIT は inline |
+| v0.19 | char / enum / flags | char は既存 primitive で動作確認、enum = payload-less variant (VariantCtor/MatchVariant 流用)、flags は bitmask (FlagsCtor、≤32 bits → i32) |
 
 ## 残タスク (優先順)
 
-1. **flags / enum / char** — 軽め
-3. **ListLiteral** — 実行時に list を構築。要素数ぶん realloc + 各要素 store ループ。cabi_realloc の grow パスを本格に使う初ケース
-4. **nested compound** — record のフィールドが string/list/record/option、option<string>、list<record>、等。`emit_record_return_wrap` で primitive 以外の field store を扱えるようにする
-5. **flags / enum / char** — 軽め
-6. **resource** — ハンドル型。最大の難物。`own<T>`/`borrow<T>` + resource テーブル + ドロップ関数
+1. **nested compound** — record のフィールドが string/list/record/option、option<string>、list<record>、等。`emit_record_return_wrap` で primitive 以外の field store を扱えるようにする
+2. **ListLiteral** — 実行時に list を構築。要素数ぶん realloc + 各要素 store ループ。cabi_realloc の grow パスを本格に使う初ケース
+3. **resource** — ハンドル型。最大の難物。`own<T>`/`borrow<T>` + resource テーブル + ドロップ関数
 
 ## 設計原則 (変わらず)
 

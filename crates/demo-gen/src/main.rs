@@ -177,6 +177,22 @@ fn serialize_wit_type(t: &WitType) -> String {
                 .join(", ");
             format!("{{ \"tag\": \"tuple\", \"val\": [{parts}] }}")
         }
+        WitType::Enum(cases) => {
+            let parts = cases
+                .iter()
+                .map(|c| format!("\"{c}\""))
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("{{ \"tag\": \"enum\", \"val\": [{parts}] }}")
+        }
+        WitType::Flags(names) => {
+            let parts = names
+                .iter()
+                .map(|n| format!("\"{n}\""))
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("{{ \"tag\": \"flags\", \"val\": [{parts}] }}")
+        }
     }
 }
 

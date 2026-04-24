@@ -86,6 +86,8 @@ fn wit_type_to_binding(value: &WitType) -> BindingWitType {
         WitType::Record(fields) => BindingWitType::Record(fields.clone()),
         WitType::Variant(cases) => BindingWitType::Variant(cases.clone()),
         WitType::Tuple(items) => BindingWitType::Tuple(items.clone()),
+        WitType::Enum(cases) => BindingWitType::Enum(cases.clone()),
+        WitType::Flags(names) => BindingWitType::Flags(names.clone()),
     }
 }
 
@@ -98,6 +100,8 @@ fn wit_type_from_binding(value: &BindingWitType) -> WitType {
         BindingWitType::Record(fields) => WitType::Record(fields.clone()),
         BindingWitType::Variant(cases) => WitType::Variant(cases.clone()),
         BindingWitType::Tuple(items) => WitType::Tuple(items.clone()),
+        BindingWitType::Enum(cases) => WitType::Enum(cases.clone()),
+        BindingWitType::Flags(names) => WitType::Flags(names.clone()),
     }
 }
 

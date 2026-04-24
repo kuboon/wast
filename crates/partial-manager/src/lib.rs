@@ -41,6 +41,9 @@ fn type_refs_from_wit_type(wt: &WitType) -> Vec<String> {
         WitType::Record(fields) => fields.iter().map(|(_, r)| r.clone()).collect(),
         WitType::Variant(cases) => cases.iter().filter_map(|(_, r)| r.clone()).collect(),
         WitType::Tuple(items) => items.clone(),
+        // enum and flags only carry case-name strings, no type references
+        // to trace.
+        WitType::Enum(_) | WitType::Flags(_) => vec![],
     }
 }
 

@@ -13,6 +13,8 @@ interface types {
     %record(list<tuple<type-uid, wit-type-ref>>),
     %variant(list<tuple<type-uid, option<wit-type-ref>>>),
     %tuple(list<wit-type-ref>),
+    %enum(list<string>),
+    %flags(list<string>),
   }
 
   enum primitive-type {
