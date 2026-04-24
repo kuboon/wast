@@ -870,57 +870,8 @@ fn emit_ptrlen_return_wrap(
                 list_buf_slot,
                 out,
             )?;
-            // Stack now has [buf_ptr, count]. Store them at ret_ptr+0 and ret_ptr+4.
-            // We need to interleave ret_ptr pushes. Save count to scratch (reuse
-            // by re-emitting): simpler — allocate the return area BEFORE the
-            // list literal would have been ideal, but the buffer needs to be
-            // reusable. Instead: stash count in buf_slot AFTER storing buf_ptr.
-            //
-            // Stack: [buf_ptr, count]
-            //   local.set buf_slot  (pops count → buf_slot overwritten; buf_ptr stays)
-            //   local.get ret_ptr   (stack: [buf_ptr, ret_ptr])
-            //   ??? need ret_ptr BELOW buf_ptr
-            //
-            // Re-emit approach: drop the stack, use buf_slot. Emit:
-            //   local.set buf_slot   (now buf_slot=count, stack=[buf_ptr])
-            //   local.get ret_ptr
-            //   … (swap equivalent via tee into a scratch)
-            //
-            // Cleanest path without adding another scratch: the helper leaves
-            // (buf_ptr, count) but we tee/set so we can re-push in the right
-            // order.
-            //
-            // After helper: stack [buf_ptr_of_elements, count].
-            //   local.set <count-scratch>
-            // We don't have a count scratch. Reuse buf_slot for count after the
-            // elements are fully written — buf_slot is no longer needed.
-            //
-            //   local.set buf_slot          ;; pop count → buf_slot (was elem_buf)
-            //                               ;; stack: [buf_ptr]
-            //   local.get ret_ptr           ;; stack: [buf_ptr, ret_ptr]
-            //   i32.store offset=0 align=2  ;; store buf_ptr at ret_ptr+0 — but
-            //                               ;; wait: i32.store expects [addr, val]
-            //                               ;; stack order: [val=buf_ptr, addr=ret_ptr]
-            //                               ;; which is WRONG (addr must be below val).
-            //
-            // Correct order:  addr, val → i32.store
-            // So we need [ret_ptr, buf_ptr].
-            //
-            // Use local.tee on the element-buf to keep it while we interleave:
-            //   (after helper leaves [buf_ptr, count])
-            //   local.set <count_tmp>  (pop count)
-            //   local.tee buf_slot     (keep buf_ptr; stack: [buf_ptr])
-            //   local.get ret_ptr      (stack: [buf_ptr, ret_ptr])
-            //   --- still wrong order ---
-            //
-            // Simpler: reorder the helper to leave just buf_ptr (not count)
-            // and have the caller re-emit i32.const count afterwards since
-            // count is known statically.
-            //
-            // (See `emit_list_literal` below — we leave only buf_ptr on stack;
-            // the caller knows `values.len()` is the count.)
             let count = values.len();
-            out.push_str(&format!("      local.set {buf_slot}\n"));
+            out.push_str(&format!("      drop\n"));
             out.push_str(&format!(
                 "      local.get {ret_ptr}\n      local.get {buf_slot}\n      i32.store offset=0 align=2\n"
             ));
@@ -1120,10 +1071,258 @@ fn emit_field_store(
             }
             Ok(())
         }
-        other => Err(CompileError::Unsupported(format!(
-            "nested field of type {ty:?} (resolved {other:?}) not supported yet — \
-             v0.20 handles primitive / string / list"
-        ))),
+        ResolvedType::Record(fields) => {
+            let user_fields = match value {
+                Instruction::RecordLiteral { fields } => fields,
+                other => {
+                    return Err(CompileError::Unsupported(format!(
+                        "nested record field only supports RecordLiteral source, got {other:?}"
+                    )));
+                }
+            };
+            for (fname, ftype) in &fields {
+                let (field_offset, _) = record_field_info(&fields, fname, type_map)?;
+                let val = user_fields
+                    .iter()
+                    .find(|(n, _)| n == fname)
+                    .map(|(_, v)| v)
+                    .ok_or_else(|| {
+                        CompileError::InvalidInput(format!(
+                            "RecordLiteral missing field {fname:?} for record {ty:?}"
+                        ))
+                    })?;
+                emit_field_store(
+                    val,
+                    ftype,
+                    ret_ptr,
+                    base_offset + field_offset,
+                    scope,
+                    func_map,
+                    type_map,
+                    literal_table,
+                    ret_ptr_slot,
+                    list_buf_slot,
+                    out,
+                )?;
+            }
+            Ok(())
+        }
+        ResolvedType::Tuple(elem_types) => {
+            let values = match value {
+                Instruction::TupleLiteral { values } => values,
+                other => {
+                    return Err(CompileError::Unsupported(format!(
+                        "nested tuple field only supports TupleLiteral source, got {other:?}"
+                    )));
+                }
+            };
+            if values.len() != elem_types.len() {
+                return Err(CompileError::InvalidInput(format!(
+                    "TupleLiteral arity {} does not match tuple {ty:?} arity {}",
+                    values.len(),
+                    elem_types.len()
+                )));
+            }
+            let synthetic: Vec<(String, String)> = elem_types
+                .iter()
+                .enumerate()
+                .map(|(i, t)| (i.to_string(), t.clone()))
+                .collect();
+            for (i, val) in values.iter().enumerate() {
+                let (offset, etype) = record_field_info(&synthetic, &i.to_string(), type_map)?;
+                emit_field_store(
+                    val,
+                    &etype,
+                    ret_ptr,
+                    base_offset + offset,
+                    scope,
+                    func_map,
+                    type_map,
+                    literal_table,
+                    ret_ptr_slot,
+                    list_buf_slot,
+                    out,
+                )?;
+            }
+            Ok(())
+        }
+        ResolvedType::Variant(cases) => {
+            let (case, payload) = match value {
+                Instruction::VariantCtor { case, value } => (case, value),
+                other => {
+                    return Err(CompileError::Unsupported(format!(
+                        "nested variant field only supports VariantCtor source, got {other:?}"
+                    )));
+                }
+            };
+            let disc = cases.iter().position(|(n, _)| n == case).ok_or_else(|| {
+                CompileError::InvalidInput(format!("case {case:?} not found in variant {ty:?}"))
+            })?;
+            let declared_payload = cases[disc].1.clone();
+            if payload.is_some() != declared_payload.is_some() {
+                return Err(CompileError::InvalidInput(format!(
+                    "case {case:?} payload arity mismatch"
+                )));
+            }
+            // u8 disc at base_offset + 0
+            out.push_str(&format!(
+                "      local.get {ret_ptr}\n      i32.const {disc}\n      i32.store8 offset={base_offset}\n"
+            ));
+            if let (Some(pty), Some(val)) = (declared_payload.as_deref(), payload.as_deref()) {
+                let (_, pay_align) = size_align(pty, type_map)?;
+                let payload_offset = align_up(1, pay_align);
+                emit_field_store(
+                    val,
+                    pty,
+                    ret_ptr,
+                    base_offset + payload_offset,
+                    scope,
+                    func_map,
+                    type_map,
+                    literal_table,
+                    ret_ptr_slot,
+                    list_buf_slot,
+                    out,
+                )?;
+            }
+            Ok(())
+        }
+        ResolvedType::Option(inner) => {
+            // u8 disc at base + 0; payload at base + align_up(1, inner_align)
+            match value {
+                Instruction::None => {
+                    out.push_str(&format!(
+                        "      local.get {ret_ptr}\n      i32.const 0\n      i32.store8 offset={base_offset}\n"
+                    ));
+                }
+                Instruction::Some { value: inner_val } => {
+                    let (_, pay_align) = size_align(&inner, type_map)?;
+                    let payload_offset = align_up(1, pay_align);
+                    out.push_str(&format!(
+                        "      local.get {ret_ptr}\n      i32.const 1\n      i32.store8 offset={base_offset}\n"
+                    ));
+                    emit_field_store(
+                        inner_val,
+                        &inner,
+                        ret_ptr,
+                        base_offset + payload_offset,
+                        scope,
+                        func_map,
+                        type_map,
+                        literal_table,
+                        ret_ptr_slot,
+                        list_buf_slot,
+                        out,
+                    )?;
+                }
+                other => {
+                    return Err(CompileError::Unsupported(format!(
+                        "nested option field only supports Some/None, got {other:?}"
+                    )));
+                }
+            }
+            Ok(())
+        }
+        ResolvedType::Result(ok_ty, err_ty) => {
+            // u8 disc (0=ok, 1=err) + payload
+            let (pay_ty, pay_val, disc) = match value {
+                Instruction::Ok { value: v } => (ok_ty.clone(), v.as_ref(), 0u32),
+                Instruction::Err { value: v } => (err_ty.clone(), v.as_ref(), 1u32),
+                other => {
+                    return Err(CompileError::Unsupported(format!(
+                        "nested result field only supports Ok/Err, got {other:?}"
+                    )));
+                }
+            };
+            let (_, pay_align) = size_align(&pay_ty, type_map)?;
+            let payload_offset = align_up(1, pay_align);
+            out.push_str(&format!(
+                "      local.get {ret_ptr}\n      i32.const {disc}\n      i32.store8 offset={base_offset}\n"
+            ));
+            emit_field_store(
+                pay_val,
+                &pay_ty,
+                ret_ptr,
+                base_offset + payload_offset,
+                scope,
+                func_map,
+                type_map,
+                literal_table,
+                ret_ptr_slot,
+                list_buf_slot,
+                out,
+            )?;
+            Ok(())
+        }
+        ResolvedType::Enum(cases) => {
+            let case = match value {
+                Instruction::VariantCtor { case, value: None } => case,
+                Instruction::VariantCtor { .. } => {
+                    return Err(CompileError::InvalidInput(format!(
+                        "enum case in variant ctor must have no payload"
+                    )));
+                }
+                other => {
+                    return Err(CompileError::Unsupported(format!(
+                        "nested enum field only supports VariantCtor (no payload), got {other:?}"
+                    )));
+                }
+            };
+            let disc = cases
+                .iter()
+                .position(|n| n == case)
+                .ok_or_else(|| {
+                    CompileError::InvalidInput(format!("case {case:?} not found in enum {ty:?}"))
+                })?;
+            // Enum uses smallest int that holds the count. For ≤256 cases: i32.store8.
+            let (size, _) = size_align(ty, type_map)?;
+            let store = match size {
+                1 => "i32.store8",
+                2 => "i32.store16",
+                4 => "i32.store",
+                _ => unreachable!(),
+            };
+            out.push_str(&format!(
+                "      local.get {ret_ptr}\n      i32.const {disc}\n      {store} offset={base_offset}\n"
+            ));
+            Ok(())
+        }
+        ResolvedType::Flags(names) => {
+            let flags = match value {
+                Instruction::FlagsCtor { flags } => flags,
+                other => {
+                    return Err(CompileError::Unsupported(format!(
+                        "nested flags field only supports FlagsCtor, got {other:?}"
+                    )));
+                }
+            };
+            let mut mask: u64 = 0;
+            for flag in flags {
+                let bit = names.iter().position(|n| n == flag).ok_or_else(|| {
+                    CompileError::InvalidInput(format!(
+                        "flag {flag:?} not declared in flags {ty:?}"
+                    ))
+                })?;
+                mask |= 1u64 << bit;
+            }
+            let (size, _) = size_align(ty, type_map)?;
+            let store = match size {
+                1 => "i32.store8",
+                2 => "i32.store16",
+                4 => "i32.store",
+                8 => "i64.store",
+                _ => unreachable!(),
+            };
+            let core_const = if size == 8 {
+                format!("i64.const {mask}")
+            } else {
+                format!("i32.const {}", mask as u32)
+            };
+            out.push_str(&format!(
+                "      local.get {ret_ptr}\n      {core_const}\n      {store} offset={base_offset}\n"
+            ));
+            Ok(())
+        }
     }
 }
 
