@@ -1,6 +1,6 @@
 # compiler — wast → wasm Component コンパイラ
 
-**現状: v0.23 完了**。numeric / control flow / calls / option / result / string / list / record / variant / tuple / char / enum / flags / ListLiteral / deep nested compound / resource (constructor + method) まで端から端まで動く。
+**現状: v0.24 完了**。numeric / control flow / calls / option / result / string / list / record / variant / tuple / char / enum / flags / ListLiteral / deep nested compound / resource (constructor + method + static + dtor) / LocalGet of compound in field position まで端から端まで動く。
 
 ## 全体アーキテクチャ (v0.11 以降)
 
@@ -112,8 +112,9 @@ Compound 戻り or body 内に Some/None/Ok/Err があるとき、**param+local 
 
 ## 残タスク (優先順)
 
-1. **resource 拡張** — v0.23 は constructor + 1 メソッドの最小構成。未カバー: 複数メソッド複合テスト、static メソッド、imported resource (別コンポーネントが定義し当方が使うケース)、`[dtor]` カスタム destructor、resource フィールド to/from record
-2. **LocalGet of nested compound** — record-of-record を LocalGet で渡す等、compound フィールドをリテラルでなくローカルから読むケース。v0.22 はリテラル専用。
+1. **imported resource** — 別コンポーネント (or host) が resource を定義し、当方が consume するケース。`TypeSource::Imported` + `FuncSource::Imported("[method]R.op")` を利用する予定。import module 名は `<pkg>:<name>/<iface>` (`[export]` プレフィックスなし)、`[resource-new]`/`[resource-rep]` は import しない (drop のみ必要)。
+2. **variant/option/result の LocalGet コピー** — v0.24 は record/tuple/string/list/enum/flags/handle のみ。disc 読んで分岐して payload をコピーする実装が必要。
+3. **heterogeneous join** — result<T, E> や variant で ok/err / 各 case の core 型が異なる場合の flat-join と wrap/extend/truncate。v0.9 で「同型のみ」と明記した制限。
 
 ## 設計原則 (変わらず)
 

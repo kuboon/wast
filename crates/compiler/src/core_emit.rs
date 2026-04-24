@@ -957,6 +957,126 @@ fn emit_list_literal(
     Ok(())
 }
 
+/// v0.24: copy a compound-typed local's flat slots to memory at the given
+/// byte offset, following the Canonical ABI memory layout. `src_base` is the
+/// first flat slot index of the source local (param or local); `ret_ptr` is
+/// the local holding the destination buffer pointer; `base_offset` is the
+/// byte offset within that buffer where the value should land.
+///
+/// Supports: primitive, string/list (2-slot ptr+len pairs), record/tuple
+/// (recursed per field), variant/option/result/enum/flags via fixed layouts
+/// (disc + payload). Resource handles are i32.
+fn emit_copy_from_local(
+    ty: &str,
+    src_base: usize,
+    ret_ptr: usize,
+    base_offset: usize,
+    type_map: &TypeMap,
+    out: &mut String,
+) -> Result<(), CompileError> {
+    match resolve_type(ty, type_map)? {
+        ResolvedType::Primitive(p) => {
+            let (store, align) = store_op(&p)?;
+            out.push_str(&format!(
+                "      local.get {ret_ptr}\n      local.get {src_base}\n      {store} offset={base_offset} align={align}\n"
+            ));
+            Ok(())
+        }
+        ResolvedType::String | ResolvedType::List(_) => {
+            // 2 slots: (ptr, len) at offsets +0 and +4.
+            out.push_str(&format!(
+                "      local.get {ret_ptr}\n      local.get {src_base}\n      i32.store offset={base_offset} align=4\n"
+            ));
+            out.push_str(&format!(
+                "      local.get {ret_ptr}\n      local.get {}\n      i32.store offset={} align=4\n",
+                src_base + 1,
+                base_offset + 4
+            ));
+            Ok(())
+        }
+        ResolvedType::Record(fields) => {
+            let mut slot_off = 0usize;
+            for (fname, ftype) in &fields {
+                let (mem_off, _) = record_field_info(&fields, fname, type_map)?;
+                let field_slots = flat_slots(ftype, type_map)?;
+                emit_copy_from_local(
+                    ftype,
+                    src_base + slot_off,
+                    ret_ptr,
+                    base_offset + mem_off,
+                    type_map,
+                    out,
+                )?;
+                slot_off += field_slots.len();
+            }
+            Ok(())
+        }
+        ResolvedType::Tuple(elems) => {
+            let synthetic: Vec<(String, String)> = elems
+                .iter()
+                .enumerate()
+                .map(|(i, t)| (i.to_string(), t.clone()))
+                .collect();
+            let mut slot_off = 0usize;
+            for (i, ety) in elems.iter().enumerate() {
+                let (mem_off, _) = record_field_info(&synthetic, &i.to_string(), type_map)?;
+                let field_slots = flat_slots(ety, type_map)?;
+                emit_copy_from_local(
+                    ety,
+                    src_base + slot_off,
+                    ret_ptr,
+                    base_offset + mem_off,
+                    type_map,
+                    out,
+                )?;
+                slot_off += field_slots.len();
+            }
+            Ok(())
+        }
+        ResolvedType::Enum(cases) => {
+            // Enum flattens to a single i32 disc; memory width depends on
+            // case count. Use the same store_op dispatch as size_align's
+            // enum case.
+            let (size, _) = size_align(ty, type_map)?;
+            let store = match size {
+                1 => "i32.store8",
+                2 => "i32.store16",
+                4 => "i32.store",
+                _ => unreachable!("enum with {} cases", cases.len()),
+            };
+            out.push_str(&format!(
+                "      local.get {ret_ptr}\n      local.get {src_base}\n      {store} offset={base_offset}\n"
+            ));
+            Ok(())
+        }
+        ResolvedType::Flags(names) => {
+            let (size, _) = size_align(ty, type_map)?;
+            let store = match size {
+                1 => "i32.store8",
+                2 => "i32.store16",
+                4 => "i32.store",
+                8 => "i64.store",
+                _ => unreachable!("flags with {} fields", names.len()),
+            };
+            out.push_str(&format!(
+                "      local.get {ret_ptr}\n      local.get {src_base}\n      {store} offset={base_offset}\n"
+            ));
+            Ok(())
+        }
+        ResolvedType::Own(_) | ResolvedType::Borrow(_) => {
+            // Handles are single i32 slots.
+            out.push_str(&format!(
+                "      local.get {ret_ptr}\n      local.get {src_base}\n      i32.store offset={base_offset} align=4\n"
+            ));
+            Ok(())
+        }
+        other => Err(CompileError::Unsupported(format!(
+            "LocalGet copy of {other:?} not supported yet — \
+             option/result/variant sources need runtime disc handling"
+        ))),
+    }
+}
+
 /// Store `value` (of type `ty`) at `[ret_ptr + base_offset ..]` using the
 /// type's Canonical-ABI memory layout. Shared by all compound return-wrap
 /// emitters so nested `string`/`list`/primitive fields can be handled
@@ -1087,81 +1207,87 @@ fn emit_field_store(
             }
             Ok(())
         }
-        ResolvedType::Record(fields) => {
-            let user_fields = match value {
-                Instruction::RecordLiteral { fields } => fields,
-                other => {
-                    return Err(CompileError::Unsupported(format!(
-                        "nested record field only supports RecordLiteral source, got {other:?}"
+        ResolvedType::Record(fields) => match value {
+            Instruction::RecordLiteral {
+                fields: user_fields,
+            } => {
+                for (fname, ftype) in &fields {
+                    let (field_offset, _) = record_field_info(&fields, fname, type_map)?;
+                    let val = user_fields
+                        .iter()
+                        .find(|(n, _)| n == fname)
+                        .map(|(_, v)| v)
+                        .ok_or_else(|| {
+                            CompileError::InvalidInput(format!(
+                                "RecordLiteral missing field {fname:?} for record {ty:?}"
+                            ))
+                        })?;
+                    emit_field_store(
+                        val,
+                        ftype,
+                        ret_ptr,
+                        base_offset + field_offset,
+                        scope,
+                        func_map,
+                        type_map,
+                        literal_table,
+                        ret_ptr_slot,
+                        list_buf_slot,
+                        out,
+                    )?;
+                }
+                Ok(())
+            }
+            Instruction::LocalGet { uid } => {
+                // v0.24: copy a compound local's flat slots directly into the
+                // parent buffer at the Canonical-ABI byte offsets.
+                let (src_base, _, _) = slot_info(uid, scope, type_map)?;
+                emit_copy_from_local(ty, src_base, ret_ptr, base_offset, type_map, out)
+            }
+            other => Err(CompileError::Unsupported(format!(
+                "nested record field source {other:?} not supported"
+            ))),
+        },
+        ResolvedType::Tuple(elem_types) => match value {
+            Instruction::TupleLiteral { values } => {
+                if values.len() != elem_types.len() {
+                    return Err(CompileError::InvalidInput(format!(
+                        "TupleLiteral arity {} does not match tuple {ty:?} arity {}",
+                        values.len(),
+                        elem_types.len()
                     )));
                 }
-            };
-            for (fname, ftype) in &fields {
-                let (field_offset, _) = record_field_info(&fields, fname, type_map)?;
-                let val = user_fields
+                let synthetic: Vec<(String, String)> = elem_types
                     .iter()
-                    .find(|(n, _)| n == fname)
-                    .map(|(_, v)| v)
-                    .ok_or_else(|| {
-                        CompileError::InvalidInput(format!(
-                            "RecordLiteral missing field {fname:?} for record {ty:?}"
-                        ))
-                    })?;
-                emit_field_store(
-                    val,
-                    ftype,
-                    ret_ptr,
-                    base_offset + field_offset,
-                    scope,
-                    func_map,
-                    type_map,
-                    literal_table,
-                    ret_ptr_slot,
-                    list_buf_slot,
-                    out,
-                )?;
-            }
-            Ok(())
-        }
-        ResolvedType::Tuple(elem_types) => {
-            let values = match value {
-                Instruction::TupleLiteral { values } => values,
-                other => {
-                    return Err(CompileError::Unsupported(format!(
-                        "nested tuple field only supports TupleLiteral source, got {other:?}"
-                    )));
+                    .enumerate()
+                    .map(|(i, t)| (i.to_string(), t.clone()))
+                    .collect();
+                for (i, val) in values.iter().enumerate() {
+                    let (offset, etype) = record_field_info(&synthetic, &i.to_string(), type_map)?;
+                    emit_field_store(
+                        val,
+                        &etype,
+                        ret_ptr,
+                        base_offset + offset,
+                        scope,
+                        func_map,
+                        type_map,
+                        literal_table,
+                        ret_ptr_slot,
+                        list_buf_slot,
+                        out,
+                    )?;
                 }
-            };
-            if values.len() != elem_types.len() {
-                return Err(CompileError::InvalidInput(format!(
-                    "TupleLiteral arity {} does not match tuple {ty:?} arity {}",
-                    values.len(),
-                    elem_types.len()
-                )));
+                Ok(())
             }
-            let synthetic: Vec<(String, String)> = elem_types
-                .iter()
-                .enumerate()
-                .map(|(i, t)| (i.to_string(), t.clone()))
-                .collect();
-            for (i, val) in values.iter().enumerate() {
-                let (offset, etype) = record_field_info(&synthetic, &i.to_string(), type_map)?;
-                emit_field_store(
-                    val,
-                    &etype,
-                    ret_ptr,
-                    base_offset + offset,
-                    scope,
-                    func_map,
-                    type_map,
-                    literal_table,
-                    ret_ptr_slot,
-                    list_buf_slot,
-                    out,
-                )?;
+            Instruction::LocalGet { uid } => {
+                let (src_base, _, _) = slot_info(uid, scope, type_map)?;
+                emit_copy_from_local(ty, src_base, ret_ptr, base_offset, type_map, out)
             }
-            Ok(())
-        }
+            other => Err(CompileError::Unsupported(format!(
+                "nested tuple field source {other:?} not supported"
+            ))),
+        },
         ResolvedType::Variant(cases) => {
             let (case, payload) = match value {
                 Instruction::VariantCtor { case, value } => (case, value),
