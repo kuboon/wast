@@ -27,14 +27,47 @@
   </head>
   <body>
     <header>
-      <h1>WAST <span class="subtitle">— one IR, four syntaxes</span></h1>
+      <h1>WAST <span class="subtitle">— one IR, pluggable surface syntaxes</span></h1>
       <p class="intro">
         WAST is a high-level IR for WASM Components. The same
         <strong>wast component</strong> (types + functions + bodies) renders
-        as four different surface syntaxes via
-        <code>to_text</code> plugins, and compiles to a running WASM Component
-        via <code>wit-component</code>.
+        as multiple surface syntaxes via <code>to_text</code> plugins
+        (currently raw / ruby-like / ts-like / rust-like, more planned), and
+        compiles to a running WASM Component via <code>wit-component</code>.
       </p>
+
+      <div class="overview">
+        <section class="architecture">
+          <h2>Architecture</h2>
+<pre class="diagram">text <──syntax plugin──> partial/full WastComponent
+partial WastComponent <──partial manager──> full WastComponent
+WastComponent <──file manager──> [wast, wit, syms]
+[wast, wit] --compiler--> wasm component</pre>
+        </section>
+
+        <section class="principles">
+          <h2>Key design principles</h2>
+          <ul>
+            <li>
+              <strong>Names are not code essence</strong> — all identifiers
+              are meaningless UIDs.
+            </li>
+            <li>
+              <strong>wasm generation requires only wast + wit</strong> —
+              syms are never needed.
+            </li>
+            <li>
+              <strong>Minimize identifier change cost</strong> — UIDs are
+              stable, display names are in syms.
+            </li>
+            <li>
+              <strong>WastComponent is the central type</strong> — partial
+              and full share the same type definition.
+            </li>
+          </ul>
+        </section>
+      </div>
+
       <p class="links">
         <a href="https://github.com/kuboon/wast">source on GitHub</a>
         ·
