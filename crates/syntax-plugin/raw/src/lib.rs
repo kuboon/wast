@@ -359,6 +359,14 @@ fn render_instruction(instr: &Instruction, indent: &str) -> String {
                 .join("\n");
             format!("{indent}(tuple.literal\n{vals})")
         }
+        Instruction::ListLiteral { values } => {
+            let vals = values
+                .iter()
+                .map(|v| render_instruction(v, &inner))
+                .collect::<Vec<_>>()
+                .join("\n");
+            format!("{indent}(list.literal\n{vals})")
+        }
         Instruction::FlagsCtor { flags } => {
             let parts: Vec<String> = flags.iter().map(|f| format!("${f}")).collect();
             format!("{indent}(flags.ctor {})", parts.join(" "))

@@ -120,6 +120,9 @@ pub enum Instruction {
     ListLen {
         value: Box<Instruction>,
     },
+    ListLiteral {
+        values: Vec<Instruction>,
+    },
 
     // Record operations
     RecordGet {

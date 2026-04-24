@@ -589,6 +589,30 @@ fn collect_locals_rec(
                     );
                 }
             }
+            Instruction::ListLiteral { values } => {
+                for v in values {
+                    collect_locals_rec(
+                        std::slice::from_ref(v),
+                        params,
+                        func_map,
+                        type_map,
+                        locals,
+                        seen,
+                    );
+                }
+            }
+            Instruction::RecordLiteral { fields } => {
+                for (_, v) in fields {
+                    collect_locals_rec(
+                        std::slice::from_ref(v),
+                        params,
+                        func_map,
+                        type_map,
+                        locals,
+                        seen,
+                    );
+                }
+            }
             Instruction::MatchVariant { value, arms } => {
                 collect_locals_rec(
                     std::slice::from_ref(value.as_ref()),
@@ -651,6 +675,7 @@ fn slot_info<'a>(
 /// `ret_ptr_slot` is the core-local index of the synthesized `i32` that
 /// holds the return buffer pointer for indirect-return functions; `None`
 /// when the function doesn't need it.
+#[allow(clippy::too_many_arguments)]
 pub fn emit_body(
     instructions: &[Instruction],
     params: &[(String, String)],
@@ -660,6 +685,7 @@ pub fn emit_body(
     type_map: &TypeMap,
     literal_table: &LiteralTable,
     ret_ptr_slot: Option<usize>,
+    list_buf_slot: Option<usize>,
 ) -> Result<String, CompileError> {
     let scope: Vec<(String, String)> = params.iter().chain(locals.iter()).cloned().collect();
     let mut out = String::new();
@@ -708,10 +734,13 @@ pub fn emit_body(
         match wrap_kind {
             Some(WrapKind::PtrLen) => emit_ptrlen_return_wrap(
                 last,
+                result_ty.unwrap(),
                 &scope,
+                func_map,
                 type_map,
                 literal_table,
                 ret_ptr_slot,
+                list_buf_slot,
                 &mut out,
             )?,
             Some(WrapKind::Record) => emit_record_return_wrap(
@@ -722,6 +751,7 @@ pub fn emit_body(
                 type_map,
                 literal_table,
                 ret_ptr_slot,
+                list_buf_slot,
                 &mut out,
             )?,
             Some(WrapKind::Variant) => emit_variant_return_wrap(
@@ -732,6 +762,7 @@ pub fn emit_body(
                 type_map,
                 literal_table,
                 ret_ptr_slot,
+                list_buf_slot,
                 &mut out,
             )?,
             Some(WrapKind::Tuple) => emit_tuple_return_wrap(
@@ -742,6 +773,7 @@ pub fn emit_body(
                 type_map,
                 literal_table,
                 ret_ptr_slot,
+                list_buf_slot,
                 &mut out,
             )?,
             None => unreachable!(),
@@ -754,12 +786,16 @@ pub fn emit_body(
 /// Wrap a (ptr, len)-producing instruction (for string or list return) into
 /// an indirect-return sequence: allocate an 8-byte buffer via `cabi_realloc`,
 /// write (data_ptr, len) to offsets 0 and 4, then push the buffer pointer.
+#[allow(clippy::too_many_arguments)]
 fn emit_ptrlen_return_wrap(
     instr: &Instruction,
+    result_ty: &str,
     scope: &[(String, String)],
+    func_map: &FuncMap,
     type_map: &TypeMap,
     literal_table: &LiteralTable,
     ret_ptr_slot: Option<usize>,
+    list_buf_slot: Option<usize>,
     out: &mut String,
 ) -> Result<(), CompileError> {
     let ret_ptr = ret_ptr_slot.ok_or_else(|| {
@@ -807,16 +843,154 @@ fn emit_ptrlen_return_wrap(
                 bytes.len()
             ));
         }
+        Instruction::ListLiteral { values } => {
+            // Only valid when the function returns a list<T>.
+            let elem_ty = match resolve_type(result_ty, type_map)? {
+                ResolvedType::List(inner) => inner,
+                other => {
+                    return Err(CompileError::InvalidInput(format!(
+                        "ListLiteral return wrap but function returns {other:?}"
+                    )));
+                }
+            };
+            let buf_slot = list_buf_slot.ok_or_else(|| {
+                CompileError::Unsupported(
+                    "list_buf_slot missing for ListLiteral return (emit_core_func should have reserved one)".into(),
+                )
+            })?;
+            emit_list_literal(
+                values,
+                &elem_ty,
+                buf_slot,
+                scope,
+                func_map,
+                type_map,
+                literal_table,
+                ret_ptr_slot,
+                list_buf_slot,
+                out,
+            )?;
+            // Stack now has [buf_ptr, count]. Store them at ret_ptr+0 and ret_ptr+4.
+            // We need to interleave ret_ptr pushes. Save count to scratch (reuse
+            // by re-emitting): simpler — allocate the return area BEFORE the
+            // list literal would have been ideal, but the buffer needs to be
+            // reusable. Instead: stash count in buf_slot AFTER storing buf_ptr.
+            //
+            // Stack: [buf_ptr, count]
+            //   local.set buf_slot  (pops count → buf_slot overwritten; buf_ptr stays)
+            //   local.get ret_ptr   (stack: [buf_ptr, ret_ptr])
+            //   ??? need ret_ptr BELOW buf_ptr
+            //
+            // Re-emit approach: drop the stack, use buf_slot. Emit:
+            //   local.set buf_slot   (now buf_slot=count, stack=[buf_ptr])
+            //   local.get ret_ptr
+            //   … (swap equivalent via tee into a scratch)
+            //
+            // Cleanest path without adding another scratch: the helper leaves
+            // (buf_ptr, count) but we tee/set so we can re-push in the right
+            // order.
+            //
+            // After helper: stack [buf_ptr_of_elements, count].
+            //   local.set <count-scratch>
+            // We don't have a count scratch. Reuse buf_slot for count after the
+            // elements are fully written — buf_slot is no longer needed.
+            //
+            //   local.set buf_slot          ;; pop count → buf_slot (was elem_buf)
+            //                               ;; stack: [buf_ptr]
+            //   local.get ret_ptr           ;; stack: [buf_ptr, ret_ptr]
+            //   i32.store offset=0 align=2  ;; store buf_ptr at ret_ptr+0 — but
+            //                               ;; wait: i32.store expects [addr, val]
+            //                               ;; stack order: [val=buf_ptr, addr=ret_ptr]
+            //                               ;; which is WRONG (addr must be below val).
+            //
+            // Correct order:  addr, val → i32.store
+            // So we need [ret_ptr, buf_ptr].
+            //
+            // Use local.tee on the element-buf to keep it while we interleave:
+            //   (after helper leaves [buf_ptr, count])
+            //   local.set <count_tmp>  (pop count)
+            //   local.tee buf_slot     (keep buf_ptr; stack: [buf_ptr])
+            //   local.get ret_ptr      (stack: [buf_ptr, ret_ptr])
+            //   --- still wrong order ---
+            //
+            // Simpler: reorder the helper to leave just buf_ptr (not count)
+            // and have the caller re-emit i32.const count afterwards since
+            // count is known statically.
+            //
+            // (See `emit_list_literal` below — we leave only buf_ptr on stack;
+            // the caller knows `values.len()` is the count.)
+            let count = values.len();
+            out.push_str(&format!("      local.set {buf_slot}\n"));
+            out.push_str(&format!(
+                "      local.get {ret_ptr}\n      local.get {buf_slot}\n      i32.store offset=0 align=2\n"
+            ));
+            out.push_str(&format!(
+                "      local.get {ret_ptr}\n      i32.const {count}\n      i32.store offset=4 align=2\n"
+            ));
+        }
         other => {
             return Err(CompileError::Unsupported(format!(
                 "(ptr,len) return from {other:?} not supported yet \
-                 (v0.14/v0.15 handles LocalGet or StringLiteral)"
+                 (handles LocalGet / StringLiteral / ListLiteral)"
             )));
         }
     }
 
     // Push the buffer pointer as the core function's return value.
     out.push_str(&format!("      local.get {ret_ptr}\n"));
+    Ok(())
+}
+
+/// Allocate a buffer for `values.len()` elements of type `elem_ty`, store each
+/// element at its aligned offset, and leave the buffer pointer on the stack.
+/// Element count is known statically — the caller re-emits `i32.const count`
+/// when forming the `(ptr, len)` pair, so this helper only pushes the pointer.
+///
+/// `scratch_slot` is an i32 local used to hold the buffer pointer while the
+/// element stores emit their addresses. The caller must have reserved it via
+/// `body_has_list_literal` detection in `emit_core_func`.
+#[allow(clippy::too_many_arguments)]
+fn emit_list_literal(
+    values: &[Instruction],
+    elem_ty: &str,
+    scratch_slot: usize,
+    scope: &[(String, String)],
+    func_map: &FuncMap,
+    type_map: &TypeMap,
+    literal_table: &LiteralTable,
+    ret_ptr_slot: Option<usize>,
+    list_buf_slot: Option<usize>,
+    out: &mut String,
+) -> Result<(), CompileError> {
+    let (elem_size, elem_align) = size_align(elem_ty, type_map)?;
+    let total_bytes = elem_size * values.len();
+
+    // Allocate. For empty lists we still call cabi_realloc with 0 bytes so the
+    // pointer is valid (bump allocator returns current heap_end).
+    out.push_str(&format!(
+        "      i32.const 0\n      i32.const 0\n      i32.const {elem_align}\n      i32.const {total_bytes}\n      call $cabi_realloc\n      local.set {scratch_slot}\n"
+    ));
+
+    // Store each element at offset = i * elem_size.
+    for (i, val) in values.iter().enumerate() {
+        let offset = i * elem_size;
+        emit_field_store(
+            val,
+            elem_ty,
+            scratch_slot,
+            offset,
+            scope,
+            func_map,
+            type_map,
+            literal_table,
+            ret_ptr_slot,
+            list_buf_slot,
+            out,
+        )?;
+    }
+
+    // Leave the buffer pointer on the stack for the caller.
+    out.push_str(&format!("      local.get {scratch_slot}\n"));
     Ok(())
 }
 
@@ -827,6 +1001,8 @@ fn emit_ptrlen_return_wrap(
 ///
 /// v0.20 scope: primitive fields (any source), string/list fields (via
 /// LocalGet of a matching local, or — for string only — StringLiteral).
+/// v0.21 extension: list fields accept ListLiteral (runtime construction)
+/// in addition to LocalGet.
 /// Nested record/variant/tuple/option/result fields still deferred.
 #[allow(clippy::too_many_arguments)]
 fn emit_field_store(
@@ -839,6 +1015,7 @@ fn emit_field_store(
     type_map: &TypeMap,
     literal_table: &LiteralTable,
     ret_ptr_slot: Option<usize>,
+    list_buf_slot: Option<usize>,
     out: &mut String,
 ) -> Result<(), CompileError> {
     let resolved = resolve_type(ty, type_map)?;
@@ -864,10 +1041,19 @@ fn emit_field_store(
         ResolvedType::String | ResolvedType::List(_) => {
             // Both are (ptr, len) in memory — two i32 stores at offsets
             // base and base+4.
-            let (ptr_src, len_src) = match value {
+            match value {
                 Instruction::LocalGet { uid } => {
                     let (src_base, _slots, _) = slot_info(uid, scope, type_map)?;
-                    (SlotSource::Local(src_base), SlotSource::Local(src_base + 1))
+                    // ptr at base_offset + 0
+                    out.push_str(&format!(
+                        "      local.get {ret_ptr}\n      local.get {src_base}\n      i32.store offset={base_offset} align=4\n"
+                    ));
+                    // len at base_offset + 4
+                    let len_off = base_offset + 4;
+                    out.push_str(&format!(
+                        "      local.get {ret_ptr}\n      local.get {}\n      i32.store offset={len_off} align=4\n",
+                        src_base + 1
+                    ));
                 }
                 Instruction::StringLiteral { bytes } if matches!(resolved, ResolvedType::String) => {
                     let offset = literal_table.get(bytes).ok_or_else(|| {
@@ -875,51 +1061,69 @@ fn emit_field_store(
                             "StringLiteral missing from literal table".into(),
                         )
                     })?;
-                    (SlotSource::Const(offset as u64), SlotSource::Const(bytes.len() as u64))
+                    out.push_str(&format!(
+                        "      local.get {ret_ptr}\n      i32.const {offset}\n      i32.store offset={base_offset} align=4\n"
+                    ));
+                    let len_off = base_offset + 4;
+                    out.push_str(&format!(
+                        "      local.get {ret_ptr}\n      i32.const {}\n      i32.store offset={len_off} align=4\n",
+                        bytes.len()
+                    ));
+                }
+                Instruction::ListLiteral { values } if matches!(resolved, ResolvedType::List(_)) => {
+                    let ResolvedType::List(elem_ty) = resolved else {
+                        unreachable!();
+                    };
+                    let buf_slot = list_buf_slot.ok_or_else(|| {
+                        CompileError::Unsupported(
+                            "list_buf_slot missing for nested ListLiteral field".into(),
+                        )
+                    })?;
+                    // Build the element buffer; leaves buf_ptr on the stack.
+                    emit_list_literal(
+                        values,
+                        &elem_ty,
+                        buf_slot,
+                        scope,
+                        func_map,
+                        type_map,
+                        literal_table,
+                        ret_ptr_slot,
+                        list_buf_slot,
+                        out,
+                    )?;
+                    // Stack: [buf_ptr]. We now need to form i32.store operands
+                    // `[addr, val]`. Drop buf_ptr, re-read via scratch.
+                    //
+                    //   drop                              ;; (unnecessary; helper already uses scratch)
+                    //   local.get ret_ptr
+                    //   local.get scratch
+                    //   i32.store offset=base align=4
+                    //
+                    // Since the helper left the pointer on the stack as a side
+                    // effect, drop it and reference via scratch explicitly.
+                    out.push_str("      drop\n");
+                    let count = values.len();
+                    out.push_str(&format!(
+                        "      local.get {ret_ptr}\n      local.get {buf_slot}\n      i32.store offset={base_offset} align=4\n"
+                    ));
+                    let len_off = base_offset + 4;
+                    out.push_str(&format!(
+                        "      local.get {ret_ptr}\n      i32.const {count}\n      i32.store offset={len_off} align=4\n"
+                    ));
                 }
                 other => {
                     return Err(CompileError::Unsupported(format!(
-                        "nested string/list field only supports LocalGet or StringLiteral as source, got {other:?}"
+                        "nested string/list field source {other:?} not supported"
                     )));
                 }
-            };
-            // ptr slot at base_offset + 0
-            out.push_str(&format!("      local.get {ret_ptr}\n"));
-            emit_slot_source(&ptr_src, "i32", out);
-            out.push_str(&format!(
-                "      i32.store offset={base_offset} align=4\n"
-            ));
-            // len slot at base_offset + 4
-            let len_off = base_offset + 4;
-            out.push_str(&format!("      local.get {ret_ptr}\n"));
-            emit_slot_source(&len_src, "i32", out);
-            out.push_str(&format!(
-                "      i32.store offset={len_off} align=4\n"
-            ));
+            }
             Ok(())
         }
         other => Err(CompileError::Unsupported(format!(
             "nested field of type {ty:?} (resolved {other:?}) not supported yet — \
              v0.20 handles primitive / string / list"
         ))),
-    }
-}
-
-enum SlotSource {
-    Local(usize),
-    Const(u64),
-}
-
-fn emit_slot_source(src: &SlotSource, core_ty: &str, out: &mut String) {
-    match src {
-        SlotSource::Local(idx) => out.push_str(&format!("      local.get {idx}\n")),
-        SlotSource::Const(v) => {
-            if core_ty == "i64" {
-                out.push_str(&format!("      i64.const {v}\n"));
-            } else {
-                out.push_str(&format!("      i32.const {v}\n"));
-            }
-        }
     }
 }
 
@@ -935,6 +1139,7 @@ fn emit_record_return_wrap(
     type_map: &TypeMap,
     literal_table: &LiteralTable,
     ret_ptr_slot: Option<usize>,
+    list_buf_slot: Option<usize>,
     out: &mut String,
 ) -> Result<(), CompileError> {
     let ret_ptr = ret_ptr_slot.ok_or_else(|| {
@@ -988,6 +1193,7 @@ fn emit_record_return_wrap(
             type_map,
             literal_table,
             ret_ptr_slot,
+            list_buf_slot,
             out,
         )?;
     }
@@ -1009,6 +1215,7 @@ fn emit_variant_return_wrap(
     type_map: &TypeMap,
     literal_table: &LiteralTable,
     ret_ptr_slot: Option<usize>,
+    list_buf_slot: Option<usize>,
     out: &mut String,
 ) -> Result<(), CompileError> {
     let ret_ptr = ret_ptr_slot.ok_or_else(|| {
@@ -1071,6 +1278,7 @@ fn emit_variant_return_wrap(
             type_map,
             literal_table,
             ret_ptr_slot,
+            list_buf_slot,
             out,
         )?;
     }
@@ -1091,6 +1299,7 @@ fn emit_tuple_return_wrap(
     type_map: &TypeMap,
     literal_table: &LiteralTable,
     ret_ptr_slot: Option<usize>,
+    list_buf_slot: Option<usize>,
     out: &mut String,
 ) -> Result<(), CompileError> {
     let ret_ptr = ret_ptr_slot.ok_or_else(|| {
@@ -1147,6 +1356,7 @@ fn emit_tuple_return_wrap(
             type_map,
             literal_table,
             ret_ptr_slot,
+            list_buf_slot,
             out,
         )?;
     }
@@ -1156,7 +1366,8 @@ fn emit_tuple_return_wrap(
 }
 
 /// Scan a body for any compound constructor (`Some`/`None`/`Ok`/`Err`/`VariantCtor`/
-/// `RecordLiteral`/`TupleLiteral`) that would need the synthesized return-pointer local.
+/// `RecordLiteral`/`TupleLiteral`/`ListLiteral`) that would need the
+/// synthesized return-pointer local.
 pub fn body_needs_ret_ptr(body: &[Instruction]) -> bool {
     body.iter().any(instr_has_compound_ctor)
 }
@@ -1169,7 +1380,8 @@ fn instr_has_compound_ctor(i: &Instruction) -> bool {
         | Instruction::Err { .. }
         | Instruction::VariantCtor { .. }
         | Instruction::RecordLiteral { .. }
-        | Instruction::TupleLiteral { .. } => true,
+        | Instruction::TupleLiteral { .. }
+        | Instruction::ListLiteral { .. } => true,
         Instruction::If {
             condition,
             then_body,
@@ -1188,6 +1400,72 @@ fn instr_has_compound_ctor(i: &Instruction) -> bool {
             instr_has_compound_ctor(lhs) || instr_has_compound_ctor(rhs)
         }
         Instruction::LocalSet { value, .. } => instr_has_compound_ctor(value),
+        _ => false,
+    }
+}
+
+/// Scan a body for any `ListLiteral`. When present, an additional i32 scratch
+/// local (beyond `ret_ptr_slot`) is reserved to hold the element buffer
+/// pointer while `emit_list_literal` fills the elements.
+pub fn body_has_list_literal(body: &[Instruction]) -> bool {
+    body.iter().any(instr_has_list_literal)
+}
+
+fn instr_has_list_literal(i: &Instruction) -> bool {
+    match i {
+        Instruction::ListLiteral { .. } => true,
+        Instruction::If {
+            condition,
+            then_body,
+            else_body,
+        } => {
+            instr_has_list_literal(condition)
+                || then_body.iter().any(instr_has_list_literal)
+                || else_body.iter().any(instr_has_list_literal)
+        }
+        Instruction::Block { body, .. } | Instruction::Loop { body, .. } => {
+            body.iter().any(instr_has_list_literal)
+        }
+        Instruction::BrIf { condition, .. } => instr_has_list_literal(condition),
+        Instruction::Call { args, .. } => args.iter().any(|(_, a)| instr_has_list_literal(a)),
+        Instruction::Arithmetic { lhs, rhs, .. } | Instruction::Compare { lhs, rhs, .. } => {
+            instr_has_list_literal(lhs) || instr_has_list_literal(rhs)
+        }
+        Instruction::LocalSet { value, .. }
+        | Instruction::Some { value }
+        | Instruction::Ok { value }
+        | Instruction::Err { value } => instr_has_list_literal(value),
+        Instruction::VariantCtor { value, .. } => {
+            value.as_deref().is_some_and(instr_has_list_literal)
+        }
+        Instruction::RecordLiteral { fields } => {
+            fields.iter().any(|(_, v)| instr_has_list_literal(v))
+        }
+        Instruction::TupleLiteral { values } => values.iter().any(instr_has_list_literal),
+        Instruction::MatchOption {
+            value,
+            some_body,
+            none_body,
+            ..
+        } => {
+            instr_has_list_literal(value)
+                || some_body.iter().any(instr_has_list_literal)
+                || none_body.iter().any(instr_has_list_literal)
+        }
+        Instruction::MatchResult {
+            value,
+            ok_body,
+            err_body,
+            ..
+        } => {
+            instr_has_list_literal(value)
+                || ok_body.iter().any(instr_has_list_literal)
+                || err_body.iter().any(instr_has_list_literal)
+        }
+        Instruction::MatchVariant { value, arms } => {
+            instr_has_list_literal(value)
+                || arms.iter().any(|arm| arm.body.iter().any(instr_has_list_literal))
+        }
         _ => false,
     }
 }
@@ -1580,6 +1858,14 @@ fn emit_instr(
         Instruction::TupleLiteral { .. } => {
             return Err(CompileError::Unsupported(
                 "TupleLiteral outside of return position not supported yet".into(),
+            ));
+        }
+        Instruction::ListLiteral { .. } => {
+            // ListLiteral is handled by emit_ptrlen_return_wrap (return
+            // position) and emit_field_store (nested list field). Reaching
+            // here means it was used mid-body as a flat value stream.
+            return Err(CompileError::Unsupported(
+                "ListLiteral outside of return position / nested list field not supported yet".into(),
             ));
         }
         Instruction::TupleGet { value, index } => {

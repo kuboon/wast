@@ -1,6 +1,6 @@
 # compiler — wast → wasm Component コンパイラ
 
-**現状: v0.20 完了**。numeric / control flow / calls / option / result / string / list / record / variant / tuple / char / enum / flags / nested compound (string/list fields) まで端から端まで動く。以降は ListLiteral / resource。
+**現状: v0.21 完了**。numeric / control flow / calls / option / result / string / list / record / variant / tuple / char / enum / flags / nested compound / ListLiteral (runtime list 構築) まで端から端まで動く。以降は resource。
 
 ## 全体アーキテクチャ (v0.11 以降)
 
@@ -112,9 +112,8 @@ Compound 戻り or body 内に Some/None/Ok/Err があるとき、**param+local 
 
 ## 残タスク (優先順)
 
-1. **nested compound** — record のフィールドが string/list/record/option、option<string>、list<record>、等。`emit_record_return_wrap` で primitive 以外の field store を扱えるようにする
-2. **ListLiteral** — 実行時に list を構築。要素数ぶん realloc + 各要素 store ループ。cabi_realloc の grow パスを本格に使う初ケース
-3. **resource** — ハンドル型。最大の難物。`own<T>`/`borrow<T>` + resource テーブル + ドロップ関数
+1. **resource** — ハンドル型。最大の難物。`own<T>`/`borrow<T>` + resource テーブル + ドロップ関数
+2. **nested compound 拡張** — v0.20/v0.21 は string/list フィールドのみ。record-of-record、option<record>、variant<record> 等の記帳はまだ未対応
 
 ## 設計原則 (変わらず)
 

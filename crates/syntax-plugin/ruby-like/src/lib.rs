@@ -376,6 +376,14 @@ fn render_instruction(
                 .join(", ");
             format!("{indent}[{parts}]")
         }
+        Instruction::ListLiteral { values } => {
+            let parts = values
+                .iter()
+                .map(|v| render_expr(v, local_names, func_names))
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("{indent}List[{parts}]")
+        }
         Instruction::FlagsCtor { flags } => {
             let parts: Vec<String> = flags.iter().map(|f| format!(":{f}")).collect();
             format!("{indent}[{}]", parts.join(", "))

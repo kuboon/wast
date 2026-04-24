@@ -16,8 +16,8 @@ use wit_component::{ComponentEncoder, StringEncoding, embed_component_metadata};
 use wit_parser::Resolve;
 
 use crate::core_emit::{
-    FuncMap, ResolvedType, TypeMap, body_needs_ret_ptr, collect_locals, emit_body, flat_slots,
-    resolve_type, return_is_indirect,
+    FuncMap, ResolvedType, TypeMap, body_has_list_literal, body_needs_ret_ptr, collect_locals,
+    emit_body, flat_slots, resolve_type, return_is_indirect,
 };
 use crate::error::CompileError;
 
@@ -230,6 +230,14 @@ fn emit_core_func(
     } else {
         None
     };
+    // v0.21: ListLiteral needs an extra i32 scratch to hold the element
+    // buffer pointer while elements are stored.
+    let needs_list_buf = body_has_list_literal(&body_instr);
+    let list_buf_slot = if needs_list_buf {
+        Some(param_slot_count + local_slot_count + (needs_ret_ptr as usize))
+    } else {
+        None
+    };
 
     let mut locals_parts: Vec<String> = locals
         .iter()
@@ -245,6 +253,9 @@ fn emit_core_func(
     if needs_ret_ptr {
         locals_parts.push("(local i32)".to_string());
     }
+    if needs_list_buf {
+        locals_parts.push("(local i32)".to_string());
+    }
     let locals_decl = locals_parts.join(" ");
 
     let body_wat = emit_body(
@@ -256,6 +267,7 @@ fn emit_core_func(
         type_map,
         literal_table,
         ret_ptr_slot,
+        list_buf_slot,
     )?;
 
     let export_clause = match &row.func.source {
@@ -580,6 +592,11 @@ fn collect_literals_rec(
                 }
             }
             Instruction::TupleLiteral { values } => {
+                for v in values {
+                    collect_literals_rec(std::slice::from_ref(v), out, seen);
+                }
+            }
+            Instruction::ListLiteral { values } => {
                 for v in values {
                     collect_literals_rec(std::slice::from_ref(v), out, seen);
                 }
