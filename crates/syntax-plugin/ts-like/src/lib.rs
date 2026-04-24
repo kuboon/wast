@@ -154,13 +154,62 @@ fn parse_primitive(s: &str) -> Option<PrimitiveType> {
 fn render_body(
     body: &[u8],
     indent: &str,
+    returns_value: bool,
     local_names: &HashMap<String, String>,
     func_names: &HashMap<String, String>,
 ) -> String {
     match wast_pattern_analyzer::deserialize_body(body) {
-        Ok(instructions) => render_instructions(&instructions, indent, local_names, func_names),
+        Ok(instructions) => {
+            let mut lines = Vec::new();
+            let last_idx = instructions.len().saturating_sub(1);
+            for (i, instr) in instructions.iter().enumerate() {
+                let rendered = render_instruction(instr, indent, local_names, func_names);
+                if rendered.is_empty() {
+                    continue;
+                }
+                // TS needs an explicit `return` — a bare trailing expression
+                // evaluates to nothing. Wrap the last value-producing
+                // instruction in `return <expr>;` when the function returns.
+                if returns_value && i == last_idx && is_value_expr(instr) {
+                    let leading: String = rendered
+                        .chars()
+                        .take_while(|c| c.is_whitespace())
+                        .collect();
+                    let trimmed = rendered[leading.len()..].to_string();
+                    lines.push(format!("{leading}return {trimmed};"));
+                } else {
+                    lines.push(rendered);
+                }
+            }
+            lines.join("\n")
+        }
         Err(_) => format!("{}// [body: {} bytes]", indent, body.len()),
     }
+}
+
+/// Instructions whose rendered form is an expression (has a value) — these
+/// are the ones we wrap in `return …;` at a function body's tail position.
+/// Statements like `LocalSet` (→ `let x = …;`) or control flow (`if`/`while`)
+/// are excluded.
+fn is_value_expr(i: &Instruction) -> bool {
+    matches!(
+        i,
+        Instruction::LocalGet { .. }
+            | Instruction::Const { .. }
+            | Instruction::Arithmetic { .. }
+            | Instruction::Compare { .. }
+            | Instruction::Call { .. }
+            | Instruction::Some { .. }
+            | Instruction::None
+            | Instruction::Ok { .. }
+            | Instruction::Err { .. }
+            | Instruction::IsErr { .. }
+            | Instruction::StringLiteral { .. }
+            | Instruction::StringLen { .. }
+            | Instruction::ListLen { .. }
+            | Instruction::RecordGet { .. }
+            | Instruction::RecordLiteral { .. }
+    )
 }
 
 fn render_instructions(
@@ -709,8 +758,14 @@ fn parse_stmt(
         return build_match_instruction(value, cases, rev_local);
     }
 
-    // Fall through: expression statement (strip optional trailing semicolon)
-    let expr_str = trimmed.trim_end_matches(';');
+    // Fall through: expression statement (strip optional trailing semicolon).
+    // Also strip a `return ` prefix — we emit `return <expr>;` at the tail of
+    // value-returning functions, but the IR only stores the <expr> (the
+    // implicit-return is handled by Canonical ABI at lift time).
+    let mut expr_str = trimmed.trim_end_matches(';');
+    if let Some(rest) = expr_str.strip_prefix("return ") {
+        expr_str = rest.trim();
+    }
     let instr = parse_expr_str(expr_str, rev_local, rev_func)?;
     *i += 1;
     Ok(instr)
@@ -1022,8 +1077,9 @@ fn func_to_text(
             format!("declare function {}({}){};", name, params_str, result_str)
         }
         FuncSource::Exported(_) => {
+            let returns = func.result.is_some();
             let body_str = match &func.body {
-                Some(b) => render_body(b, "  ", local_names, func_names),
+                Some(b) => render_body(b, "  ", returns, local_names, func_names),
                 None => "  // [no body]".to_string(),
             };
             format!(
@@ -1032,8 +1088,9 @@ fn func_to_text(
             )
         }
         FuncSource::Internal(_) => {
+            let returns = func.result.is_some();
             let body_str = match &func.body {
-                Some(b) => render_body(b, "  ", local_names, func_names),
+                Some(b) => render_body(b, "  ", returns, local_names, func_names),
                 None => "  // [no body]".to_string(),
             };
             format!(
