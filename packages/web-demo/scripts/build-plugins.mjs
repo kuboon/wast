@@ -2,7 +2,7 @@
 // Build the 4 syntax plugin WASM components, then transpile each with jco
 // so the browser can load them alongside the v0.x function demos.
 
-import { mkdir, rm, copyFile } from "node:fs/promises";
+import { mkdir, rm, copyFile, cp } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
@@ -68,3 +68,20 @@ for (const p of plugins) {
 }
 
 console.log(`\nBuilt ${plugins.length} syntax plugins into ${outRoot}`);
+
+// preview2-shim: jco-transpiled plugins use bare specifiers like
+// `@bytecodealliance/preview2-shim/cli`. Copy the browser-flavor ES modules
+// into public/vendor/preview2-shim/ so an import map can resolve them.
+const shimSrc = join(
+  root,
+  "node_modules",
+  "@bytecodealliance",
+  "preview2-shim",
+  "lib",
+  "browser",
+);
+const shimDest = join(here, "..", "public", "vendor", "preview2-shim");
+await rm(shimDest, { recursive: true, force: true });
+await mkdir(shimDest, { recursive: true });
+await cp(shimSrc, shimDest, { recursive: true });
+console.log(`Copied preview2-shim browser build → ${shimDest}`);

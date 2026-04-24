@@ -5,6 +5,25 @@
     <meta name="viewport" content="width=device-width,initial-scale=1" />
     <title>WAST — WASM Component showcase</title>
     <link rel="stylesheet" href="./src/styles.css" />
+    <!--
+      jco-transpiled syntax plugin components import from
+      `@bytecodealliance/preview2-shim/*` (bare specifiers — browsers can't
+      resolve those). Map them to the vendored browser build copied into
+      ./public/vendor/ by scripts/build-plugins.mjs.
+    -->
+    <script type="importmap">
+      {
+        "imports": {
+          "@bytecodealliance/preview2-shim/cli": "./public/vendor/preview2-shim/cli.js",
+          "@bytecodealliance/preview2-shim/clocks": "./public/vendor/preview2-shim/clocks.js",
+          "@bytecodealliance/preview2-shim/filesystem": "./public/vendor/preview2-shim/filesystem.js",
+          "@bytecodealliance/preview2-shim/http": "./public/vendor/preview2-shim/http.js",
+          "@bytecodealliance/preview2-shim/io": "./public/vendor/preview2-shim/io.js",
+          "@bytecodealliance/preview2-shim/random": "./public/vendor/preview2-shim/random.js",
+          "@bytecodealliance/preview2-shim/sockets": "./public/vendor/preview2-shim/sockets.js"
+        }
+      }
+    </script>
   </head>
   <body>
     <header>
