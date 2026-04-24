@@ -127,12 +127,30 @@ pub fn flat_slots(ty_ref: &str, type_map: &TypeMap) -> Result<Vec<&'static str>,
             Ok(out)
         }
         ResolvedType::Result(ok, err) => {
-            // v0.6: both payloads required. Pick the wider/float-compatible
-            // join — restricted to matching core types for simplicity.
-            let ok_core = wit_to_core(&ok)?;
-            let err_core = wit_to_core(&err)?;
-            let payload = join_core_type(ok_core, err_core)?;
-            Ok(vec!["i32", payload])
+            // v0.27: flat form is `disc ++ join(ok_flat, err_flat)`. Each
+            // side may be multi-slot (string, list, record, tuple). Merge
+            // slot-by-slot via join_core_type, extending when one side is
+            // longer.
+            let ok_slots = flat_slots(&ok, type_map)?;
+            let err_slots = flat_slots(&err, type_map)?;
+            let mut joined: Vec<&'static str> = Vec::new();
+            for (idx, s) in ok_slots.iter().enumerate() {
+                if idx < joined.len() {
+                    joined[idx] = join_core_type(joined[idx], s)?;
+                } else {
+                    joined.push(s);
+                }
+            }
+            for (idx, s) in err_slots.iter().enumerate() {
+                if idx < joined.len() {
+                    joined[idx] = join_core_type(joined[idx], s)?;
+                } else {
+                    joined.push(s);
+                }
+            }
+            let mut out = vec!["i32"];
+            out.extend(joined);
+            Ok(out)
         }
         ResolvedType::Record(fields) => {
             // Flat form of a record is the concatenation of its fields' flats.
@@ -1088,12 +1106,53 @@ fn emit_copy_from_local(
             emit_copy_from_local(&inner, src_base + 1, ret_ptr, pay_off, type_map, out)
         }
         ResolvedType::Result(ok, err) => {
-            let cases: [Option<String>; 2] = [Some(ok), Some(err)];
-            emit_variant_like_copy(src_base, ret_ptr, base_offset, &cases, ty, type_map, out)
+            // v0.27: when ok/err have the same WIT type the memory layout is
+            // fully determined — store disc + recurse into that type's copy.
+            // Otherwise fall back to the single-slot helper (which errors on
+            // multi-slot until a real disc branch lands).
+            if ok == err {
+                out.push_str(&format!(
+                    "      local.get {ret_ptr}\n      local.get {src_base}\n      i32.store8 offset={base_offset}\n"
+                ));
+                let (_, pay_align) = size_align(&ok, type_map)?;
+                let pay_off = base_offset + align_up(1, pay_align);
+                emit_copy_from_local(&ok, src_base + 1, ret_ptr, pay_off, type_map, out)
+            } else {
+                let cases: [Option<String>; 2] = [Some(ok), Some(err)];
+                emit_variant_like_copy(src_base, ret_ptr, base_offset, &cases, ty, type_map, out)
+            }
         }
         ResolvedType::Variant(cases) => {
-            let payloads: Vec<Option<String>> = cases.iter().map(|(_, p)| p.clone()).collect();
-            emit_variant_like_copy(src_base, ret_ptr, base_offset, &payloads, ty, type_map, out)
+            // v0.27: when every case's payload has the same type (or there
+            // are no payloads at all), the memory layout is uniform — store
+            // disc + recurse. The "one distinct payload type + any number
+            // of payload-less cases" shape (e.g. `variant msg { text(string),
+            // empty }`) also counts since the payload-less cases have no
+            // layout to clash with.
+            let mut distinct = Vec::new();
+            for (_, p) in &cases {
+                if let Some(p) = p {
+                    if !distinct.iter().any(|d: &String| d == p) {
+                        distinct.push(p.clone());
+                    }
+                }
+            }
+            if distinct.len() <= 1 {
+                out.push_str(&format!(
+                    "      local.get {ret_ptr}\n      local.get {src_base}\n      i32.store8 offset={base_offset}\n"
+                ));
+                if let Some(t) = distinct.into_iter().next() {
+                    let (_, pay_align) = size_align(&t, type_map)?;
+                    let pay_off = base_offset + align_up(1, pay_align);
+                    emit_copy_from_local(&t, src_base + 1, ret_ptr, pay_off, type_map, out)
+                } else {
+                    // All cases payload-less — just the disc.
+                    Ok(())
+                }
+            } else {
+                let payloads: Vec<Option<String>> = cases.iter().map(|(_, p)| p.clone()).collect();
+                emit_variant_like_copy(src_base, ret_ptr, base_offset, &payloads, ty, type_map, out)
+            }
         }
     }
 }
