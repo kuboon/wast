@@ -171,10 +171,8 @@ fn render_body(
                 // evaluates to nothing. Wrap the last value-producing
                 // instruction in `return <expr>;` when the function returns.
                 if returns_value && i == last_idx && is_value_expr(instr) {
-                    let leading: String = rendered
-                        .chars()
-                        .take_while(|c| c.is_whitespace())
-                        .collect();
+                    let leading: String =
+                        rendered.chars().take_while(|c| c.is_whitespace()).collect();
                     let trimmed = rendered[leading.len()..].to_string();
                     lines.push(format!("{leading}return {trimmed};"));
                 } else {
@@ -377,6 +375,29 @@ fn render_instruction(
                 .collect::<Vec<_>>()
                 .join(", ");
             format!("{indent}{{ {pairs} }}")
+        }
+        Instruction::VariantCtor { case, value } => match value {
+            Some(v) => {
+                let val = render_expr(v, local_names, func_names);
+                format!("{indent}{case}({val})")
+            }
+            None => format!("{indent}{case}"),
+        },
+        Instruction::MatchVariant { value, arms } => {
+            let val = render_expr(value, local_names, func_names);
+            let arm_lines = arms
+                .iter()
+                .map(|arm| {
+                    let pattern = match &arm.binding {
+                        Some(b) => format!("{}({})", arm.case, b),
+                        None => arm.case.clone(),
+                    };
+                    let body_str = render_instructions(&arm.body, &inner, local_names, func_names);
+                    format!("{inner}case {pattern}:\n{body_str}")
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            format!("{indent}switch ({val}) {{\n{arm_lines}\n{indent}}}")
         }
         Instruction::MatchOption {
             value,

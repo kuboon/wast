@@ -37,6 +37,10 @@ pub enum ResolvedType {
     Option(String),
     Result(String, String),
     Record(Vec<(String, String)>),
+    /// General variant: `Vec<(case_name, optional_payload_type)>`.
+    /// `option<T>` and `result<T,E>` remain their own variants for
+    /// backward compatibility with existing IR nodes (Some/None/Ok/Err).
+    Variant(Vec<(String, Option<String>)>),
 }
 
 pub fn resolve_type(ty_ref: &str, type_map: &TypeMap) -> Result<ResolvedType, CompileError> {
@@ -62,6 +66,7 @@ pub fn resolve_type(ty_ref: &str, type_map: &TypeMap) -> Result<ResolvedType, Co
         WitType::Option(inner) => Ok(ResolvedType::Option(inner.clone())),
         WitType::Result(ok, err) => Ok(ResolvedType::Result(ok.clone(), err.clone())),
         WitType::Record(fields) => Ok(ResolvedType::Record(fields.clone())),
+        WitType::Variant(cases) => Ok(ResolvedType::Variant(cases.clone())),
         other => Err(CompileError::Unsupported(format!(
             "type {ty_ref:?} with definition {other:?} is not supported yet"
         ))),
@@ -117,6 +122,27 @@ pub fn flat_slots(ty_ref: &str, type_map: &TypeMap) -> Result<Vec<&'static str>,
             }
             Ok(out)
         }
+        ResolvedType::Variant(cases) => {
+            // disc slot + payload flat-join across all cases. Each case's
+            // payload flattens independently; we merge slot-by-slot, widening
+            // per slot using the same rules as Result's flat-join.
+            let mut joined: Vec<&'static str> = Vec::new();
+            for (_, payload_ty) in &cases {
+                if let Some(pty) = payload_ty {
+                    let case_slots = flat_slots(pty, type_map)?;
+                    for (idx, s) in case_slots.iter().enumerate() {
+                        if idx < joined.len() {
+                            joined[idx] = join_core_type(joined[idx], s)?;
+                        } else {
+                            joined.push(s);
+                        }
+                    }
+                }
+            }
+            let mut out = vec!["i32"]; // disc
+            out.extend(joined);
+            Ok(out)
+        }
     }
 }
 
@@ -158,6 +184,12 @@ pub fn size_align(ty_ref: &str, type_map: &TypeMap) -> Result<(usize, usize), Co
         ResolvedType::Option(inner) => variant_layout(&[Some(inner)], type_map),
         ResolvedType::Result(ok, err) => variant_layout(&[Some(ok), Some(err)], type_map),
         ResolvedType::Record(fields) => record_layout(&fields, type_map),
+        ResolvedType::Variant(cases) => {
+            // Reuse the option/result layout helper: it already takes
+            // per-case payload types and computes the right size+align.
+            let payloads: Vec<Option<String>> = cases.iter().map(|(_, p)| p.clone()).collect();
+            variant_layout(&payloads, type_map)
+        }
     }
 }
 
@@ -465,6 +497,45 @@ fn collect_locals_rec(
                     seen,
                 );
             }
+            Instruction::VariantCtor { value, .. } => {
+                if let Some(v) = value {
+                    collect_locals_rec(
+                        std::slice::from_ref(v.as_ref()),
+                        params,
+                        func_map,
+                        type_map,
+                        locals,
+                        seen,
+                    );
+                }
+            }
+            Instruction::MatchVariant { value, arms } => {
+                collect_locals_rec(
+                    std::slice::from_ref(value.as_ref()),
+                    params,
+                    func_map,
+                    type_map,
+                    locals,
+                    seen,
+                );
+                if let Some(variant_ty) = infer_wit_type(value, params, func_map, type_map)
+                    && let Ok(ResolvedType::Variant(cases)) = resolve_type(&variant_ty, type_map)
+                {
+                    for arm in arms {
+                        if let Some(bname) = &arm.binding
+                            && !seen.contains(bname)
+                            && let Some((_, Some(payload_ty))) =
+                                cases.iter().find(|(n, _)| n == &arm.case)
+                        {
+                            seen.insert(bname.clone());
+                            locals.push((bname.clone(), payload_ty.clone()));
+                        }
+                    }
+                }
+                for arm in arms {
+                    collect_locals_rec(&arm.body, params, func_map, type_map, locals, seen);
+                }
+            }
             _ => {}
         }
     }
@@ -520,10 +591,12 @@ pub fn emit_body(
     enum WrapKind {
         PtrLen,
         Record,
+        Variant,
     }
     let wrap_kind = result_ty.and_then(|ty| match resolve_type(ty, type_map) {
         Ok(ResolvedType::String) | Ok(ResolvedType::List(_)) => Some(WrapKind::PtrLen),
         Ok(ResolvedType::Record(_)) => Some(WrapKind::Record),
+        Ok(ResolvedType::Variant(_)) => Some(WrapKind::Variant),
         _ => None,
     });
 
@@ -560,6 +633,16 @@ pub fn emit_body(
                 &mut out,
             )?,
             Some(WrapKind::Record) => emit_record_return_wrap(
+                last,
+                result_ty.unwrap(),
+                &scope,
+                func_map,
+                type_map,
+                literal_table,
+                ret_ptr_slot,
+                &mut out,
+            )?,
+            Some(WrapKind::Variant) => emit_variant_return_wrap(
                 last,
                 result_ty.unwrap(),
                 &scope,
@@ -732,8 +815,103 @@ fn emit_record_return_wrap(
     Ok(())
 }
 
-/// Scan a body for any compound constructor (`Some`/`None`/`Ok`/`Err`) that
-/// would need the synthesized return-pointer local.
+/// Wrap a variant-producing instruction (must be `VariantCtor`) into an
+/// indirect-return sequence: allocate variant size bytes, store the u8 disc
+/// + the selected case's payload (if any), then push the buffer pointer.
+#[allow(clippy::too_many_arguments)]
+fn emit_variant_return_wrap(
+    instr: &Instruction,
+    variant_ty: &str,
+    scope: &[(String, String)],
+    func_map: &FuncMap,
+    type_map: &TypeMap,
+    literal_table: &LiteralTable,
+    ret_ptr_slot: Option<usize>,
+    out: &mut String,
+) -> Result<(), CompileError> {
+    let ret_ptr = ret_ptr_slot.ok_or_else(|| {
+        CompileError::Unsupported("ret_ptr_slot missing for indirect variant return".into())
+    })?;
+
+    let ResolvedType::Variant(cases) = resolve_type(variant_ty, type_map)? else {
+        return Err(CompileError::InvalidInput(format!(
+            "variant return wrap on non-variant type {variant_ty:?}"
+        )));
+    };
+
+    let (case, payload) = match instr {
+        Instruction::VariantCtor { case, value } => (case, value),
+        other => {
+            return Err(CompileError::Unsupported(format!(
+                "variant return from {other:?} not supported yet (v0.17 handles VariantCtor)"
+            )));
+        }
+    };
+
+    let disc = cases.iter().position(|(n, _)| n == case).ok_or_else(|| {
+        CompileError::InvalidInput(format!("case {case:?} not found in variant {variant_ty:?}"))
+    })?;
+    let declared_payload = cases[disc].1.clone();
+    if payload.is_some() && declared_payload.is_none() {
+        return Err(CompileError::InvalidInput(format!(
+            "case {case:?} has no payload but ctor supplied one"
+        )));
+    }
+    if payload.is_none() && declared_payload.is_some() {
+        return Err(CompileError::InvalidInput(format!(
+            "case {case:?} requires payload but ctor omitted it"
+        )));
+    }
+
+    let (size, align) = size_align(variant_ty, type_map)?;
+
+    // Allocate and stash ptr.
+    out.push_str(&format!(
+        "      i32.const 0\n      i32.const 0\n      i32.const {align}\n      i32.const {size}\n      call $cabi_realloc\n      local.set {ret_ptr}\n"
+    ));
+
+    // Store disc (u8 — valid for ≤256 cases).
+    out.push_str(&format!(
+        "      local.get {ret_ptr}\n      i32.const {disc}\n      i32.store8 offset=0\n"
+    ));
+
+    // Store payload when the case carries one.
+    if let (Some(pty), Some(val)) = (declared_payload.as_deref(), payload.as_deref()) {
+        match resolve_type(pty, type_map)? {
+            ResolvedType::Primitive(p) => {
+                let (_, pay_align) = size_align(pty, type_map)?;
+                let payload_offset = align_up(1, pay_align);
+                let (store, align_pow2) = store_op(&p)?;
+                out.push_str(&format!("      local.get {ret_ptr}\n"));
+                emit_instr(
+                    val,
+                    Some(pty),
+                    scope,
+                    func_map,
+                    type_map,
+                    literal_table,
+                    ret_ptr_slot,
+                    out,
+                )?;
+                out.push_str(&format!(
+                    "      {store} offset={payload_offset} align={align_pow2}\n"
+                ));
+            }
+            other => {
+                return Err(CompileError::Unsupported(format!(
+                    "variant case {case:?} with {other:?} payload not supported yet \
+                     (v0.17 handles primitive payloads only)"
+                )));
+            }
+        }
+    }
+
+    out.push_str(&format!("      local.get {ret_ptr}\n"));
+    Ok(())
+}
+
+/// Scan a body for any compound constructor (`Some`/`None`/`Ok`/`Err`/`VariantCtor`)
+/// that would need the synthesized return-pointer local.
 pub fn body_needs_ret_ptr(body: &[Instruction]) -> bool {
     body.iter().any(instr_has_compound_ctor)
 }
@@ -743,7 +921,9 @@ fn instr_has_compound_ctor(i: &Instruction) -> bool {
         Instruction::Some { .. }
         | Instruction::None
         | Instruction::Ok { .. }
-        | Instruction::Err { .. } => true,
+        | Instruction::Err { .. }
+        | Instruction::VariantCtor { .. }
+        | Instruction::RecordLiteral { .. } => true,
         Instruction::If {
             condition,
             then_body,
@@ -1100,6 +1280,139 @@ fn emit_instr(
                 "RecordLiteral outside of return position not supported yet".into(),
             ));
         }
+        Instruction::VariantCtor { .. } => {
+            // Same rationale as RecordLiteral: handled only via
+            // emit_variant_return_wrap at function-return position.
+            return Err(CompileError::Unsupported(
+                "VariantCtor outside of return position not supported yet".into(),
+            ));
+        }
+        Instruction::MatchVariant { value, arms } => {
+            // Restrict to `LocalGet(variant_local)` for the value source —
+            // this lets us read the disc + payload slots directly from the
+            // local's slot range without needing intermediate temps beyond
+            // the arm bindings.
+            let uid = match value.as_ref() {
+                Instruction::LocalGet { uid } => uid,
+                _ => {
+                    return Err(CompileError::Unsupported(
+                        "MatchVariant only supports LocalGet of a variant local for now".into(),
+                    ));
+                }
+            };
+            let (first_idx, slots, ty) = slot_info(uid, scope, type_map)?;
+            let cases = match resolve_type(ty, type_map)? {
+                ResolvedType::Variant(cs) => cs,
+                other => {
+                    return Err(CompileError::InvalidInput(format!(
+                        "MatchVariant applied to non-variant local {uid:?} (resolved {other:?})"
+                    )));
+                }
+            };
+
+            // disc at first_idx; payload flat slots follow at first_idx+1..
+            // For each arm that has a binding, we `local.set` the payload's
+            // first flat slot into that binding before running its body.
+            // Homogeneous assumption (v0.17): all payload-bearing cases
+            // share one flat slot of the same core type.
+            if slots.len() > 2 {
+                return Err(CompileError::Unsupported(format!(
+                    "MatchVariant with multi-slot payloads ({} slots) not supported yet",
+                    slots.len()
+                )));
+            }
+
+            // Pre-populate each arm's binding local with the payload value
+            // (shared across all arms — cheap, since only the arm that runs
+            // will actually read it).
+            for arm in arms {
+                if let Some(bname) = &arm.binding {
+                    let (bidx, bslots, _) = slot_info(bname, scope, type_map)?;
+                    if bslots.len() != 1 {
+                        return Err(CompileError::Unsupported(format!(
+                            "MatchVariant binding {bname:?} of compound type not supported"
+                        )));
+                    }
+                    // Only copy if the variant has a payload slot.
+                    if slots.len() == 2 {
+                        out.push_str(&format!(
+                            "      local.get {}\n      local.set {}\n",
+                            first_idx + 1,
+                            bidx,
+                        ));
+                    }
+                }
+            }
+
+            // Validate arms vs declared cases + build ordered dispatch list
+            // (one entry per declared case, so br_table maps disc → arm).
+            let arm_for_case: Vec<Option<&wast_pattern_analyzer::MatchArm>> = cases
+                .iter()
+                .map(|(cname, _)| arms.iter().find(|a| &a.case == cname))
+                .collect();
+            for a in arms {
+                if !cases.iter().any(|(n, _)| n == &a.case) {
+                    return Err(CompileError::InvalidInput(format!(
+                        "MatchVariant arm references unknown case {:?}",
+                        a.case
+                    )));
+                }
+            }
+
+            // Emit an if-chain over disc. Each iteration compares disc to
+            // the case index and runs the matched arm's body; the last else
+            // branch runs the final arm (or unreachable for exhaustive).
+            let result_clause_info = branch_result_clause(expected, type_map)?;
+            let (result_clause, child_expected) = result_clause_info;
+
+            // Build: if (disc == 0) { arm0 } else if (disc == 1) { arm1 } ...
+            // Use nested if-else chain so each typed if can return the
+            // function's expected value on all paths.
+            let emit_case = |idx: usize,
+                             arm: Option<&wast_pattern_analyzer::MatchArm>,
+                             out: &mut String|
+             -> Result<(), CompileError> {
+                match arm {
+                    Some(a) => {
+                        for instr in &a.body {
+                            emit_instr(
+                                instr,
+                                child_expected,
+                                scope,
+                                func_map,
+                                type_map,
+                                literal_table,
+                                ret_ptr_slot,
+                                out,
+                            )?;
+                        }
+                    }
+                    None => {
+                        return Err(CompileError::InvalidInput(format!(
+                            "MatchVariant missing arm for case index {idx}"
+                        )));
+                    }
+                }
+                Ok(())
+            };
+
+            let n_cases = cases.len();
+            for idx in 0..n_cases.saturating_sub(1) {
+                out.push_str(&format!(
+                    "      local.get {}\n      i32.const {}\n      i32.eq\n      if{}\n",
+                    first_idx, idx, result_clause,
+                ));
+                emit_case(idx, arm_for_case[idx], out)?;
+                out.push_str("      else\n");
+            }
+            // Last case: falls into the innermost else without its own if.
+            if n_cases > 0 {
+                emit_case(n_cases - 1, arm_for_case[n_cases - 1], out)?;
+            }
+            for _ in 0..n_cases.saturating_sub(1) {
+                out.push_str("      end\n");
+            }
+        }
         Instruction::Some { value } => {
             emit_variant_ctor(
                 expected,
@@ -1413,7 +1726,8 @@ fn branch_result_clause<'a>(
                 | ResolvedType::List(_)
                 | ResolvedType::Option(_)
                 | ResolvedType::Result(_, _)
-                | ResolvedType::Record(_) => "i32".to_string(),
+                | ResolvedType::Record(_)
+                | ResolvedType::Variant(_) => "i32".to_string(),
             };
             Ok((format!(" (result {core})"), Some(ty)))
         }

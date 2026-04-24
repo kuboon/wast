@@ -160,7 +160,9 @@ fn serialize_wit_type(t: &WitType) -> String {
             let parts = cases
                 .iter()
                 .map(|(n, ty)| {
-                    let ty_json = ty.as_deref().map_or("null".to_string(), |t| format!("\"{t}\""));
+                    let ty_json = ty
+                        .as_deref()
+                        .map_or("null".to_string(), |t| format!("\"{t}\""));
                     format!("[\"{n}\", {ty_json}]")
                 })
                 .collect::<Vec<_>>()
@@ -741,10 +743,7 @@ fn make_point_demo() -> Demo {
                     params: vec![("x".into(), "u32".into()), ("y".into(), "u32".into())],
                     result: Some("point".into()),
                     body: Some(serialize_body(&[Instruction::RecordLiteral {
-                        fields: vec![
-                            ("x".into(), local("x")),
-                            ("y".into(), local("y")),
-                        ],
+                        fields: vec![("x".into(), local("x")), ("y".into(), local("y"))],
                     }])),
                 },
             }],

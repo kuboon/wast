@@ -130,8 +130,28 @@ pub enum Instruction {
         fields: Vec<(String, Instruction)>,
     },
 
+    // General variant operations (option/result are their own dedicated IR
+    // nodes; these handle user-declared variant types).
+    VariantCtor {
+        case: String,
+        value: Option<Box<Instruction>>,
+    },
+    MatchVariant {
+        value: Box<Instruction>,
+        arms: Vec<MatchArm>,
+    },
+
     // Other
     Nop,
+}
+
+/// One arm of a `MatchVariant`. `binding` is the local name the payload gets
+/// bound to inside `body`; `None` when the case has no payload.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MatchArm {
+    pub case: String,
+    pub binding: Option<String>,
+    pub body: Vec<Instruction>,
 }
 
 /// A detected pattern match in the instruction body.

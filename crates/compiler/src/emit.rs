@@ -312,22 +312,39 @@ fn synthesize_world(db: &WastDb, type_map: &TypeMap) -> Result<String, CompileEr
     let mut out = String::new();
     out.push_str("package wast:generated;\n\nworld generated {\n");
 
-    // Type declarations: records must be named in WIT. Syntax:
+    // Type declarations: records and variants must be named in WIT.
     //   record NAME { field: ty, … }
-    // (no `type NAME = record { … }` alias form — that's not valid WIT).
+    //   variant NAME { case, case(ty), … }
     for row in &db.types {
-        if let wast_types::WitType::Record(fields) = &row.def.definition {
-            let fields_wit = fields
-                .iter()
-                .map(|(fname, ftype)| {
-                    format_wit_type(ftype, type_map).map(|t| format!("{fname}: {t}"))
-                })
-                .collect::<Result<Vec<_>, _>>()?
-                .join(", ");
-            out.push_str(&format!(
-                "  record {name} {{ {fields_wit} }}\n",
-                name = wit_name(&row.uid)
-            ));
+        match &row.def.definition {
+            wast_types::WitType::Record(fields) => {
+                let fields_wit = fields
+                    .iter()
+                    .map(|(fname, ftype)| {
+                        format_wit_type(ftype, type_map).map(|t| format!("{fname}: {t}"))
+                    })
+                    .collect::<Result<Vec<_>, _>>()?
+                    .join(", ");
+                out.push_str(&format!(
+                    "  record {name} {{ {fields_wit} }}\n",
+                    name = wit_name(&row.uid)
+                ));
+            }
+            wast_types::WitType::Variant(cases) => {
+                let cases_wit = cases
+                    .iter()
+                    .map(|(cname, payload)| match payload {
+                        Some(ty) => format_wit_type(ty, type_map).map(|t| format!("{cname}({t})")),
+                        None => Ok(cname.clone()),
+                    })
+                    .collect::<Result<Vec<_>, _>>()?
+                    .join(", ");
+                out.push_str(&format!(
+                    "  variant {name} {{ {cases_wit} }}\n",
+                    name = wit_name(&row.uid)
+                ));
+            }
+            _ => {}
         }
     }
 
@@ -391,9 +408,10 @@ fn format_wit_type(ty: &str, type_map: &TypeMap) -> Result<String, CompileError>
             format_wit_type(&ok, type_map)?,
             format_wit_type(&err, type_map)?
         )),
-        // Records must be named (WIT disallows anonymous inline records at
-        // use sites). `ty` is the uid declared via `type foo = record { … }`.
-        ResolvedType::Record(_) => Ok(wit_name(ty)),
+        // Records and variants must be named (WIT disallows anonymous inline
+        // forms at use sites). `ty` is the uid declared via a top-level
+        // `record NAME { … }` / `variant NAME { … }` block.
+        ResolvedType::Record(_) | ResolvedType::Variant(_) => Ok(wit_name(ty)),
     }
 }
 

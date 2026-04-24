@@ -302,6 +302,39 @@ fn render_instruction(instr: &Instruction, indent: &str) -> String {
                 .join("\n");
             format!("{indent}(record.literal\n{fields_str})")
         }
+        Instruction::VariantCtor { case, value } => match value {
+            Some(v) => format!(
+                "{}(variant.case ${}\n{})",
+                indent,
+                case,
+                render_instruction(v, &inner)
+            ),
+            None => format!("{}(variant.case ${})", indent, case),
+        },
+        Instruction::MatchVariant { value, arms } => {
+            let val_str = render_instruction(value, &inner);
+            let arms_str = arms
+                .iter()
+                .map(|arm| {
+                    let body_str = render_instructions(&arm.body, &format!("{}  ", inner));
+                    match &arm.binding {
+                        Some(b) => format!(
+                            "{inner}(case ${case} ${binding}\n{body}\n{inner})",
+                            case = arm.case,
+                            binding = b,
+                            body = body_str
+                        ),
+                        None => format!(
+                            "{inner}(case ${case}\n{body}\n{inner})",
+                            case = arm.case,
+                            body = body_str
+                        ),
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            format!("{indent}(match_variant\n{val_str}\n{arms_str})")
+        }
         Instruction::MatchOption {
             value,
             some_binding,

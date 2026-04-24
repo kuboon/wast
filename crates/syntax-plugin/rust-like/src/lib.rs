@@ -328,6 +328,29 @@ fn render_instruction(
                 .join(", ");
             format!("{indent}Record {{ {pairs} }}")
         }
+        Instruction::VariantCtor { case, value } => match value {
+            Some(v) => {
+                let val = render_expr(v, local_names, func_names);
+                format!("{indent}{case}({val})")
+            }
+            None => format!("{indent}{case}"),
+        },
+        Instruction::MatchVariant { value, arms } => {
+            let val = render_expr(value, local_names, func_names);
+            let arm_lines = arms
+                .iter()
+                .map(|arm| {
+                    let pattern = match &arm.binding {
+                        Some(b) => format!("{}({})", arm.case, b),
+                        None => arm.case.clone(),
+                    };
+                    let body_str = render_instructions(&arm.body, &inner, local_names, func_names);
+                    format!("{inner}{pattern} => {{\n{body_str}\n{inner}}}")
+                })
+                .collect::<Vec<_>>()
+                .join(",\n");
+            format!("{indent}match {val} {{\n{arm_lines}\n{indent}}}")
+        }
         Instruction::MatchOption {
             value,
             some_binding,
