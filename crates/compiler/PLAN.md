@@ -1,6 +1,6 @@
 # compiler — wast → wasm Component コンパイラ
 
-**現状: v0.29 完了**。numeric / control flow / calls / option / result / string / list / record / variant / tuple / char / enum / flags / ListLiteral / deep nested compound / exported resource (constructor + method + static + dtor) / imported resource / LocalGet of compound in field position / `option<T>` 多スロット / `result<T, T>` や homogeneous variant の多スロットコピー / heterogeneous result (i32/i64) の MatchResult まで端から端まで動く。
+**現状: v0.30 完了**。numeric / control flow / calls / option / result / string / list / record / variant / tuple / char / enum / flags / ListLiteral / deep nested compound / exported resource / imported resource / LocalGet of compound in field position / `option<T>` 多スロット / homogeneous result/variant 多スロットコピー / heterogeneous result (MatchResult) / heterogeneous variant (MatchVariant) ともに i32/i64 narrow 対応まで端から端まで動く。
 
 ## 全体アーキテクチャ (v0.11 以降)
 
@@ -112,11 +112,10 @@ Compound 戻り or body 内に Some/None/Ok/Err があるとき、**param+local 
 
 ## 残タスク (優先順)
 
-1. **MatchVariant の heterogeneous 対応** — v0.29 は MatchResult のみ。MatchVariant も同じ narrow 分岐パターンで対応できる。
-2. **暗黙 widen** — `LocalGet(u32)` を u64 コンテキストで使った時の `i64.extend_i32_u` 自動挿入。今はエラーにならず validation 失敗になる。
-3. **heterogeneous memory copy** — `result<string, u32>` のように case ごとに memory layout が異なるケースの emit_copy_from_local。disc 分岐 + case 別 copy が必要。
-4. **f32/f64 reinterpret / demote** — v0.29 の narrow は i32/i64 のみ対応。float 混在は別途。
-5. **imported resource の拡張** — v0.28 は constructor + method のみ。imported static method や imported resource を record/tuple の field で扱うテストも欲しい。
+1. **暗黙 widen** — `LocalGet(u32)` を u64 コンテキストで使った時の `i64.extend_i32_u` 自動挿入。今はエラーにならず validation 失敗になる。Construct 系 (Some/Ok/Err/VariantCtor) の payload widen も同じ構造。
+2. **heterogeneous memory copy** — `result<string, u32>` のように case ごとに memory layout が異なるケースの emit_copy_from_local。disc 分岐 + case 別 copy が必要。
+3. **f32/f64 reinterpret / demote** — heterogeneous_narrow_op は i32/i64 のみ対応。float 混在 (`result<f32, i32>` 等) は別途。
+4. **imported resource の拡張** — v0.28 は constructor + method のみ。imported static method や imported resource を record/tuple の field で扱うテストも欲しい。
 
 ## 設計原則 (変わらず)
 

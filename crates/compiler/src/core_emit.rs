@@ -2519,30 +2519,8 @@ fn emit_instr(
                 )));
             }
 
-            // Pre-populate each arm's binding local with the payload value
-            // (shared across all arms — cheap, since only the arm that runs
-            // will actually read it).
-            for arm in arms {
-                if let Some(bname) = &arm.binding {
-                    let (bidx, bslots, _) = slot_info(bname, scope, type_map)?;
-                    if bslots.len() != 1 {
-                        return Err(CompileError::Unsupported(format!(
-                            "MatchVariant binding {bname:?} of compound type not supported"
-                        )));
-                    }
-                    // Only copy if the variant has a payload slot.
-                    if slots.len() == 2 {
-                        out.push_str(&format!(
-                            "      local.get {}\n      local.set {}\n",
-                            first_idx + 1,
-                            bidx,
-                        ));
-                    }
-                }
-            }
-
             // Validate arms vs declared cases + build ordered dispatch list
-            // (one entry per declared case, so br_table maps disc → arm).
+            // (one entry per declared case).
             let arm_for_case: Vec<Option<&wast_pattern_analyzer::MatchArm>> = cases
                 .iter()
                 .map(|(cname, _)| arms.iter().find(|a| &a.case == cname))
@@ -2556,39 +2534,66 @@ fn emit_instr(
                 }
             }
 
-            // Emit an if-chain over disc. Each iteration compares disc to
-            // the case index and runs the matched arm's body; the last else
-            // branch runs the final arm (or unreachable for exhaustive).
+            // The flat payload slot (if any) is the Canonical-ABI join of
+            // every case's payload core type. Work out what the join is so we
+            // can emit per-arm narrows when a binding's declared type is
+            // narrower than the joined slot.
+            let joined_payload_core: Option<&'static str> = if slots.len() == 2 {
+                Some(slots[1])
+            } else {
+                None
+            };
+
             let result_clause_info = branch_result_clause(expected, type_map)?;
             let (result_clause, child_expected) = result_clause_info;
 
-            // Build: if (disc == 0) { arm0 } else if (disc == 1) { arm1 } ...
-            // Use nested if-else chain so each typed if can return the
-            // function's expected value on all paths.
+            // Emit the arm body, prefixed by a narrow+set that populates the
+            // arm's binding (if any) from the shared joined payload slot.
+            // Doing this per-arm (instead of pre-populating once before the
+            // branch) lets us narrow from a wider joined slot to a narrower
+            // binding type, e.g. `variant { a(u32), b(u64) }` binding `a` as
+            // u32 with joined slot i64.
             let emit_case = |idx: usize,
                              arm: Option<&wast_pattern_analyzer::MatchArm>,
                              out: &mut String|
              -> Result<(), CompileError> {
-                match arm {
-                    Some(a) => {
-                        for instr in &a.body {
-                            emit_instr(
-                                instr,
-                                child_expected,
-                                scope,
-                                func_map,
-                                type_map,
-                                literal_table,
-                                ret_ptr_slot,
-                                out,
-                            )?;
-                        }
-                    }
-                    None => {
-                        return Err(CompileError::InvalidInput(format!(
-                            "MatchVariant missing arm for case index {idx}"
+                let Some(a) = arm else {
+                    return Err(CompileError::InvalidInput(format!(
+                        "MatchVariant missing arm for case index {idx}"
+                    )));
+                };
+                if let Some(bname) = &a.binding {
+                    let (bidx, bslots, bty) = slot_info(bname, scope, type_map)?;
+                    if bslots.len() != 1 {
+                        return Err(CompileError::Unsupported(format!(
+                            "MatchVariant binding {bname:?} of compound type not supported"
                         )));
                     }
+                    let joined = joined_payload_core.ok_or_else(|| {
+                        CompileError::InvalidInput(format!(
+                            "MatchVariant arm {:?} binds {bname:?} but variant has no payload slot",
+                            a.case
+                        ))
+                    })?;
+                    let bcore = wit_to_core(bty)?;
+                    out.push_str(&format!("      local.get {}\n", first_idx + 1));
+                    if joined != bcore {
+                        let narrow = heterogeneous_narrow_op(joined, bcore)?;
+                        out.push_str(&format!("      {narrow}\n"));
+                    }
+                    out.push_str(&format!("      local.set {bidx}\n"));
+                }
+                for instr in &a.body {
+                    emit_instr(
+                        instr,
+                        child_expected,
+                        scope,
+                        func_map,
+                        type_map,
+                        literal_table,
+                        ret_ptr_slot,
+                        out,
+                    )?;
                 }
                 Ok(())
             };
