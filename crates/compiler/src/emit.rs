@@ -25,17 +25,41 @@ use crate::error::CompileError;
 /// heap at or past the end of the collected literals.
 const STATIC_DATA_BASE: usize = 1024;
 
-/// Qualified interface path where resource declarations live. wit-component's
-/// Legacy name mangling expects resource-member exports to be prefixed with
-/// `<package>/<interface>#` and resource intrinsic imports to use module
+/// Qualified interface path where *exported* resource declarations live.
+/// Legacy mangling: member core exports are prefixed with
+/// `<package>/<interface>#` and resource intrinsic imports use module
 /// `"[export]<package>/<interface>"`.
-const RESOURCE_IFACE_PATH: &str = "wast:generated/generated-iface";
+const EXPORTED_RESOURCE_IFACE_PATH: &str = "wast:generated/generated-iface";
+
+/// Qualified interface path where *imported* resource declarations live.
+/// Imported resource intrinsics + member imports use this as the core import
+/// module name directly (no `[export]` prefix, no `#` in field names).
+const IMPORTED_RESOURCE_IFACE_PATH: &str = "wast:generated/imported-iface";
 
 fn is_resource_member_export(name: &str) -> bool {
     name.starts_with("[constructor]")
         || name.starts_with("[method]")
         || name.starts_with("[static]")
         || name.starts_with("[dtor]")
+}
+
+/// Parse a resource-member func name into (resource_uid, op_suffix). `op`
+/// is empty for constructors/dtors, non-empty (after the dot) for methods
+/// and statics.
+fn parse_resource_member(name: &str) -> Option<(&str, &str)> {
+    if let Some(r) = name.strip_prefix("[constructor]") {
+        return Some((r, ""));
+    }
+    if let Some(r) = name.strip_prefix("[dtor]") {
+        return Some((r, ""));
+    }
+    for prefix in ["[method]", "[static]"] {
+        if let Some(rest) = name.strip_prefix(prefix) {
+            let (r, op) = rest.split_once('.').unwrap_or((rest, ""));
+            return Some((r, op));
+        }
+    }
+    None
 }
 
 /// Memory + `cabi_realloc` infrastructure injected into every non-empty core
@@ -160,6 +184,16 @@ fn emit_core_module(
     type_map: &TypeMap,
     literal_table: &LiteralTable,
 ) -> Result<String, CompileError> {
+    // Classify each resource type as imported vs exported so we pick the
+    // right Canonical-ABI name-mangling convention for each.
+    let is_imported_resource = |uid: &str| -> bool {
+        db.types.iter().any(|r| {
+            r.uid == uid
+                && matches!(r.def.definition, wast_types::WitType::Resource)
+                && matches!(r.def.source, wast_types::TypeSource::Imported(_))
+        })
+    };
+
     let mut imports = String::new();
     for row in db
         .funcs
@@ -170,41 +204,51 @@ fn emit_core_module(
         let mangled = mangle(name);
         let core_params = flat_param_clauses(&row.func.params, type_map)?;
         let core_result = flat_result_clause(row.func.result.as_deref(), type_map)?;
+
+        // Resource-member imports ([constructor]R, [method]R.op, [static]R.op)
+        // come from the imported interface's module, not "$root". Regular
+        // top-level imports still use "$root".
+        let module = match parse_resource_member(name) {
+            Some((r, _)) if is_imported_resource(r) => IMPORTED_RESOURCE_IFACE_PATH.to_string(),
+            _ => "$root".to_string(),
+        };
         imports.push_str(&format!(
-            "  (import \"$root\" \"{name}\" (func ${mangled} {core_params} {core_result}))\n"
+            "  (import \"{module}\" \"{name}\" (func ${mangled} {core_params} {core_result}))\n"
         ));
     }
 
-    // For each declared resource type, import the Canonical-ABI intrinsics
-    // `[resource-new]R` / `[resource-rep]R` / `[resource-drop]R`. When any
-    // resource is declared, we put the resource(s) inside an exported
-    // interface `wast:generated/generated-iface` (wit-component's resource
-    // plumbing requires an interface); the import module string is then
-    // `"[export]wast:generated/generated-iface"`.
-    let has_resources = db
-        .types
-        .iter()
-        .any(|r| matches!(r.def.definition, wast_types::WitType::Resource));
-    let iface_import_module = if has_resources {
-        format!("[export]{RESOURCE_IFACE_PATH}")
-    } else {
-        String::new()
-    };
+    // For each declared resource type, import the Canonical-ABI intrinsics.
+    // - Exported resources live inside `generated-iface`; intrinsics are
+    //   imported from module `"[export]wast:generated/generated-iface"`.
+    //   All three of [resource-new]/[resource-rep]/[resource-drop] are
+    //   needed — the guest owns the handle table.
+    // - Imported resources live inside `imported-iface`; only
+    //   [resource-drop] is imported (the guest can only drop handles it
+    //   received). Module path is `"wast:generated/imported-iface"` — no
+    //   `[export]` prefix.
     for row in &db.types {
         if !matches!(row.def.definition, wast_types::WitType::Resource) {
             continue;
         }
         let r = &row.uid;
         let m = mangle(r);
-        imports.push_str(&format!(
-            "  (import \"{iface_import_module}\" \"[resource-new]{r}\" (func ${m}__new (param i32) (result i32)))\n"
-        ));
-        imports.push_str(&format!(
-            "  (import \"{iface_import_module}\" \"[resource-rep]{r}\" (func ${m}__rep (param i32) (result i32)))\n"
-        ));
-        imports.push_str(&format!(
-            "  (import \"{iface_import_module}\" \"[resource-drop]{r}\" (func ${m}__drop (param i32)))\n"
-        ));
+        if matches!(row.def.source, wast_types::TypeSource::Imported(_)) {
+            let module = IMPORTED_RESOURCE_IFACE_PATH;
+            imports.push_str(&format!(
+                "  (import \"{module}\" \"[resource-drop]{r}\" (func ${m}__drop (param i32)))\n"
+            ));
+        } else {
+            let module = format!("[export]{EXPORTED_RESOURCE_IFACE_PATH}");
+            imports.push_str(&format!(
+                "  (import \"{module}\" \"[resource-new]{r}\" (func ${m}__new (param i32) (result i32)))\n"
+            ));
+            imports.push_str(&format!(
+                "  (import \"{module}\" \"[resource-rep]{r}\" (func ${m}__rep (param i32) (result i32)))\n"
+            ));
+            imports.push_str(&format!(
+                "  (import \"{module}\" \"[resource-drop]{r}\" (func ${m}__drop (param i32)))\n"
+            ));
+        }
     }
 
     let mut body_funcs = String::new();
@@ -321,7 +365,7 @@ fn emit_core_func(
             // `[static]R.op`) must be qualified with the interface path for
             // wit-component to match them to the WIT world.
             let n = if is_resource_member_export(n) {
-                format!("{RESOURCE_IFACE_PATH}#{n}")
+                format!("{EXPORTED_RESOURCE_IFACE_PATH}#{n}")
             } else {
                 n.clone()
             };
@@ -418,11 +462,14 @@ fn synthesize_world(db: &WastDb, type_map: &TypeMap) -> Result<String, CompileEr
     let mut out = String::new();
     out.push_str("package wast:generated;\n\n");
 
-    // Collect type declarations into a shared body (resources need to be in
-    // an interface for wit-component's decoder; putting every named type in
-    // one interface keeps the world simple).
-    let mut iface_body = String::new();
-    let mut has_resources = false;
+    // Split resources by source: imported resources live in a separate
+    // interface from the rest. Named primitives (record/variant/enum/flags)
+    // + any exported resource stay in `generated-iface`.
+    let mut exported_iface_body = String::new();
+    let mut imported_iface_body = String::new();
+    let mut has_exported_resources = false;
+    let mut has_imported_resources = false;
+
     for row in &db.types {
         match &row.def.definition {
             wast_types::WitType::Record(fields) => {
@@ -433,7 +480,7 @@ fn synthesize_world(db: &WastDb, type_map: &TypeMap) -> Result<String, CompileEr
                     })
                     .collect::<Result<Vec<_>, _>>()?
                     .join(", ");
-                iface_body.push_str(&format!(
+                exported_iface_body.push_str(&format!(
                     "    record {name} {{ {fields_wit} }}\n",
                     name = wit_name(&row.uid)
                 ));
@@ -447,55 +494,77 @@ fn synthesize_world(db: &WastDb, type_map: &TypeMap) -> Result<String, CompileEr
                     })
                     .collect::<Result<Vec<_>, _>>()?
                     .join(", ");
-                iface_body.push_str(&format!(
+                exported_iface_body.push_str(&format!(
                     "    variant {name} {{ {cases_wit} }}\n",
                     name = wit_name(&row.uid)
                 ));
             }
             wast_types::WitType::Enum(cases) => {
                 let cases_wit = cases.join(", ");
-                iface_body.push_str(&format!(
+                exported_iface_body.push_str(&format!(
                     "    enum {name} {{ {cases_wit} }}\n",
                     name = wit_name(&row.uid)
                 ));
             }
             wast_types::WitType::Flags(names) => {
                 let names_wit = names.join(", ");
-                iface_body.push_str(&format!(
+                exported_iface_body.push_str(&format!(
                     "    flags {name} {{ {names_wit} }}\n",
                     name = wit_name(&row.uid)
                 ));
             }
             wast_types::WitType::Resource => {
-                has_resources = true;
-                iface_body.push_str(&format!(
+                let imported = matches!(row.def.source, wast_types::TypeSource::Imported(_));
+                let target = if imported {
+                    has_imported_resources = true;
+                    &mut imported_iface_body
+                } else {
+                    has_exported_resources = true;
+                    &mut exported_iface_body
+                };
+                target.push_str(&format!(
                     "    resource {name} {{\n",
                     name = wit_name(&row.uid)
                 ));
                 if let Some(members) = resource_members.get(&row.uid) {
                     for m in members {
-                        iface_body.push_str("  ");
-                        iface_body.push_str(&format_resource_member(m, type_map)?);
+                        target.push_str("  ");
+                        target.push_str(&format_resource_member(m, type_map)?);
                     }
                 }
-                iface_body.push_str("    }\n");
+                target.push_str("    }\n");
             }
             _ => {}
         }
     }
 
-    // When we have resources, declare them in a self-contained interface that
-    // the world exports. Otherwise keep the legacy "types in the world body"
-    // form for backward compatibility with existing tests.
-    if has_resources {
+    // Interfaces must be declared at the package (outside the world) in WIT.
+    if has_exported_resources || !exported_iface_body.is_empty() && has_imported_resources {
+        // When there are imported resources, put all named types inside
+        // generated-iface so the world stays consistent. Exported-resource
+        // case also uses this path.
+    }
+
+    let use_exported_iface = has_exported_resources;
+    let use_imported_iface = has_imported_resources;
+
+    if use_exported_iface {
         out.push_str("interface generated-iface {\n");
-        out.push_str(&iface_body);
-        out.push_str("}\n\nworld generated {\n");
+        out.push_str(&exported_iface_body);
+        out.push_str("}\n\n");
+    }
+    if use_imported_iface {
+        out.push_str("interface imported-iface {\n");
+        out.push_str(&imported_iface_body);
+        out.push_str("}\n\n");
+    }
+
+    out.push_str("world generated {\n");
+    if use_exported_iface {
         out.push_str("  export generated-iface;\n");
     } else {
-        out.push_str("world generated {\n");
-        // Re-indent from 4 spaces back to 2 for top-level world members.
-        for line in iface_body.lines() {
+        // Legacy world-level type decls (no resources) — re-indent 4→2.
+        for line in exported_iface_body.lines() {
             if line.is_empty() {
                 out.push('\n');
             } else if let Some(stripped) = line.strip_prefix("    ") {
@@ -504,6 +573,9 @@ fn synthesize_world(db: &WastDb, type_map: &TypeMap) -> Result<String, CompileEr
                 out.push_str(&format!("{line}\n"));
             }
         }
+    }
+    if use_imported_iface {
+        out.push_str("  import imported-iface;\n");
     }
 
     for row in top_level {

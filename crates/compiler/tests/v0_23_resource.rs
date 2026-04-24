@@ -13,7 +13,7 @@ use wast_types::{
 };
 
 wasmtime::component::bindgen!({
-    path: "tests/wit",
+    path: "tests/wit/exported",
     world: "generated",
 });
 

@@ -1,0 +1,13 @@
+package wast:generated;
+
+interface imported-iface {
+  resource counter {
+    constructor(init: u32);
+    get: func() -> u32;
+  }
+}
+
+world generated {
+  import imported-iface;
+  export roundtrip: func(n: u32) -> u32;
+}
