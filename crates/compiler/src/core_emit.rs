@@ -1070,11 +1070,91 @@ fn emit_copy_from_local(
             ));
             Ok(())
         }
-        other => Err(CompileError::Unsupported(format!(
-            "LocalGet copy of {other:?} not supported yet — \
-             option/result/variant sources need runtime disc handling"
-        ))),
+        ResolvedType::Option(inner) => {
+            // Flat: [disc_i32, payload]. Memory: [u8 disc @ +0, payload @
+            // align_up(1, align_of(inner))]. We unconditionally copy the
+            // payload slot — it's "don't care" when disc=0 (none), so
+            // readers that only consume on disc=1 see the right value.
+            emit_variant_like_copy(
+                src_base,
+                ret_ptr,
+                base_offset,
+                std::slice::from_ref(&Some(inner)),
+                ty,
+                type_map,
+                out,
+            )
+        }
+        ResolvedType::Result(ok, err) => {
+            let cases: [Option<String>; 2] = [Some(ok), Some(err)];
+            emit_variant_like_copy(src_base, ret_ptr, base_offset, &cases, ty, type_map, out)
+        }
+        ResolvedType::Variant(cases) => {
+            let payloads: Vec<Option<String>> = cases.iter().map(|(_, p)| p.clone()).collect();
+            emit_variant_like_copy(src_base, ret_ptr, base_offset, &payloads, ty, type_map, out)
+        }
     }
+}
+
+/// Shared copy-to-memory emit for Option/Result/Variant source locals. Each
+/// source flat is `[disc_i32, ...payload_slots]`; memory is `[u8 disc,
+/// payload at align_up(1, max_case_align)]`. Restricted to a single-slot
+/// payload (the current homogeneous-join compiler limit).
+fn emit_variant_like_copy(
+    src_base: usize,
+    ret_ptr: usize,
+    base_offset: usize,
+    payload_tys: &[Option<String>],
+    outer_ty: &str,
+    type_map: &TypeMap,
+    out: &mut String,
+) -> Result<(), CompileError> {
+    // Disc is u8 (valid for ≤256 cases — all our current compounds).
+    out.push_str(&format!(
+        "      local.get {ret_ptr}\n      local.get {src_base}\n      i32.store8 offset={base_offset}\n"
+    ));
+
+    let flat = flat_slots(outer_ty, type_map)?;
+    if flat.len() == 1 {
+        // Pure-disc (e.g., all variant cases are unit) — done.
+        return Ok(());
+    }
+    if flat.len() > 2 {
+        return Err(CompileError::Unsupported(format!(
+            "LocalGet copy of {outer_ty:?} with multi-slot payload not supported \
+             (current compiler limit: homogeneous single-slot join)"
+        )));
+    }
+
+    // Compute payload byte offset from the max alignment across cases.
+    let mut max_align = 1usize;
+    for p in payload_tys {
+        if let Some(p) = p {
+            let (_, a) = size_align(p, type_map)?;
+            max_align = max_align.max(a);
+        }
+    }
+    let pay_off = base_offset + align_up(1, max_align);
+
+    // The payload is stored using the flat-joined core type's natural store
+    // op. `flat[1]` is the joined type (e.g. "i64" for a result<u32, u64>).
+    let core_ty = flat[1];
+    let (store, align) = match core_ty {
+        "i32" => ("i32.store", 4),
+        "i64" => ("i64.store", 8),
+        "f32" => ("f32.store", 4),
+        "f64" => ("f64.store", 8),
+        other => {
+            return Err(CompileError::Unsupported(format!(
+                "LocalGet copy payload core type {other:?}"
+            )));
+        }
+    };
+    out.push_str(&format!(
+        "      local.get {ret_ptr}\n      local.get {}\n      {store} offset={pay_off} align={align}\n",
+        src_base + 1
+    ));
+    Ok(())
 }
 
 /// Store `value` (of type `ty`) at `[ret_ptr + base_offset ..]` using the
@@ -1289,11 +1369,17 @@ fn emit_field_store(
             ))),
         },
         ResolvedType::Variant(cases) => {
+            // v0.25: LocalGet of a variant-typed local copies disc + joined
+            // payload slot directly.
+            if let Instruction::LocalGet { uid } = value {
+                let (src_base, _, _) = slot_info(uid, scope, type_map)?;
+                return emit_copy_from_local(ty, src_base, ret_ptr, base_offset, type_map, out);
+            }
             let (case, payload) = match value {
                 Instruction::VariantCtor { case, value } => (case, value),
                 other => {
                     return Err(CompileError::Unsupported(format!(
-                        "nested variant field only supports VariantCtor source, got {other:?}"
+                        "nested variant field source {other:?} not supported"
                     )));
                 }
             };
@@ -1330,6 +1416,11 @@ fn emit_field_store(
             Ok(())
         }
         ResolvedType::Option(inner) => {
+            // v0.25: LocalGet of an option<T> local copies disc + payload.
+            if let Instruction::LocalGet { uid } = value {
+                let (src_base, _, _) = slot_info(uid, scope, type_map)?;
+                return emit_copy_from_local(ty, src_base, ret_ptr, base_offset, type_map, out);
+            }
             // u8 disc at base + 0; payload at base + align_up(1, inner_align)
             match value {
                 Instruction::None => {
@@ -1359,20 +1450,25 @@ fn emit_field_store(
                 }
                 other => {
                     return Err(CompileError::Unsupported(format!(
-                        "nested option field only supports Some/None, got {other:?}"
+                        "nested option field source {other:?} not supported"
                     )));
                 }
             }
             Ok(())
         }
         ResolvedType::Result(ok_ty, err_ty) => {
+            // v0.25: LocalGet of a result<T, E> local copies disc + payload.
+            if let Instruction::LocalGet { uid } = value {
+                let (src_base, _, _) = slot_info(uid, scope, type_map)?;
+                return emit_copy_from_local(ty, src_base, ret_ptr, base_offset, type_map, out);
+            }
             // u8 disc (0=ok, 1=err) + payload
             let (pay_ty, pay_val, disc) = match value {
                 Instruction::Ok { value: v } => (ok_ty.clone(), v.as_ref(), 0u32),
                 Instruction::Err { value: v } => (err_ty.clone(), v.as_ref(), 1u32),
                 other => {
                     return Err(CompileError::Unsupported(format!(
-                        "nested result field only supports Ok/Err, got {other:?}"
+                        "nested result field source {other:?} not supported"
                     )));
                 }
             };
