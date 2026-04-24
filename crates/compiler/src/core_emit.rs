@@ -820,6 +820,109 @@ fn emit_ptrlen_return_wrap(
     Ok(())
 }
 
+/// Store `value` (of type `ty`) at `[ret_ptr + base_offset ..]` using the
+/// type's Canonical-ABI memory layout. Shared by all compound return-wrap
+/// emitters so nested `string`/`list`/primitive fields can be handled
+/// uniformly.
+///
+/// v0.20 scope: primitive fields (any source), string/list fields (via
+/// LocalGet of a matching local, or — for string only — StringLiteral).
+/// Nested record/variant/tuple/option/result fields still deferred.
+#[allow(clippy::too_many_arguments)]
+fn emit_field_store(
+    value: &Instruction,
+    ty: &str,
+    ret_ptr: usize,
+    base_offset: usize,
+    scope: &[(String, String)],
+    func_map: &FuncMap,
+    type_map: &TypeMap,
+    literal_table: &LiteralTable,
+    ret_ptr_slot: Option<usize>,
+    out: &mut String,
+) -> Result<(), CompileError> {
+    let resolved = resolve_type(ty, type_map)?;
+    match resolved {
+        ResolvedType::Primitive(p) => {
+            let (store, align_pow2) = store_op(&p)?;
+            out.push_str(&format!("      local.get {ret_ptr}\n"));
+            emit_instr(
+                value,
+                Some(ty),
+                scope,
+                func_map,
+                type_map,
+                literal_table,
+                ret_ptr_slot,
+                out,
+            )?;
+            out.push_str(&format!(
+                "      {store} offset={base_offset} align={align_pow2}\n"
+            ));
+            Ok(())
+        }
+        ResolvedType::String | ResolvedType::List(_) => {
+            // Both are (ptr, len) in memory — two i32 stores at offsets
+            // base and base+4.
+            let (ptr_src, len_src) = match value {
+                Instruction::LocalGet { uid } => {
+                    let (src_base, _slots, _) = slot_info(uid, scope, type_map)?;
+                    (SlotSource::Local(src_base), SlotSource::Local(src_base + 1))
+                }
+                Instruction::StringLiteral { bytes } if matches!(resolved, ResolvedType::String) => {
+                    let offset = literal_table.get(bytes).ok_or_else(|| {
+                        CompileError::InvalidInput(
+                            "StringLiteral missing from literal table".into(),
+                        )
+                    })?;
+                    (SlotSource::Const(offset as u64), SlotSource::Const(bytes.len() as u64))
+                }
+                other => {
+                    return Err(CompileError::Unsupported(format!(
+                        "nested string/list field only supports LocalGet or StringLiteral as source, got {other:?}"
+                    )));
+                }
+            };
+            // ptr slot at base_offset + 0
+            out.push_str(&format!("      local.get {ret_ptr}\n"));
+            emit_slot_source(&ptr_src, "i32", out);
+            out.push_str(&format!(
+                "      i32.store offset={base_offset} align=4\n"
+            ));
+            // len slot at base_offset + 4
+            let len_off = base_offset + 4;
+            out.push_str(&format!("      local.get {ret_ptr}\n"));
+            emit_slot_source(&len_src, "i32", out);
+            out.push_str(&format!(
+                "      i32.store offset={len_off} align=4\n"
+            ));
+            Ok(())
+        }
+        other => Err(CompileError::Unsupported(format!(
+            "nested field of type {ty:?} (resolved {other:?}) not supported yet — \
+             v0.20 handles primitive / string / list"
+        ))),
+    }
+}
+
+enum SlotSource {
+    Local(usize),
+    Const(u64),
+}
+
+fn emit_slot_source(src: &SlotSource, core_ty: &str, out: &mut String) {
+    match src {
+        SlotSource::Local(idx) => out.push_str(&format!("      local.get {idx}\n")),
+        SlotSource::Const(v) => {
+            if core_ty == "i64" {
+                out.push_str(&format!("      i64.const {v}\n"));
+            } else {
+                out.push_str(&format!("      i32.const {v}\n"));
+            }
+        }
+    }
+}
+
 /// Wrap a record-producing instruction (must be `RecordLiteral`) into an
 /// indirect-return sequence: allocate record size bytes, store each field at
 /// its Canonical-ABI offset, then push the buffer pointer.
@@ -875,31 +978,18 @@ fn emit_record_return_wrap(
                     "RecordLiteral missing field {fname:?} for record {record_ty:?}"
                 ))
             })?;
-        // v0.16: primitive fields only.
-        match resolve_type(ftype, type_map)? {
-            ResolvedType::Primitive(p) => {
-                let (store, align_pow2) = store_op(&p)?;
-                out.push_str(&format!("      local.get {ret_ptr}\n"));
-                emit_instr(
-                    value,
-                    Some(ftype),
-                    scope,
-                    func_map,
-                    type_map,
-                    literal_table,
-                    ret_ptr_slot,
-                    out,
-                )?;
-                out.push_str(&format!(
-                    "      {store} offset={field_offset} align={align_pow2}\n"
-                ));
-            }
-            other => {
-                return Err(CompileError::Unsupported(format!(
-                    "record field {fname:?} of type {ftype:?} (resolved {other:?}) not supported yet — v0.16 handles primitives only"
-                )));
-            }
-        }
+        emit_field_store(
+            value,
+            ftype,
+            ret_ptr,
+            field_offset,
+            scope,
+            func_map,
+            type_map,
+            literal_table,
+            ret_ptr_slot,
+            out,
+        )?;
     }
 
     // Push the buffer pointer as the core function's return value.
@@ -969,33 +1059,20 @@ fn emit_variant_return_wrap(
 
     // Store payload when the case carries one.
     if let (Some(pty), Some(val)) = (declared_payload.as_deref(), payload.as_deref()) {
-        match resolve_type(pty, type_map)? {
-            ResolvedType::Primitive(p) => {
-                let (_, pay_align) = size_align(pty, type_map)?;
-                let payload_offset = align_up(1, pay_align);
-                let (store, align_pow2) = store_op(&p)?;
-                out.push_str(&format!("      local.get {ret_ptr}\n"));
-                emit_instr(
-                    val,
-                    Some(pty),
-                    scope,
-                    func_map,
-                    type_map,
-                    literal_table,
-                    ret_ptr_slot,
-                    out,
-                )?;
-                out.push_str(&format!(
-                    "      {store} offset={payload_offset} align={align_pow2}\n"
-                ));
-            }
-            other => {
-                return Err(CompileError::Unsupported(format!(
-                    "variant case {case:?} with {other:?} payload not supported yet \
-                     (v0.17 handles primitive payloads only)"
-                )));
-            }
-        }
+        let (_, pay_align) = size_align(pty, type_map)?;
+        let payload_offset = align_up(1, pay_align);
+        emit_field_store(
+            val,
+            pty,
+            ret_ptr,
+            payload_offset,
+            scope,
+            func_map,
+            type_map,
+            literal_table,
+            ret_ptr_slot,
+            out,
+        )?;
     }
 
     out.push_str(&format!("      local.get {ret_ptr}\n"));
@@ -1060,30 +1137,18 @@ fn emit_tuple_return_wrap(
 
     for (i, value) in values.iter().enumerate() {
         let (offset, ftype) = record_field_info(&synthetic_fields, &i.to_string(), type_map)?;
-        match resolve_type(&ftype, type_map)? {
-            ResolvedType::Primitive(p) => {
-                let (store, align_pow2) = store_op(&p)?;
-                out.push_str(&format!("      local.get {ret_ptr}\n"));
-                emit_instr(
-                    value,
-                    Some(&ftype),
-                    scope,
-                    func_map,
-                    type_map,
-                    literal_table,
-                    ret_ptr_slot,
-                    out,
-                )?;
-                out.push_str(&format!(
-                    "      {store} offset={offset} align={align_pow2}\n"
-                ));
-            }
-            other => {
-                return Err(CompileError::Unsupported(format!(
-                    "tuple element {i} of type {ftype:?} (resolved {other:?}) not supported yet — v0.18 handles primitive elements only"
-                )));
-            }
-        }
+        emit_field_store(
+            value,
+            &ftype,
+            ret_ptr,
+            offset,
+            scope,
+            func_map,
+            type_map,
+            literal_table,
+            ret_ptr_slot,
+            out,
+        )?;
     }
 
     out.push_str(&format!("      local.get {ret_ptr}\n"));

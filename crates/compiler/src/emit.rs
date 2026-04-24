@@ -568,6 +568,27 @@ fn collect_literals_rec(
                 collect_literals_rec(ok_body, out, seen);
                 collect_literals_rec(err_body, out, seen);
             }
+            Instruction::MatchVariant { value, arms } => {
+                collect_literals_rec(std::slice::from_ref(value.as_ref()), out, seen);
+                for arm in arms {
+                    collect_literals_rec(&arm.body, out, seen);
+                }
+            }
+            Instruction::RecordLiteral { fields } => {
+                for (_, v) in fields {
+                    collect_literals_rec(std::slice::from_ref(v), out, seen);
+                }
+            }
+            Instruction::TupleLiteral { values } => {
+                for v in values {
+                    collect_literals_rec(std::slice::from_ref(v), out, seen);
+                }
+            }
+            Instruction::VariantCtor { value, .. } => {
+                if let Some(v) = value {
+                    collect_literals_rec(std::slice::from_ref(v.as_ref()), out, seen);
+                }
+            }
             _ => {}
         }
     }

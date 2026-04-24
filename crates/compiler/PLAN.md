@@ -1,6 +1,6 @@
 # compiler — wast → wasm Component コンパイラ
 
-**現状: v0.16 完了**。numeric / control flow / calls / option / result / string / list / record まで端から端まで動く。以降は variant (一般ケース) / tuple / resource / nested compound / ListLiteral。
+**現状: v0.20 完了**。numeric / control flow / calls / option / result / string / list / record / variant / tuple / char / enum / flags / nested compound (string/list fields) まで端から端まで動く。以降は ListLiteral / resource。
 
 ## 全体アーキテクチャ (v0.11 以降)
 
