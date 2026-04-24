@@ -536,44 +536,51 @@ fn func_to_text(
         .cloned()
         .unwrap_or_else(|| func_uid.to_string());
 
-    let params_str = func
+    // rbs-inline annotation: one `#: (t1, t2) -> ret` comment line above the
+    // `def`. Ruby's `def name(p1, p2)` carries no types on its own, so the
+    // annotation is the only place the signature types appear.
+    let param_types: Vec<String> = func
         .params
         .iter()
-        .map(|(param_uid, type_ref)| {
-            let pname = local_names
-                .get(param_uid.as_str())
+        .map(|(_, t)| resolve_type_ref(t, types, type_names))
+        .collect();
+    let param_names: Vec<String> = func
+        .params
+        .iter()
+        .map(|(uid, _)| {
+            local_names
+                .get(uid.as_str())
                 .cloned()
-                .unwrap_or_else(|| param_uid.clone());
-            let tname = resolve_type_ref(type_ref, types, type_names);
-            format!("{}: {}", pname, tname)
+                .unwrap_or_else(|| uid.clone())
         })
-        .collect::<Vec<_>>()
-        .join(", ");
-
+        .collect();
     let result_str = match &func.result {
-        Some(type_ref) => format!(" -> {}", resolve_type_ref(type_ref, types, type_names)),
-        None => String::new(),
+        Some(t) => format!(" -> {}", resolve_type_ref(t, types, type_names)),
+        None => " -> void".to_string(),
     };
+    let annotation = format!("#: ({}){}", param_types.join(", "), result_str);
 
-    let signature = format!("{}({}){}", name, params_str, result_str);
+    let def_line = format!("def {}({})", name, param_names.join(", "));
 
     match &func.source {
         FuncSource::Imported(_) => {
-            format!("# import {}", signature)
+            // Imports have no body in wast; render as an annotated stub so a
+            // later `from_text` can still recover the full signature.
+            format!("{}\n# import\n{}; end", annotation, def_line)
         }
         FuncSource::Exported(_) => {
             let body_str = match &func.body {
                 Some(b) => render_body(b, "  ", local_names, func_names),
                 None => "  # [no body]".to_string(),
             };
-            format!("# export\ndef {}\n{}\nend", signature, body_str)
+            format!("{}\n# export\n{}\n{}\nend", annotation, def_line, body_str)
         }
         FuncSource::Internal(_) => {
             let body_str = match &func.body {
                 Some(b) => render_body(b, "  ", local_names, func_names),
                 None => "  # [no body]".to_string(),
             };
-            format!("def {}\n{}\nend", signature, body_str)
+            format!("{}\n{}\n{}\nend", annotation, def_line, body_str)
         }
     }
 }
@@ -625,54 +632,85 @@ fn parse_type_ref_str(
     }
 }
 
-/// Parse a signature string like `name(p1: type1, p2: type2) -> ret`
-fn parse_signature(sig: &str) -> Option<ParsedFunc> {
+/// Parse a `def` header — `name(p1, p2)` — with no type annotations. Types
+/// come from the preceding rbs-inline `#:` line (see `parse_rbs_annotation`).
+fn parse_def_header(sig: &str) -> Option<(String, Vec<String>)> {
     let sig = sig.trim();
-
     let paren_open = sig.find('(')?;
     let name = sig[..paren_open].trim().to_string();
     if name.is_empty() {
         return None;
     }
-
-    // Find matching closing paren
     let rest = &sig[paren_open + 1..];
-    let paren_close = rest.find(')')?;
-    let params_str = &rest[..paren_close];
-    let after_params = rest[paren_close + 1..].trim();
-
-    let params: Vec<(String, String)> = if params_str.trim().is_empty() {
+    let paren_close = rest.rfind(')')?;
+    let params_str = rest[..paren_close].trim();
+    let pnames: Vec<String> = if params_str.is_empty() {
         vec![]
     } else {
         params_str
             .split(',')
-            .map(|p| {
-                let p = p.trim();
-                if let Some(colon) = p.find(':') {
-                    (
-                        p[..colon].trim().to_string(),
-                        p[colon + 1..].trim().to_string(),
-                    )
-                } else {
-                    (p.to_string(), "unknown".to_string())
-                }
-            })
+            .map(|p| p.trim().to_string())
             .collect()
     };
+    Some((name, pnames))
+}
 
-    let result_type = if after_params.starts_with("->") {
-        Some(after_params[2..].trim().to_string())
+/// Parse a single rbs-inline annotation line like `#: (u32, u32) -> u32` or
+/// `#: () -> void`. Returns the param types and the result type (None when
+/// the return is `void` or omitted).
+fn parse_rbs_annotation(line: &str) -> Option<(Vec<String>, Option<String>)> {
+    let rest = line.trim().strip_prefix("#:")?.trim_start();
+    let paren_open = rest.find('(')?;
+    let after_name = &rest[paren_open..]; // skip anything before '(' (should be nothing)
+    let inner_start = after_name.find('(')? + 1;
+    let inner_end = after_name.rfind(')')?;
+    if inner_end <= inner_start {
+        // empty params
+    }
+    let inner = &after_name[inner_start..inner_end];
+    let types: Vec<String> = if inner.trim().is_empty() {
+        vec![]
+    } else {
+        inner.split(',').map(|s| s.trim().to_string()).collect()
+    };
+    let tail = after_name[inner_end + 1..].trim();
+    let result = if let Some(r) = tail.strip_prefix("->") {
+        let r = r.trim();
+        if r.is_empty() || r == "void" {
+            None
+        } else {
+            Some(r.to_string())
+        }
     } else {
         None
     };
+    Some((types, result))
+}
 
-    Some(ParsedFunc {
+/// Combine an rbs-inline annotation's types with a `def` header's param
+/// names. Missing entries fall back to "unknown" so `parse_type_ref_str`
+/// still produces something.
+fn combine_def_and_annotation(
+    name: String,
+    pnames: Vec<String>,
+    annotation: Option<(Vec<String>, Option<String>)>,
+) -> ParsedFunc {
+    let (ptypes, result_type) = annotation.unwrap_or_else(|| (vec![], None));
+    let params: Vec<(String, String)> = pnames
+        .into_iter()
+        .enumerate()
+        .map(|(i, pname)| {
+            let ty = ptypes.get(i).cloned().unwrap_or_else(|| "unknown".into());
+            (pname, ty)
+        })
+        .collect();
+    ParsedFunc {
         name,
         params,
         result_type,
         _is_import: false,
         _is_export: false,
-    })
+    }
 }
 
 fn generate_uid() -> String {
@@ -755,78 +793,63 @@ impl bindings::exports::wast::core::syntax_plugin::Guest for Component {
         let lines: Vec<&str> = text.lines().collect();
         let mut i = 0;
 
+        // State carried forward across lines:
+        //   - `pending_annotation`: the most recent `#: (...) -> ...` line
+        //     since the last `def`; consumed by the next `def`.
+        //   - `next_is_import` / `next_is_export`: whether the current
+        //     annotation/def pair is tagged with `# import` / `# export`.
+        let mut pending_annotation: Option<(Vec<String>, Option<String>)> = None;
+        let mut next_is_import = false;
+        let mut next_is_export = false;
+
         while i < lines.len() {
             let line = lines[i].trim();
 
-            // Skip empty lines and pure comments that aren't import/export markers
             if line.is_empty() {
                 i += 1;
                 continue;
             }
 
-            // Handle import comment: # import name(params) -> result
-            if line.starts_with("# import ") {
-                let sig_str = &line["# import ".len()..];
-                match parse_signature(sig_str) {
-                    Some(parsed) => {
-                        let (func_uid, source_uid) =
-                            resolve_func_uid(&parsed.name, &rev_func, &existing_by_source, true);
-
-                        let params = resolve_params(
-                            &parsed.params,
-                            &rev_local,
-                            &existing.types,
-                            &type_names,
-                            &mut new_syms_local,
-                        );
-                        let result = parsed
-                            .result_type
-                            .as_ref()
-                            .map(|r| parse_type_ref_str(r, &existing.types, &type_names));
-
-                        // Preserve existing body if available
-                        let body = existing_by_source
-                            .get(&source_uid)
-                            .and_then(|(_, f)| f.body.clone())
-                            .or_else(|| existing_funcs.get(&func_uid).and_then(|f| f.body.clone()));
-
-                        funcs.push((
-                            func_uid,
-                            WastFunc {
-                                source: FuncSource::Imported(source_uid),
-                                params,
-                                result,
-                                body,
-                            },
-                        ));
-                    }
-                    None => {
-                        errors.push(WastError {
-                            message: format!(
-                                "parse_error: cannot parse import signature: {}",
-                                line
-                            ),
-                            location: Some(format!("line {}", i + 1)),
-                        });
-                    }
+            // rbs-inline annotation line — remember for the next def.
+            if line.starts_with("#:") {
+                match parse_rbs_annotation(line) {
+                    Some(a) => pending_annotation = Some(a),
+                    None => errors.push(WastError {
+                        message: format!("parse_error: cannot parse rbs annotation: {}", line),
+                        location: Some(format!("line {}", i + 1)),
+                    }),
                 }
                 i += 1;
                 continue;
             }
 
-            // Handle export marker + def
-            if line == "# export" {
+            if line == "# import" {
+                next_is_import = true;
                 i += 1;
-                // Next non-empty line should be a def
-                while i < lines.len() && lines[i].trim().is_empty() {
-                    i += 1;
-                }
-                if i < lines.len() && lines[i].trim().starts_with("def ") {
-                    let def_line = lines[i].trim();
-                    let sig_str = &def_line["def ".len()..];
-                    match parse_signature(sig_str) {
-                        Some(parsed) => {
-                            // Consume body until `end`
+                continue;
+            }
+            if line == "# export" {
+                next_is_export = true;
+                i += 1;
+                continue;
+            }
+
+            // `def name(...)` line. For imported stubs we emitted
+            // `def name(...); end` on a single line.
+            if line.starts_with("def ") {
+                let (header, after_end) = if let Some(idx) = line.find("; end") {
+                    (&line["def ".len()..idx], true)
+                } else {
+                    (&line["def ".len()..], false)
+                };
+
+                match parse_def_header(header) {
+                    Some((name, pnames)) => {
+                        let parsed =
+                            combine_def_and_annotation(name, pnames, pending_annotation.take());
+
+                        // Walk the body to `end` unless it's a one-liner stub.
+                        if !after_end {
                             i += 1;
                             while i < lines.len() && lines[i].trim() != "end" {
                                 i += 1;
@@ -834,82 +857,16 @@ impl bindings::exports::wast::core::syntax_plugin::Guest for Component {
                             if i < lines.len() {
                                 i += 1; // skip 'end'
                             }
-
-                            let (func_uid, source_uid) = resolve_func_uid(
-                                &parsed.name,
-                                &rev_func,
-                                &existing_by_source,
-                                false,
-                            );
-
-                            let params = resolve_params(
-                                &parsed.params,
-                                &rev_local,
-                                &existing.types,
-                                &type_names,
-                                &mut new_syms_local,
-                            );
-                            let result = parsed
-                                .result_type
-                                .as_ref()
-                                .map(|r| parse_type_ref_str(r, &existing.types, &type_names));
-
-                            let body = existing_by_source
-                                .get(&source_uid)
-                                .and_then(|(_, f)| f.body.clone())
-                                .or_else(|| {
-                                    existing_funcs.get(&func_uid).and_then(|f| f.body.clone())
-                                });
-
-                            // Ensure sym entry exists
-                            ensure_func_sym(&source_uid, &parsed.name, &mut new_syms_internal);
-
-                            funcs.push((
-                                func_uid,
-                                WastFunc {
-                                    source: FuncSource::Exported(source_uid),
-                                    params,
-                                    result,
-                                    body,
-                                },
-                            ));
-                        }
-                        None => {
-                            errors.push(WastError {
-                                message: format!(
-                                    "parse_error: cannot parse def after export: {}",
-                                    def_line
-                                ),
-                                location: Some(format!("line {}", i + 1)),
-                            });
+                        } else {
                             i += 1;
                         }
-                    }
-                } else {
-                    errors.push(WastError {
-                        message: "parse_error: expected 'def' after '# export'".to_string(),
-                        location: Some(format!("line {}", i + 1)),
-                    });
-                }
-                continue;
-            }
 
-            // Handle plain def (internal)
-            if line.starts_with("def ") {
-                let sig_str = &line["def ".len()..];
-                match parse_signature(sig_str) {
-                    Some(parsed) => {
-                        // Consume body until `end`
-                        i += 1;
-                        while i < lines.len() && lines[i].trim() != "end" {
-                            i += 1;
-                        }
-                        if i < lines.len() {
-                            i += 1; // skip 'end'
-                        }
-
-                        let (func_uid, source_uid) =
-                            resolve_func_uid(&parsed.name, &rev_func, &existing_by_source, false);
+                        let (func_uid, source_uid) = resolve_func_uid(
+                            &parsed.name,
+                            &rev_func,
+                            &existing_by_source,
+                            next_is_import,
+                        );
 
                         let params = resolve_params(
                             &parsed.params,
@@ -928,21 +885,33 @@ impl bindings::exports::wast::core::syntax_plugin::Guest for Component {
                             .and_then(|(_, f)| f.body.clone())
                             .or_else(|| existing_funcs.get(&func_uid).and_then(|f| f.body.clone()));
 
-                        ensure_func_sym(&source_uid, &parsed.name, &mut new_syms_internal);
+                        let source = if next_is_import {
+                            FuncSource::Imported(source_uid.clone())
+                        } else if next_is_export {
+                            FuncSource::Exported(source_uid.clone())
+                        } else {
+                            FuncSource::Internal(source_uid.clone())
+                        };
+                        if matches!(source, FuncSource::Exported(_) | FuncSource::Internal(_)) {
+                            ensure_func_sym(&source_uid, &parsed.name, &mut new_syms_internal);
+                        }
 
                         funcs.push((
                             func_uid,
                             WastFunc {
-                                source: FuncSource::Internal(source_uid),
+                                source,
                                 params,
                                 result,
                                 body,
                             },
                         ));
+
+                        next_is_import = false;
+                        next_is_export = false;
                     }
                     None => {
                         errors.push(WastError {
-                            message: format!("parse_error: cannot parse def: {}", line),
+                            message: format!("parse_error: cannot parse def header: {}", header),
                             location: Some(format!("line {}", i + 1)),
                         });
                         i += 1;
@@ -951,13 +920,12 @@ impl bindings::exports::wast::core::syntax_plugin::Guest for Component {
                 continue;
             }
 
-            // Skip comment lines that aren't structural
+            // Skip other comment lines.
             if line.starts_with('#') {
                 i += 1;
                 continue;
             }
 
-            // Unrecognized line
             errors.push(WastError {
                 message: format!("parse_error: unexpected line: {}", line),
                 location: Some(format!("line {}", i + 1)),
@@ -1136,7 +1104,7 @@ mod tests {
         let comp = make_test_component();
         let text = Component::to_text(comp);
         assert!(
-            text.contains("def my_func(param_one: u32) -> u32"),
+            text.contains("#: (u32) -> u32\ndef my_func(param_one)"),
             "internal func signature: {}",
             text
         );
@@ -1146,8 +1114,11 @@ mod tests {
     fn test_to_text_import_format() {
         let comp = make_test_component();
         let text = Component::to_text(comp);
+        // Imports: `#: (u32) -> void\n# import\ndef imported_fn(param_two); end`.
+        // The result type is `void` because the test-fixture import has no
+        // return; real imports with a result get `-> T` instead.
         assert!(
-            text.contains("# import imported_fn(param_two: u32)"),
+            text.contains("#: (u32) -> void\n# import\ndef imported_fn(param_two); end"),
             "import signature: {}",
             text
         );
@@ -1158,7 +1129,7 @@ mod tests {
         let comp = make_test_component();
         let text = Component::to_text(comp);
         assert!(
-            text.contains("# export\ndef exported_fn() -> u32"),
+            text.contains("#: () -> u32\n# export\ndef exported_fn()"),
             "export signature: {}",
             text
         );
