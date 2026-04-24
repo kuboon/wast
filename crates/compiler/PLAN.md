@@ -1,6 +1,6 @@
 # compiler — wast → wasm Component コンパイラ
 
-**現状: v0.28 完了**。numeric / control flow / calls / option / result / string / list / record / variant / tuple / char / enum / flags / ListLiteral / deep nested compound / exported resource (constructor + method + static + dtor) / imported resource / LocalGet of compound in field position / `option<T>` 多スロット / `result<T, T>` や homogeneous variant の多スロットコピー まで端から端まで動く。
+**現状: v0.29 完了**。numeric / control flow / calls / option / result / string / list / record / variant / tuple / char / enum / flags / ListLiteral / deep nested compound / exported resource (constructor + method + static + dtor) / imported resource / LocalGet of compound in field position / `option<T>` 多スロット / `result<T, T>` や homogeneous variant の多スロットコピー / heterogeneous result (i32/i64) の MatchResult まで端から端まで動く。
 
 ## 全体アーキテクチャ (v0.11 以降)
 
@@ -112,8 +112,11 @@ Compound 戻り or body 内に Some/None/Ok/Err があるとき、**param+local 
 
 ## 残タスク (優先順)
 
-1. **真 heterogeneous result/variant** — case ごとに memory layout が異なる (`result<string, u32>`, `variant { text(string), count(u32) }` 等)。flat-join の wrap/extend/truncate + memory copy の disc 分岐、両方必要。v0.9 で「同型のみ」と明記した制限の解除。
-2. **imported resource の method/static/dtor 拡張** — v0.28 は constructor + method のみ。imported dtor (呼び出しは不要だが drop しない runtime は現実的でない) とか、imported static method の test も整えたい。imported resource を record/tuple の field で扱うテストも欠けている。
+1. **MatchVariant の heterogeneous 対応** — v0.29 は MatchResult のみ。MatchVariant も同じ narrow 分岐パターンで対応できる。
+2. **暗黙 widen** — `LocalGet(u32)` を u64 コンテキストで使った時の `i64.extend_i32_u` 自動挿入。今はエラーにならず validation 失敗になる。
+3. **heterogeneous memory copy** — `result<string, u32>` のように case ごとに memory layout が異なるケースの emit_copy_from_local。disc 分岐 + case 別 copy が必要。
+4. **f32/f64 reinterpret / demote** — v0.29 の narrow は i32/i64 のみ対応。float 混在は別途。
+5. **imported resource の拡張** — v0.28 は constructor + method のみ。imported static method や imported resource を record/tuple の field で扱うテストも欲しい。
 
 ## 設計原則 (変わらず)
 

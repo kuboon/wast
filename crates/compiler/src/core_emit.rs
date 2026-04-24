@@ -206,6 +206,24 @@ pub fn flat_slots(ty_ref: &str, type_map: &TypeMap) -> Result<Vec<&'static str>,
     }
 }
 
+/// Narrow a value on the stack from a joined (wider) core type back to the
+/// case's declared core type. Used at lift/destructure time for
+/// heterogeneous Result/Variant cases. v0.29 scope is i32/i64 only; f/i
+/// reinterpret combos and f32/f64 demote are deferred.
+fn heterogeneous_narrow_op(
+    from: &'static str,
+    to: &'static str,
+) -> Result<&'static str, CompileError> {
+    match (from, to) {
+        (a, b) if a == b => Ok(""),
+        ("i64", "i32") => Ok("i32.wrap_i64"),
+        _ => Err(CompileError::Unsupported(format!(
+            "heterogeneous narrow from {from} to {to} not supported yet — \
+             v0.29 handles i64→i32 only (wrap_i64)"
+        ))),
+    }
+}
+
 fn join_core_type(a: &'static str, b: &'static str) -> Result<&'static str, CompileError> {
     // Canonical ABI flat-join, restricted to v0.6 primitive payloads:
     if a == b {
@@ -2713,9 +2731,13 @@ fn emit_instr(
             err_binding,
             err_body,
         } => {
-            // Emit value → pushes [disc, payload]. Canonical-ABI flat-join
-            // makes the payload a single core type; if ok/err have matching
-            // core types we can `tee` payload into both bindings in one go.
+            // Emit value → pushes [disc, payload]. The payload's core type is
+            // the Canonical-ABI flat-join of ok_ty and err_ty. When the two
+            // sides share a core type (homogeneous), we tee+set both bindings
+            // in one go and branch on disc. When they differ (v0.29:
+            // currently limited to i32/i64), we set the wider binding first
+            // (its type already matches the joined slot), then in the other
+            // branch narrow the wider local into the narrower binding.
             let (ok_idx, ok_slots, ok_ty) = slot_info(ok_binding, scope, type_map)?;
             let (err_idx, err_slots, err_ty) = slot_info(err_binding, scope, type_map)?;
             if ok_slots.len() != 1 || err_slots.len() != 1 {
@@ -2723,12 +2745,9 @@ fn emit_instr(
                     "MatchResult binding of compound type not supported yet".into(),
                 ));
             }
-            if wit_to_core(ok_ty)? != wit_to_core(err_ty)? {
-                return Err(CompileError::Unsupported(format!(
-                    "MatchResult with heterogeneous ok/err core types \
-                     (ok={ok_ty}, err={err_ty}) not supported yet"
-                )));
-            }
+            let ok_core = wit_to_core(ok_ty)?;
+            let err_core = wit_to_core(err_ty)?;
+
             emit_instr(
                 value,
                 None,
@@ -2739,39 +2758,101 @@ fn emit_instr(
                 ret_ptr_slot,
                 out,
             )?;
-            // Seed both bindings: tee copies to one while keeping on stack.
-            out.push_str(&format!("      local.tee {err_idx}\n"));
-            out.push_str(&format!("      local.set {ok_idx}\n"));
 
-            // disc != 0 → err_body, disc == 0 → ok_body.
             let (result_clause, child_expected) = branch_result_clause(expected, type_map)?;
-            out.push_str(&format!("      if{result_clause}\n"));
-            for i in err_body {
-                emit_instr(
-                    i,
-                    child_expected,
-                    scope,
-                    func_map,
-                    type_map,
-                    literal_table,
-                    ret_ptr_slot,
-                    out,
+
+            if ok_core == err_core {
+                // Homogeneous: tee both bindings from the single payload slot.
+                out.push_str(&format!("      local.tee {err_idx}\n"));
+                out.push_str(&format!("      local.set {ok_idx}\n"));
+                out.push_str(&format!("      if{result_clause}\n"));
+                for i in err_body {
+                    emit_instr(
+                        i,
+                        child_expected,
+                        scope,
+                        func_map,
+                        type_map,
+                        literal_table,
+                        ret_ptr_slot,
+                        out,
+                    )?;
+                }
+                out.push_str("      else\n");
+                for i in ok_body {
+                    emit_instr(
+                        i,
+                        child_expected,
+                        scope,
+                        func_map,
+                        type_map,
+                        literal_table,
+                        ret_ptr_slot,
+                        out,
+                    )?;
+                }
+                out.push_str("      end\n");
+            } else {
+                // Heterogeneous: the flat payload slot is the join of
+                // ok_core and err_core. Set the wider binding first (its
+                // type matches the joined slot). In the other branch, read
+                // the wider local, narrow, then set the narrower binding.
+                let joined = join_core_type(ok_core, err_core)?;
+                let narrow = heterogeneous_narrow_op(
+                    joined,
+                    if joined == ok_core { err_core } else { ok_core },
                 )?;
+
+                let (wider_idx, narrower_idx, narrower_is_err) = if joined == ok_core {
+                    (ok_idx, err_idx, true)
+                } else {
+                    (err_idx, ok_idx, false)
+                };
+
+                // Stack top is the joined payload; set it into the wider
+                // binding. Stack: [disc].
+                out.push_str(&format!("      local.set {wider_idx}\n"));
+                out.push_str(&format!("      if{result_clause}\n"));
+                // err branch
+                if narrower_is_err {
+                    // err is the narrower one — narrow from wider into err.
+                    out.push_str(&format!("      local.get {wider_idx}\n"));
+                    out.push_str(&format!("      {narrow}\n"));
+                    out.push_str(&format!("      local.set {narrower_idx}\n"));
+                }
+                for i in err_body {
+                    emit_instr(
+                        i,
+                        child_expected,
+                        scope,
+                        func_map,
+                        type_map,
+                        literal_table,
+                        ret_ptr_slot,
+                        out,
+                    )?;
+                }
+                out.push_str("      else\n");
+                // ok branch
+                if !narrower_is_err {
+                    out.push_str(&format!("      local.get {wider_idx}\n"));
+                    out.push_str(&format!("      {narrow}\n"));
+                    out.push_str(&format!("      local.set {narrower_idx}\n"));
+                }
+                for i in ok_body {
+                    emit_instr(
+                        i,
+                        child_expected,
+                        scope,
+                        func_map,
+                        type_map,
+                        literal_table,
+                        ret_ptr_slot,
+                        out,
+                    )?;
+                }
+                out.push_str("      end\n");
             }
-            out.push_str("      else\n");
-            for i in ok_body {
-                emit_instr(
-                    i,
-                    child_expected,
-                    scope,
-                    func_map,
-                    type_map,
-                    literal_table,
-                    ret_ptr_slot,
-                    out,
-                )?;
-            }
-            out.push_str("      end\n");
         }
         Instruction::StringLiteral { bytes } => {
             // Literal bytes live in a pre-allocated data segment assigned by
