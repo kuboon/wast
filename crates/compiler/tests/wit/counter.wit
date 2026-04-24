@@ -4,6 +4,7 @@ interface generated-iface {
   resource counter {
     constructor(init: u32);
     get: func() -> u32;
+    zero: static func() -> counter;
   }
 }
 

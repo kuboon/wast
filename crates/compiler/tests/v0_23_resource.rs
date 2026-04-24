@@ -22,13 +22,13 @@ fn load(db: &WastDb) -> (Engine, Component) {
     (engine, component)
 }
 
-#[test]
-fn resource_constructor_and_method() {
+fn counter_db() -> WastDb {
     // resource counter {
     //   constructor(init: u32);
     //   get: func() -> u32;
+    //   zero: static func() -> counter;
     // }
-    let db = WastDb {
+    WastDb {
         funcs: vec![
             WastFuncRow {
                 uid: "counter_ctor".into(),
@@ -38,7 +38,9 @@ fn resource_constructor_and_method() {
                     result: Some("own_counter".into()),
                     body: Some(serialize_body(&[Instruction::ResourceNew {
                         resource: "counter".into(),
-                        rep: Box::new(Instruction::LocalGet { uid: "init".into() }),
+                        rep: Box::new(Instruction::LocalGet {
+                            uid: "init".into(),
+                        }),
                     }])),
                 },
             },
@@ -53,6 +55,20 @@ fn resource_constructor_and_method() {
                     // handle index — so `self_` IS the rep. Just return it.
                     body: Some(serialize_body(&[Instruction::LocalGet {
                         uid: "self_".into(),
+                    }])),
+                },
+            },
+            // Static factory: `zero: static func() -> counter`. No `self`;
+            // the body constructs a brand-new handle with rep=0.
+            WastFuncRow {
+                uid: "counter_zero".into(),
+                func: WastFunc {
+                    source: FuncSource::Exported("[static]counter.zero".into()),
+                    params: vec![],
+                    result: Some("own_counter".into()),
+                    body: Some(serialize_body(&[Instruction::ResourceNew {
+                        resource: "counter".into(),
+                        rep: Box::new(Instruction::Const { value: 0 }),
                     }])),
                 },
             },
@@ -80,21 +96,38 @@ fn resource_constructor_and_method() {
                 },
             },
         ],
-    };
+    }
+}
 
+#[test]
+fn resource_constructor_and_method() {
+    let db = counter_db();
     let (engine, component) = load(&db);
-    let mut linker: Linker<()> = Linker::new(&engine);
-    // bindgen! generates add_to_linker, but only for the import side; exports
-    // don't need linker plumbing beyond instantiation.
-    let _ = &mut linker;
+    let linker: Linker<()> = Linker::new(&engine);
     let mut store = Store::new(&engine, ());
     let generated = Generated::instantiate(&mut store, &component, &linker).unwrap();
-    let iface = generated.wast_generated_generated_iface();
-    let counter = iface.counter();
+    let counter = generated.wast_generated_generated_iface().counter();
 
     let handle: wasmtime::component::ResourceAny =
         counter.call_constructor(&mut store, 42).unwrap();
     let v = counter.call_get(&mut store, handle).unwrap();
     assert_eq!(v, 42);
+    handle.resource_drop(&mut store).unwrap();
+}
+
+#[test]
+fn resource_static_factory_method() {
+    // `zero: static func() -> counter` — no self, returns a fresh counter
+    // with rep=0. Verify the returned handle's get() observes 0.
+    let db = counter_db();
+    let (engine, component) = load(&db);
+    let linker: Linker<()> = Linker::new(&engine);
+    let mut store = Store::new(&engine, ());
+    let generated = Generated::instantiate(&mut store, &component, &linker).unwrap();
+    let counter = generated.wast_generated_generated_iface().counter();
+
+    let handle: wasmtime::component::ResourceAny = counter.call_zero(&mut store).unwrap();
+    let v = counter.call_get(&mut store, handle).unwrap();
+    assert_eq!(v, 0);
     handle.resource_drop(&mut store).unwrap();
 }
