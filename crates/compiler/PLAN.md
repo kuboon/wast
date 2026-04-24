@@ -1,6 +1,6 @@
 # compiler — wast → wasm Component コンパイラ
 
-**現状: v0.25 完了**。numeric / control flow / calls / option / result / string / list / record / variant / tuple / char / enum / flags / ListLiteral / deep nested compound / resource (constructor + method + static + dtor) / LocalGet of compound (record/tuple/string/list/enum/flags/handle + option/result/variant) in field position まで端から端まで動く。
+**現状: v0.26 完了**。numeric / control flow / calls / option / result / string / list / record / variant / tuple / char / enum / flags / ListLiteral / deep nested compound / resource (constructor + method + static + dtor) / LocalGet of compound in field position / `option<T>` 多スロット (string / list / record 等) まで端から端まで動く。
 
 ## 全体アーキテクチャ (v0.11 以降)
 
@@ -113,8 +113,8 @@ Compound 戻り or body 内に Some/None/Ok/Err があるとき、**param+local 
 ## 残タスク (優先順)
 
 1. **imported resource** — 別コンポーネント (or host) が resource を定義し、当方が consume するケース。`TypeSource::Imported` + `FuncSource::Imported("[method]R.op")` を利用する予定。import module 名は `<pkg>:<name>/<iface>` (`[export]` プレフィックスなし)、`[resource-new]`/`[resource-rep]` は import しない (drop のみ必要)。
-2. **heterogeneous join** — result<T, E> や variant で ok/err / 各 case の core 型が異なる場合の flat-join と wrap/extend/truncate。v0.9 で「同型のみ」と明記した制限。v0.25 LocalGet コピーも single-slot 制約なので同じ制限を共有。
-3. **multi-slot payload の LocalGet コピー** — option<string>, result<record, u32> 等、payload が 2 スロット以上ある場合。disc による分岐が必要 (同じオフセットに別レイアウトを書き分ける)。
+2. **heterogeneous join** — result<T, E> や variant で ok/err / 各 case の core 型が異なる場合の flat-join と wrap/extend/truncate。v0.9 で「同型のみ」と明記した制限。result/variant LocalGet コピーも single-slot 制約なので同じ制限を共有。
+3. **result/variant の multi-slot LocalGet コピー** — option は v0.26 で対応済。result<record, u32> 等、case ごとに memory layout が異なる場合は disc 分岐でケース別コピーが必要。
 
 ## 設計原則 (変わらず)
 

@@ -120,8 +120,11 @@ pub fn flat_slots(ty_ref: &str, type_map: &TypeMap) -> Result<Vec<&'static str>,
         ResolvedType::String => Ok(vec!["i32", "i32"]),
         ResolvedType::List(_) => Ok(vec!["i32", "i32"]),
         ResolvedType::Option(inner) => {
-            let payload = wit_to_core(&inner)?;
-            Ok(vec!["i32", payload])
+            // v0.26: flat form is `disc ++ inner_flat_slots`. inner may be
+            // multi-slot (string, list, record, tuple, etc.).
+            let mut out = vec!["i32"];
+            out.extend(flat_slots(&inner, type_map)?);
+            Ok(out)
         }
         ResolvedType::Result(ok, err) => {
             // v0.6: both payloads required. Pick the wider/float-compatible
@@ -1071,19 +1074,18 @@ fn emit_copy_from_local(
             Ok(())
         }
         ResolvedType::Option(inner) => {
-            // Flat: [disc_i32, payload]. Memory: [u8 disc @ +0, payload @
-            // align_up(1, align_of(inner))]. We unconditionally copy the
-            // payload slot — it's "don't care" when disc=0 (none), so
-            // readers that only consume on disc=1 see the right value.
-            emit_variant_like_copy(
-                src_base,
-                ret_ptr,
-                base_offset,
-                std::slice::from_ref(&Some(inner)),
-                ty,
-                type_map,
-                out,
-            )
+            // Flat: [disc_i32, ...inner_flat_slots]. Memory: [u8 disc @ +0,
+            // payload @ align_up(1, align_of(inner))]. Since option has only
+            // one case, the payload memory layout is fully determined by
+            // `inner` — we recurse into emit_copy_from_local for the inner
+            // type and unconditionally copy. Bytes are "don't care" when
+            // disc=0 (readers gate on disc), so no runtime branch needed.
+            out.push_str(&format!(
+                "      local.get {ret_ptr}\n      local.get {src_base}\n      i32.store8 offset={base_offset}\n"
+            ));
+            let (_, inner_align) = size_align(&inner, type_map)?;
+            let pay_off = base_offset + align_up(1, inner_align);
+            emit_copy_from_local(&inner, src_base + 1, ret_ptr, pay_off, type_map, out)
         }
         ResolvedType::Result(ok, err) => {
             let cases: [Option<String>; 2] = [Some(ok), Some(err)];
