@@ -399,6 +399,18 @@ fn render_instruction(
                 .join("\n");
             format!("{indent}switch ({val}) {{\n{arm_lines}\n{indent}}}")
         }
+        Instruction::TupleGet { value, index } => {
+            let val = render_expr(value, local_names, func_names);
+            format!("{indent}{val}[{index}]")
+        }
+        Instruction::TupleLiteral { values } => {
+            let parts = values
+                .iter()
+                .map(|v| render_expr(v, local_names, func_names))
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("{indent}[{parts}]")
+        }
         Instruction::MatchOption {
             value,
             some_binding,

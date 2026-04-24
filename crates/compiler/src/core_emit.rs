@@ -41,6 +41,8 @@ pub enum ResolvedType {
     /// `option<T>` and `result<T,E>` remain their own variants for
     /// backward compatibility with existing IR nodes (Some/None/Ok/Err).
     Variant(Vec<(String, Option<String>)>),
+    /// Anonymous positional record. Fields indexed by position.
+    Tuple(Vec<String>),
 }
 
 pub fn resolve_type(ty_ref: &str, type_map: &TypeMap) -> Result<ResolvedType, CompileError> {
@@ -67,9 +69,7 @@ pub fn resolve_type(ty_ref: &str, type_map: &TypeMap) -> Result<ResolvedType, Co
         WitType::Result(ok, err) => Ok(ResolvedType::Result(ok.clone(), err.clone())),
         WitType::Record(fields) => Ok(ResolvedType::Record(fields.clone())),
         WitType::Variant(cases) => Ok(ResolvedType::Variant(cases.clone())),
-        other => Err(CompileError::Unsupported(format!(
-            "type {ty_ref:?} with definition {other:?} is not supported yet"
-        ))),
+        WitType::Tuple(elems) => Ok(ResolvedType::Tuple(elems.clone())),
     }
 }
 
@@ -143,6 +143,14 @@ pub fn flat_slots(ty_ref: &str, type_map: &TypeMap) -> Result<Vec<&'static str>,
             out.extend(joined);
             Ok(out)
         }
+        ResolvedType::Tuple(elems) => {
+            // Same rule as record: concat of elements' flats.
+            let mut out = Vec::new();
+            for ty in &elems {
+                out.extend(flat_slots(ty, type_map)?);
+            }
+            Ok(out)
+        }
     }
 }
 
@@ -189,6 +197,16 @@ pub fn size_align(ty_ref: &str, type_map: &TypeMap) -> Result<(usize, usize), Co
             // per-case payload types and computes the right size+align.
             let payloads: Vec<Option<String>> = cases.iter().map(|(_, p)| p.clone()).collect();
             variant_layout(&payloads, type_map)
+        }
+        ResolvedType::Tuple(elems) => {
+            // Tuple layout is the same as a record with positional field
+            // names. Reuse record_layout via a synthesized name list.
+            let synthetic: Vec<(String, String)> = elems
+                .iter()
+                .enumerate()
+                .map(|(i, t)| (i.to_string(), t.clone()))
+                .collect();
+            record_layout(&synthetic, type_map)
         }
     }
 }
@@ -509,6 +527,18 @@ fn collect_locals_rec(
                     );
                 }
             }
+            Instruction::TupleLiteral { values } => {
+                for v in values {
+                    collect_locals_rec(
+                        std::slice::from_ref(v),
+                        params,
+                        func_map,
+                        type_map,
+                        locals,
+                        seen,
+                    );
+                }
+            }
             Instruction::MatchVariant { value, arms } => {
                 collect_locals_rec(
                     std::slice::from_ref(value.as_ref()),
@@ -592,11 +622,13 @@ pub fn emit_body(
         PtrLen,
         Record,
         Variant,
+        Tuple,
     }
     let wrap_kind = result_ty.and_then(|ty| match resolve_type(ty, type_map) {
         Ok(ResolvedType::String) | Ok(ResolvedType::List(_)) => Some(WrapKind::PtrLen),
         Ok(ResolvedType::Record(_)) => Some(WrapKind::Record),
         Ok(ResolvedType::Variant(_)) => Some(WrapKind::Variant),
+        Ok(ResolvedType::Tuple(_)) => Some(WrapKind::Tuple),
         _ => None,
     });
 
@@ -643,6 +675,16 @@ pub fn emit_body(
                 &mut out,
             )?,
             Some(WrapKind::Variant) => emit_variant_return_wrap(
+                last,
+                result_ty.unwrap(),
+                &scope,
+                func_map,
+                type_map,
+                literal_table,
+                ret_ptr_slot,
+                &mut out,
+            )?,
+            Some(WrapKind::Tuple) => emit_tuple_return_wrap(
                 last,
                 result_ty.unwrap(),
                 &scope,
@@ -910,8 +952,96 @@ fn emit_variant_return_wrap(
     Ok(())
 }
 
-/// Scan a body for any compound constructor (`Some`/`None`/`Ok`/`Err`/`VariantCtor`)
-/// that would need the synthesized return-pointer local.
+/// Wrap a tuple-producing instruction (must be `TupleLiteral`) into an
+/// indirect-return sequence. Tuples share record's layout — each element
+/// lives at the offset a record field would.
+#[allow(clippy::too_many_arguments)]
+fn emit_tuple_return_wrap(
+    instr: &Instruction,
+    tuple_ty: &str,
+    scope: &[(String, String)],
+    func_map: &FuncMap,
+    type_map: &TypeMap,
+    literal_table: &LiteralTable,
+    ret_ptr_slot: Option<usize>,
+    out: &mut String,
+) -> Result<(), CompileError> {
+    let ret_ptr = ret_ptr_slot.ok_or_else(|| {
+        CompileError::Unsupported("ret_ptr_slot missing for indirect tuple return".into())
+    })?;
+
+    let ResolvedType::Tuple(elem_types) = resolve_type(tuple_ty, type_map)? else {
+        return Err(CompileError::InvalidInput(format!(
+            "tuple return wrap on non-tuple type {tuple_ty:?}"
+        )));
+    };
+
+    let values = match instr {
+        Instruction::TupleLiteral { values } => values,
+        other => {
+            return Err(CompileError::Unsupported(format!(
+                "tuple return from {other:?} not supported yet (v0.18 handles TupleLiteral)"
+            )));
+        }
+    };
+
+    if values.len() != elem_types.len() {
+        return Err(CompileError::InvalidInput(format!(
+            "TupleLiteral arity {} does not match tuple type arity {}",
+            values.len(),
+            elem_types.len(),
+        )));
+    }
+
+    let (size, align) = size_align(tuple_ty, type_map)?;
+
+    // Allocate + stash buffer pointer.
+    out.push_str(&format!(
+        "      i32.const 0\n      i32.const 0\n      i32.const {align}\n      i32.const {size}\n      call $cabi_realloc\n      local.set {ret_ptr}\n"
+    ));
+
+    // Synthesize positional field names so record_field_info can compute
+    // offsets for us (tuple layout == record layout with these names).
+    let synthetic_fields: Vec<(String, String)> = elem_types
+        .iter()
+        .enumerate()
+        .map(|(i, t)| (i.to_string(), t.clone()))
+        .collect();
+
+    for (i, value) in values.iter().enumerate() {
+        let (offset, ftype) = record_field_info(&synthetic_fields, &i.to_string(), type_map)?;
+        match resolve_type(&ftype, type_map)? {
+            ResolvedType::Primitive(p) => {
+                let (store, align_pow2) = store_op(&p)?;
+                out.push_str(&format!("      local.get {ret_ptr}\n"));
+                emit_instr(
+                    value,
+                    Some(&ftype),
+                    scope,
+                    func_map,
+                    type_map,
+                    literal_table,
+                    ret_ptr_slot,
+                    out,
+                )?;
+                out.push_str(&format!(
+                    "      {store} offset={offset} align={align_pow2}\n"
+                ));
+            }
+            other => {
+                return Err(CompileError::Unsupported(format!(
+                    "tuple element {i} of type {ftype:?} (resolved {other:?}) not supported yet — v0.18 handles primitive elements only"
+                )));
+            }
+        }
+    }
+
+    out.push_str(&format!("      local.get {ret_ptr}\n"));
+    Ok(())
+}
+
+/// Scan a body for any compound constructor (`Some`/`None`/`Ok`/`Err`/`VariantCtor`/
+/// `RecordLiteral`/`TupleLiteral`) that would need the synthesized return-pointer local.
 pub fn body_needs_ret_ptr(body: &[Instruction]) -> bool {
     body.iter().any(instr_has_compound_ctor)
 }
@@ -923,7 +1053,8 @@ fn instr_has_compound_ctor(i: &Instruction) -> bool {
         | Instruction::Ok { .. }
         | Instruction::Err { .. }
         | Instruction::VariantCtor { .. }
-        | Instruction::RecordLiteral { .. } => true,
+        | Instruction::RecordLiteral { .. }
+        | Instruction::TupleLiteral { .. } => true,
         Instruction::If {
             condition,
             then_body,
@@ -1286,6 +1417,48 @@ fn emit_instr(
             return Err(CompileError::Unsupported(
                 "VariantCtor outside of return position not supported yet".into(),
             ));
+        }
+        Instruction::TupleLiteral { .. } => {
+            return Err(CompileError::Unsupported(
+                "TupleLiteral outside of return position not supported yet".into(),
+            ));
+        }
+        Instruction::TupleGet { value, index } => {
+            // Mirror of RecordGet, with positional index lookup.
+            let uid = match value.as_ref() {
+                Instruction::LocalGet { uid } => uid,
+                _ => {
+                    return Err(CompileError::Unsupported(
+                        "TupleGet only supports LocalGet of a tuple local for now".into(),
+                    ));
+                }
+            };
+            let (base_idx, _, ty) = slot_info(uid, scope, type_map)?;
+            let ResolvedType::Tuple(elems) = resolve_type(ty, type_map)? else {
+                return Err(CompileError::InvalidInput(format!(
+                    "TupleGet applied to non-tuple local {uid:?}"
+                )));
+            };
+            let idx = *index as usize;
+            if idx >= elems.len() {
+                return Err(CompileError::InvalidInput(format!(
+                    "tuple index {idx} out of bounds (arity {})",
+                    elems.len()
+                )));
+            }
+            // Walk the flat layout, summing slot counts up to `idx`, then
+            // emit one local.get per slot of the selected element.
+            let mut slot_offset = 0usize;
+            for (i, et) in elems.iter().enumerate() {
+                let slots = flat_slots(et, type_map)?;
+                if i == idx {
+                    for s in 0..slots.len() {
+                        out.push_str(&format!("      local.get {}\n", base_idx + slot_offset + s));
+                    }
+                    break;
+                }
+                slot_offset += slots.len();
+            }
         }
         Instruction::MatchVariant { value, arms } => {
             // Restrict to `LocalGet(variant_local)` for the value source —
@@ -1727,7 +1900,8 @@ fn branch_result_clause<'a>(
                 | ResolvedType::Option(_)
                 | ResolvedType::Result(_, _)
                 | ResolvedType::Record(_)
-                | ResolvedType::Variant(_) => "i32".to_string(),
+                | ResolvedType::Variant(_)
+                | ResolvedType::Tuple(_) => "i32".to_string(),
             };
             Ok((format!(" (result {core})"), Some(ty)))
         }
@@ -1762,6 +1936,15 @@ fn infer_wit_type(
                     .iter()
                     .find(|(n, _)| n == field)
                     .map(|(_, t)| t.clone())
+            } else {
+                None
+            }
+        }
+        Instruction::TupleGet { value, index } => {
+            let tuple_ty = infer_wit_type(value, scope, func_map, type_map)?;
+            let resolved = resolve_type(&tuple_ty, type_map).ok()?;
+            if let ResolvedType::Tuple(elems) = resolved {
+                elems.get(*index as usize).cloned()
             } else {
                 None
             }

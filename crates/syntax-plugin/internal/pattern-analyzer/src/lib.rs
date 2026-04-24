@@ -141,6 +141,16 @@ pub enum Instruction {
         arms: Vec<MatchArm>,
     },
 
+    // Tuple operations (WIT `tuple<T1, T2, …>` — anonymous record with
+    // positional indices).
+    TupleGet {
+        value: Box<Instruction>,
+        index: u32,
+    },
+    TupleLiteral {
+        values: Vec<Instruction>,
+    },
+
     // Other
     Nop,
 }

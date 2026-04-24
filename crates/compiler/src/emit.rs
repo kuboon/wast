@@ -412,6 +412,15 @@ fn format_wit_type(ty: &str, type_map: &TypeMap) -> Result<String, CompileError>
         // forms at use sites). `ty` is the uid declared via a top-level
         // `record NAME { … }` / `variant NAME { … }` block.
         ResolvedType::Record(_) | ResolvedType::Variant(_) => Ok(wit_name(ty)),
+        // Tuples inline at the use site: `tuple<T1, T2, …>`.
+        ResolvedType::Tuple(elems) => {
+            let parts = elems
+                .iter()
+                .map(|t| format_wit_type(t, type_map))
+                .collect::<Result<Vec<_>, _>>()?
+                .join(", ");
+            Ok(format!("tuple<{parts}>"))
+        }
     }
 }
 

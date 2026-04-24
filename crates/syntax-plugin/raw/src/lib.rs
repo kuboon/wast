@@ -335,6 +335,22 @@ fn render_instruction(instr: &Instruction, indent: &str) -> String {
                 .join("\n");
             format!("{indent}(match_variant\n{val_str}\n{arms_str})")
         }
+        Instruction::TupleGet { value, index } => {
+            format!(
+                "{}(tuple.get {}\n{})",
+                indent,
+                index,
+                render_instruction(value, &inner)
+            )
+        }
+        Instruction::TupleLiteral { values } => {
+            let vals = values
+                .iter()
+                .map(|v| render_instruction(v, &inner))
+                .collect::<Vec<_>>()
+                .join("\n");
+            format!("{indent}(tuple.literal\n{vals})")
+        }
         Instruction::MatchOption {
             value,
             some_binding,
