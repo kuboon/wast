@@ -9,5 +9,6 @@ interface generated-iface {
 }
 
 world generated {
+  import record-drop: func(rep: u32);
   export generated-iface;
 }

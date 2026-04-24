@@ -35,6 +35,7 @@ fn is_resource_member_export(name: &str) -> bool {
     name.starts_with("[constructor]")
         || name.starts_with("[method]")
         || name.starts_with("[static]")
+        || name.starts_with("[dtor]")
 }
 
 /// Memory + `cabi_realloc` infrastructure injected into every non-empty core
@@ -404,6 +405,11 @@ fn synthesize_world(db: &WastDb, type_map: &TypeMap) -> Result<String, CompileEr
             } else {
                 top_level.push(row);
             }
+        } else if name.starts_with("[dtor]") {
+            // dtor is implicit in WIT (no member syntax). Skip from the WIT
+            // synthesis — it only shows up as a core export. Name-prefix
+            // routing for the core export name happens separately via
+            // `is_resource_member_export`.
         } else {
             top_level.push(row);
         }

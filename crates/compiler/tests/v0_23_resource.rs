@@ -3,6 +3,8 @@
 //! it, then verify via `wasmtime::component::bindgen!` using a fixed WIT
 //! that matches our synthesizer's output.
 
+use std::sync::{Arc, Mutex};
+
 use wasmtime::component::{Component, Linker};
 use wasmtime::{Config, Engine, Store};
 use wast_pattern_analyzer::{Instruction, serialize_body};
@@ -15,6 +17,17 @@ wasmtime::component::bindgen!({
     world: "generated",
 });
 
+#[derive(Default)]
+struct HostState {
+    dropped: Arc<Mutex<Vec<u32>>>,
+}
+
+impl GeneratedImports for HostState {
+    fn record_drop(&mut self, rep: u32) {
+        self.dropped.lock().unwrap().push(rep);
+    }
+}
+
 fn load(db: &WastDb) -> (Engine, Component) {
     let wasm = wast_compiler::compile(db, "").expect("compile ok");
     let engine = Engine::new(&Config::new()).unwrap();
@@ -23,13 +36,21 @@ fn load(db: &WastDb) -> (Engine, Component) {
 }
 
 fn counter_db() -> WastDb {
-    // resource counter {
-    //   constructor(init: u32);
-    //   get: func() -> u32;
-    //   zero: static func() -> counter;
+    // world generated {
+    //   import record-drop: func(rep: u32);
+    //   export generated-iface;  // resource counter { ctor; get; zero; } + [dtor]
     // }
     WastDb {
         funcs: vec![
+            WastFuncRow {
+                uid: "record_drop".into(),
+                func: WastFunc {
+                    source: FuncSource::Imported("record-drop".into()),
+                    params: vec![("rep".into(), "u32".into())],
+                    result: None,
+                    body: None,
+                },
+            },
             WastFuncRow {
                 uid: "counter_ctor".into(),
                 func: WastFunc {
@@ -38,9 +59,7 @@ fn counter_db() -> WastDb {
                     result: Some("own_counter".into()),
                     body: Some(serialize_body(&[Instruction::ResourceNew {
                         resource: "counter".into(),
-                        rep: Box::new(Instruction::LocalGet {
-                            uid: "init".into(),
-                        }),
+                        rep: Box::new(Instruction::LocalGet { uid: "init".into() }),
                     }])),
                 },
             },
@@ -72,6 +91,23 @@ fn counter_db() -> WastDb {
                     }])),
                 },
             },
+            // Custom destructor: implicit in WIT (no member syntax). Core
+            // export `[dtor]counter` receives the rep (not the handle) and
+            // forwards it to the imported `record-drop` so the host can
+            // observe each drop.
+            WastFuncRow {
+                uid: "counter_dtor".into(),
+                func: WastFunc {
+                    source: FuncSource::Exported("[dtor]counter".into()),
+                    params: vec![("rep".into(), "u32".into())],
+                    result: None,
+                    body: Some(serialize_body(&[Instruction::Call {
+                        // FuncMap keys by source-inner name, not row uid.
+                        func_uid: "record-drop".into(),
+                        args: vec![("rep".into(), Instruction::LocalGet { uid: "rep".into() })],
+                    }])),
+                },
+            },
         ],
         types: vec![
             WastTypeRow {
@@ -99,13 +135,19 @@ fn counter_db() -> WastDb {
     }
 }
 
+fn setup(db: &WastDb) -> (Store<HostState>, Generated) {
+    let (engine, component) = load(db);
+    let mut linker: Linker<HostState> = Linker::new(&engine);
+    Generated::add_to_linker(&mut linker, |s: &mut HostState| s).unwrap();
+    let mut store = Store::new(&engine, HostState::default());
+    let generated = Generated::instantiate(&mut store, &component, &linker).unwrap();
+    (store, generated)
+}
+
 #[test]
 fn resource_constructor_and_method() {
     let db = counter_db();
-    let (engine, component) = load(&db);
-    let linker: Linker<()> = Linker::new(&engine);
-    let mut store = Store::new(&engine, ());
-    let generated = Generated::instantiate(&mut store, &component, &linker).unwrap();
+    let (mut store, generated) = setup(&db);
     let counter = generated.wast_generated_generated_iface().counter();
 
     let handle: wasmtime::component::ResourceAny =
@@ -120,14 +162,35 @@ fn resource_static_factory_method() {
     // `zero: static func() -> counter` — no self, returns a fresh counter
     // with rep=0. Verify the returned handle's get() observes 0.
     let db = counter_db();
-    let (engine, component) = load(&db);
-    let linker: Linker<()> = Linker::new(&engine);
-    let mut store = Store::new(&engine, ());
-    let generated = Generated::instantiate(&mut store, &component, &linker).unwrap();
+    let (mut store, generated) = setup(&db);
     let counter = generated.wast_generated_generated_iface().counter();
 
     let handle: wasmtime::component::ResourceAny = counter.call_zero(&mut store).unwrap();
     let v = counter.call_get(&mut store, handle).unwrap();
     assert_eq!(v, 0);
     handle.resource_drop(&mut store).unwrap();
+}
+
+#[test]
+fn resource_dtor_observes_drops() {
+    // Dtor forwards every dropped rep to the imported `record-drop` host
+    // func. Construct three counters with distinct reps, drop them in any
+    // order, then assert the host received exactly that multiset of reps.
+    let db = counter_db();
+    let (mut store, generated) = setup(&db);
+    let log = store.data().dropped.clone();
+    let counter = generated.wast_generated_generated_iface().counter();
+
+    let h1 = counter.call_constructor(&mut store, 11).unwrap();
+    let h2 = counter.call_constructor(&mut store, 22).unwrap();
+    let h3 = counter.call_zero(&mut store).unwrap();
+    assert!(log.lock().unwrap().is_empty(), "no drops yet");
+
+    h2.resource_drop(&mut store).unwrap();
+    h1.resource_drop(&mut store).unwrap();
+    h3.resource_drop(&mut store).unwrap();
+
+    let mut observed = log.lock().unwrap().clone();
+    observed.sort();
+    assert_eq!(observed, vec![0, 11, 22]);
 }
