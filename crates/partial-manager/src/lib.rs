@@ -44,6 +44,9 @@ fn type_refs_from_wit_type(wt: &WitType) -> Vec<String> {
         // enum and flags only carry case-name strings, no type references
         // to trace.
         WitType::Enum(_) | WitType::Flags(_) => vec![],
+        // Resource declaration has no payload. own/borrow wrap a resource uid.
+        WitType::Resource => vec![],
+        WitType::Own(r) | WitType::Borrow(r) => vec![r.clone()],
     }
 }
 

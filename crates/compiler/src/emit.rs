@@ -25,6 +25,18 @@ use crate::error::CompileError;
 /// heap at or past the end of the collected literals.
 const STATIC_DATA_BASE: usize = 1024;
 
+/// Qualified interface path where resource declarations live. wit-component's
+/// Legacy name mangling expects resource-member exports to be prefixed with
+/// `<package>/<interface>#` and resource intrinsic imports to use module
+/// `"[export]<package>/<interface>"`.
+const RESOURCE_IFACE_PATH: &str = "wast:generated/generated-iface";
+
+fn is_resource_member_export(name: &str) -> bool {
+    name.starts_with("[constructor]")
+        || name.starts_with("[method]")
+        || name.starts_with("[static]")
+}
+
 /// Memory + `cabi_realloc` infrastructure injected into every non-empty core
 /// module. Bump allocator over a single memory page; `memory.copy` handles
 /// realloc-grow. `heap_end` initial value is set past any string literals.
@@ -162,6 +174,38 @@ fn emit_core_module(
         ));
     }
 
+    // For each declared resource type, import the Canonical-ABI intrinsics
+    // `[resource-new]R` / `[resource-rep]R` / `[resource-drop]R`. When any
+    // resource is declared, we put the resource(s) inside an exported
+    // interface `wast:generated/generated-iface` (wit-component's resource
+    // plumbing requires an interface); the import module string is then
+    // `"[export]wast:generated/generated-iface"`.
+    let has_resources = db
+        .types
+        .iter()
+        .any(|r| matches!(r.def.definition, wast_types::WitType::Resource));
+    let iface_import_module = if has_resources {
+        format!("[export]{RESOURCE_IFACE_PATH}")
+    } else {
+        String::new()
+    };
+    for row in &db.types {
+        if !matches!(row.def.definition, wast_types::WitType::Resource) {
+            continue;
+        }
+        let r = &row.uid;
+        let m = mangle(r);
+        imports.push_str(&format!(
+            "  (import \"{iface_import_module}\" \"[resource-new]{r}\" (func ${m}__new (param i32) (result i32)))\n"
+        ));
+        imports.push_str(&format!(
+            "  (import \"{iface_import_module}\" \"[resource-rep]{r}\" (func ${m}__rep (param i32) (result i32)))\n"
+        ));
+        imports.push_str(&format!(
+            "  (import \"{iface_import_module}\" \"[resource-drop]{r}\" (func ${m}__drop (param i32)))\n"
+        ));
+    }
+
     let mut body_funcs = String::new();
     for row in db.funcs.iter().filter(|r| {
         matches!(
@@ -271,7 +315,17 @@ fn emit_core_func(
     )?;
 
     let export_clause = match &row.func.source {
-        FuncSource::Exported(n) => format!(" (export \"{n}\")"),
+        FuncSource::Exported(n) => {
+            // Resource member exports (`[constructor]R`, `[method]R.op`,
+            // `[static]R.op`) must be qualified with the interface path for
+            // wit-component to match them to the WIT world.
+            let n = if is_resource_member_export(n) {
+                format!("{RESOURCE_IFACE_PATH}#{n}")
+            } else {
+                n.clone()
+            };
+            format!(" (export \"{n}\")")
+        }
         _ => String::new(),
     };
 
@@ -321,12 +375,48 @@ fn flat_result_clause(result: Option<&str>, type_map: &TypeMap) -> Result<String
 /// anonymous records at use sites). Other compounds (option/result/list) are
 /// inlined at the use site.
 fn synthesize_world(db: &WastDb, type_map: &TypeMap) -> Result<String, CompileError> {
-    let mut out = String::new();
-    out.push_str("package wast:generated;\n\nworld generated {\n");
+    // Partition funcs into resource members vs top-level by name convention.
+    // Member names: `[constructor]R` / `[method]R.op` / `[static]R.op`.
+    let mut resource_members: HashMap<String, Vec<ResourceMember<'_>>> = HashMap::new();
+    let mut top_level: Vec<&WastFuncRow> = Vec::new();
+    for row in &db.funcs {
+        let name = source_key(&row.func.source);
+        if let Some(r) = name.strip_prefix("[constructor]") {
+            resource_members
+                .entry(r.to_string())
+                .or_default()
+                .push(ResourceMember::Constructor(row));
+        } else if let Some(rest) = name.strip_prefix("[method]") {
+            if let Some((r, op)) = rest.split_once('.') {
+                resource_members
+                    .entry(r.to_string())
+                    .or_default()
+                    .push(ResourceMember::Method { op, row });
+            } else {
+                top_level.push(row);
+            }
+        } else if let Some(rest) = name.strip_prefix("[static]") {
+            if let Some((r, op)) = rest.split_once('.') {
+                resource_members
+                    .entry(r.to_string())
+                    .or_default()
+                    .push(ResourceMember::Static { op, row });
+            } else {
+                top_level.push(row);
+            }
+        } else {
+            top_level.push(row);
+        }
+    }
 
-    // Type declarations: records and variants must be named in WIT.
-    //   record NAME { field: ty, … }
-    //   variant NAME { case, case(ty), … }
+    let mut out = String::new();
+    out.push_str("package wast:generated;\n\n");
+
+    // Collect type declarations into a shared body (resources need to be in
+    // an interface for wit-component's decoder; putting every named type in
+    // one interface keeps the world simple).
+    let mut iface_body = String::new();
+    let mut has_resources = false;
     for row in &db.types {
         match &row.def.definition {
             wast_types::WitType::Record(fields) => {
@@ -337,8 +427,8 @@ fn synthesize_world(db: &WastDb, type_map: &TypeMap) -> Result<String, CompileEr
                     })
                     .collect::<Result<Vec<_>, _>>()?
                     .join(", ");
-                out.push_str(&format!(
-                    "  record {name} {{ {fields_wit} }}\n",
+                iface_body.push_str(&format!(
+                    "    record {name} {{ {fields_wit} }}\n",
                     name = wit_name(&row.uid)
                 ));
             }
@@ -351,30 +441,66 @@ fn synthesize_world(db: &WastDb, type_map: &TypeMap) -> Result<String, CompileEr
                     })
                     .collect::<Result<Vec<_>, _>>()?
                     .join(", ");
-                out.push_str(&format!(
-                    "  variant {name} {{ {cases_wit} }}\n",
+                iface_body.push_str(&format!(
+                    "    variant {name} {{ {cases_wit} }}\n",
                     name = wit_name(&row.uid)
                 ));
             }
             wast_types::WitType::Enum(cases) => {
                 let cases_wit = cases.join(", ");
-                out.push_str(&format!(
-                    "  enum {name} {{ {cases_wit} }}\n",
+                iface_body.push_str(&format!(
+                    "    enum {name} {{ {cases_wit} }}\n",
                     name = wit_name(&row.uid)
                 ));
             }
             wast_types::WitType::Flags(names) => {
                 let names_wit = names.join(", ");
-                out.push_str(&format!(
-                    "  flags {name} {{ {names_wit} }}\n",
+                iface_body.push_str(&format!(
+                    "    flags {name} {{ {names_wit} }}\n",
                     name = wit_name(&row.uid)
                 ));
+            }
+            wast_types::WitType::Resource => {
+                has_resources = true;
+                iface_body.push_str(&format!(
+                    "    resource {name} {{\n",
+                    name = wit_name(&row.uid)
+                ));
+                if let Some(members) = resource_members.get(&row.uid) {
+                    for m in members {
+                        iface_body.push_str("  ");
+                        iface_body.push_str(&format_resource_member(m, type_map)?);
+                    }
+                }
+                iface_body.push_str("    }\n");
             }
             _ => {}
         }
     }
 
-    for row in &db.funcs {
+    // When we have resources, declare them in a self-contained interface that
+    // the world exports. Otherwise keep the legacy "types in the world body"
+    // form for backward compatibility with existing tests.
+    if has_resources {
+        out.push_str("interface generated-iface {\n");
+        out.push_str(&iface_body);
+        out.push_str("}\n\nworld generated {\n");
+        out.push_str("  export generated-iface;\n");
+    } else {
+        out.push_str("world generated {\n");
+        // Re-indent from 4 spaces back to 2 for top-level world members.
+        for line in iface_body.lines() {
+            if line.is_empty() {
+                out.push('\n');
+            } else if let Some(stripped) = line.strip_prefix("    ") {
+                out.push_str(&format!("  {stripped}\n"));
+            } else {
+                out.push_str(&format!("{line}\n"));
+            }
+        }
+    }
+
+    for row in top_level {
         match &row.func.source {
             FuncSource::Exported(name) => {
                 let sig = format_wit_sig(&row.func.params, row.func.result.as_deref(), type_map)?;
@@ -390,6 +516,67 @@ fn synthesize_world(db: &WastDb, type_map: &TypeMap) -> Result<String, CompileEr
 
     out.push_str("}\n");
     Ok(out)
+}
+
+enum ResourceMember<'a> {
+    Constructor(&'a WastFuncRow),
+    Method { op: &'a str, row: &'a WastFuncRow },
+    Static { op: &'a str, row: &'a WastFuncRow },
+}
+
+fn format_resource_member(
+    m: &ResourceMember<'_>,
+    type_map: &TypeMap,
+) -> Result<String, CompileError> {
+    match m {
+        ResourceMember::Constructor(row) => {
+            // Constructor WIT syntax: `constructor(params)`. Return type is
+            // implicit (`own<R>`) and omitted from WIT. All core-ABI params
+            // are user-visible — there's no implicit self.
+            let params_wit = row
+                .func
+                .params
+                .iter()
+                .map(|(n, ty)| format_wit_type(ty, type_map).map(|t| format!("{n}: {t}")))
+                .collect::<Result<Vec<_>, _>>()?
+                .join(", ");
+            Ok(format!("    constructor({params_wit});\n"))
+        }
+        ResourceMember::Method { op, row } => {
+            // Method WIT syntax: `op: func(params_without_self) -> result`.
+            // At the core ABI the first param is `self: borrow<R>` — strip it.
+            let rest_params = row.func.params.get(1..).ok_or_else(|| {
+                CompileError::InvalidInput(format!("method {op:?} must have at least a self param"))
+            })?;
+            let params_wit = rest_params
+                .iter()
+                .map(|(n, ty)| format_wit_type(ty, type_map).map(|t| format!("{n}: {t}")))
+                .collect::<Result<Vec<_>, _>>()?
+                .join(", ");
+            let result_wit = match row.func.result.as_deref() {
+                Some(ty) => format!(" -> {}", format_wit_type(ty, type_map)?),
+                None => String::new(),
+            };
+            Ok(format!("    {op}: func({params_wit}){result_wit};\n"))
+        }
+        ResourceMember::Static { op, row } => {
+            // `op: static func(params) -> result;` — no implicit self.
+            let params_wit = row
+                .func
+                .params
+                .iter()
+                .map(|(n, ty)| format_wit_type(ty, type_map).map(|t| format!("{n}: {t}")))
+                .collect::<Result<Vec<_>, _>>()?
+                .join(", ");
+            let result_wit = match row.func.result.as_deref() {
+                Some(ty) => format!(" -> {}", format_wit_type(ty, type_map)?),
+                None => String::new(),
+            };
+            Ok(format!(
+                "    {op}: static func({params_wit}){result_wit};\n"
+            ))
+        }
+    }
 }
 
 /// Normalize a WIT identifier — `_` → `-` (WIT is kebab-case, not snake).
@@ -449,6 +636,9 @@ fn format_wit_type(ty: &str, type_map: &TypeMap) -> Result<String, CompileError>
         }
         // Enums and flags need named declarations, like record/variant.
         ResolvedType::Enum(_) | ResolvedType::Flags(_) => Ok(wit_name(ty)),
+        // own<R> / borrow<R> inline at the use site.
+        ResolvedType::Own(r) => Ok(format!("own<{}>", wit_name(&r))),
+        ResolvedType::Borrow(r) => Ok(format!("borrow<{}>", wit_name(&r))),
     }
 }
 

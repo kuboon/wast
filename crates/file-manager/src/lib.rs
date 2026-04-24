@@ -75,6 +75,9 @@ fn wit_type_to_serde(t: &WitType) -> wast_types::WitType {
         WitType::Tuple(elems) => wast_types::WitType::Tuple(elems.clone()),
         WitType::Enum(cases) => wast_types::WitType::Enum(cases.clone()),
         WitType::Flags(names) => wast_types::WitType::Flags(names.clone()),
+        WitType::Resource => wast_types::WitType::Resource,
+        WitType::Own(r) => wast_types::WitType::Own(r.clone()),
+        WitType::Borrow(r) => wast_types::WitType::Borrow(r.clone()),
     }
 }
 
@@ -89,6 +92,9 @@ fn wit_type_from_serde(t: &wast_types::WitType) -> WitType {
         wast_types::WitType::Tuple(elems) => WitType::Tuple(elems.clone()),
         wast_types::WitType::Enum(cases) => WitType::Enum(cases.clone()),
         wast_types::WitType::Flags(names) => WitType::Flags(names.clone()),
+        wast_types::WitType::Resource => WitType::Resource,
+        wast_types::WitType::Own(r) => WitType::Own(r.clone()),
+        wast_types::WitType::Borrow(r) => WitType::Borrow(r.clone()),
     }
 }
 

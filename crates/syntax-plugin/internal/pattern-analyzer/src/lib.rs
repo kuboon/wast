@@ -160,6 +160,23 @@ pub enum Instruction {
         flags: Vec<String>,
     },
 
+    // Resource operations (WIT `resource R { … }`). Handles are i32 at the
+    // core ABI; these IR nodes compile to calls to the canonical-ABI
+    // intrinsics `[resource-new]R` / `[resource-rep]R` / `[resource-drop]R`
+    // imported from the `[export]` module by the emit layer.
+    ResourceNew {
+        resource: String,
+        rep: Box<Instruction>,
+    },
+    ResourceRep {
+        resource: String,
+        handle: Box<Instruction>,
+    },
+    ResourceDrop {
+        resource: String,
+        handle: Box<Instruction>,
+    },
+
     // Other
     Nop,
 }

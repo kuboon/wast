@@ -193,6 +193,9 @@ fn serialize_wit_type(t: &WitType) -> String {
                 .join(", ");
             format!("{{ \"tag\": \"flags\", \"val\": [{parts}] }}")
         }
+        WitType::Resource => "{ \"tag\": \"resource\" }".to_string(),
+        WitType::Own(r) => format!("{{ \"tag\": \"own\", \"val\": \"{r}\" }}"),
+        WitType::Borrow(r) => format!("{{ \"tag\": \"borrow\", \"val\": \"{r}\" }}"),
     }
 }
 

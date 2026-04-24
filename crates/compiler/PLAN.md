@@ -1,6 +1,6 @@
 # compiler — wast → wasm Component コンパイラ
 
-**現状: v0.22 完了**。numeric / control flow / calls / option / result / string / list / record / variant / tuple / char / enum / flags / ListLiteral / deep nested compound (record-of-record, option<record>, list<record>, tuple<record, string>, etc.) まで端から端まで動く。以降は resource。
+**現状: v0.23 完了**。numeric / control flow / calls / option / result / string / list / record / variant / tuple / char / enum / flags / ListLiteral / deep nested compound / resource (constructor + method) まで端から端まで動く。
 
 ## 全体アーキテクチャ (v0.11 以降)
 
@@ -112,7 +112,7 @@ Compound 戻り or body 内に Some/None/Ok/Err があるとき、**param+local 
 
 ## 残タスク (優先順)
 
-1. **resource** — ハンドル型。最大の難物。`own<T>`/`borrow<T>` + resource テーブル + ドロップ関数
+1. **resource 拡張** — v0.23 は constructor + 1 メソッドの最小構成。未カバー: 複数メソッド複合テスト、static メソッド、imported resource (別コンポーネントが定義し当方が使うケース)、`[dtor]` カスタム destructor、resource フィールド to/from record
 2. **LocalGet of nested compound** — record-of-record を LocalGet で渡す等、compound フィールドをリテラルでなくローカルから読むケース。v0.22 はリテラル専用。
 
 ## 設計原則 (変わらず)

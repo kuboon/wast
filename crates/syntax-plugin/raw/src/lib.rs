@@ -100,6 +100,12 @@ fn render_wit_type_with_guard(
             let parts: Vec<String> = names.iter().map(|n| format!("(flag ${n})")).collect();
             format!("(flags {})", parts.join(" "))
         }
+        WitType::Resource => "(resource)".to_string(),
+        WitType::Own(r) => format!("(own {})", render_type_ref_with_guard(r, types, resolving)),
+        WitType::Borrow(r) => format!(
+            "(borrow {})",
+            render_type_ref_with_guard(r, types, resolving)
+        ),
     }
 }
 
@@ -370,6 +376,18 @@ fn render_instruction(instr: &Instruction, indent: &str) -> String {
         Instruction::FlagsCtor { flags } => {
             let parts: Vec<String> = flags.iter().map(|f| format!("${f}")).collect();
             format!("{indent}(flags.ctor {})", parts.join(" "))
+        }
+        Instruction::ResourceNew { resource, rep } => {
+            let r = render_instruction(rep, &inner);
+            format!("{indent}(resource.new ${resource}\n{r})")
+        }
+        Instruction::ResourceRep { resource, handle } => {
+            let h = render_instruction(handle, &inner);
+            format!("{indent}(resource.rep ${resource}\n{h})")
+        }
+        Instruction::ResourceDrop { resource, handle } => {
+            let h = render_instruction(handle, &inner);
+            format!("{indent}(resource.drop ${resource}\n{h})")
         }
         Instruction::MatchOption {
             value,

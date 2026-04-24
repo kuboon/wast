@@ -88,6 +88,9 @@ fn wit_type_to_binding(value: &WitType) -> BindingWitType {
         WitType::Tuple(items) => BindingWitType::Tuple(items.clone()),
         WitType::Enum(cases) => BindingWitType::Enum(cases.clone()),
         WitType::Flags(names) => BindingWitType::Flags(names.clone()),
+        WitType::Resource => BindingWitType::Resource,
+        WitType::Own(r) => BindingWitType::Own(r.clone()),
+        WitType::Borrow(r) => BindingWitType::Borrow(r.clone()),
     }
 }
 
@@ -102,6 +105,9 @@ fn wit_type_from_binding(value: &BindingWitType) -> WitType {
         BindingWitType::Tuple(items) => WitType::Tuple(items.clone()),
         BindingWitType::Enum(cases) => WitType::Enum(cases.clone()),
         BindingWitType::Flags(names) => WitType::Flags(names.clone()),
+        BindingWitType::Resource => WitType::Resource,
+        BindingWitType::Own(r) => WitType::Own(r.clone()),
+        BindingWitType::Borrow(r) => WitType::Borrow(r.clone()),
     }
 }
 

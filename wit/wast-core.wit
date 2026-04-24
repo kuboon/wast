@@ -15,6 +15,9 @@ interface types {
     %tuple(list<wit-type-ref>),
     %enum(list<string>),
     %flags(list<string>),
+    %resource,
+    %own(wit-type-ref),
+    %borrow(wit-type-ref),
   }
 
   enum primitive-type {

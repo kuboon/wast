@@ -48,6 +48,10 @@ pub enum ResolvedType {
     Enum(Vec<String>),
     /// Bitflag set. Up to 32 flags fit in i32, 33-64 in i64 (v0.19 scope).
     Flags(Vec<String>),
+    /// `own<R>` handle. Flat ABI: one i32. Wraps the resource uid `R`.
+    Own(String),
+    /// `borrow<R>` handle. Flat ABI: one i32. Wraps the resource uid `R`.
+    Borrow(String),
 }
 
 pub fn resolve_type(ty_ref: &str, type_map: &TypeMap) -> Result<ResolvedType, CompileError> {
@@ -77,6 +81,12 @@ pub fn resolve_type(ty_ref: &str, type_map: &TypeMap) -> Result<ResolvedType, Co
         WitType::Tuple(elems) => Ok(ResolvedType::Tuple(elems.clone())),
         WitType::Enum(cases) => Ok(ResolvedType::Enum(cases.clone())),
         WitType::Flags(names) => Ok(ResolvedType::Flags(names.clone())),
+        WitType::Resource => Err(CompileError::InvalidInput(format!(
+            "bare resource type {ty_ref:?} cannot be used as a value type — \
+             use own<{ty_ref}> or borrow<{ty_ref}>"
+        ))),
+        WitType::Own(r) => Ok(ResolvedType::Own(r.clone())),
+        WitType::Borrow(r) => Ok(ResolvedType::Borrow(r.clone())),
     }
 }
 
@@ -171,6 +181,7 @@ pub fn flat_slots(ty_ref: &str, type_map: &TypeMap) -> Result<Vec<&'static str>,
                 )))
             }
         }
+        ResolvedType::Own(_) | ResolvedType::Borrow(_) => Ok(vec!["i32"]),
     }
 }
 
@@ -258,6 +269,7 @@ pub fn size_align(ty_ref: &str, type_map: &TypeMap) -> Result<(usize, usize), Co
                 )))
             }
         }
+        ResolvedType::Own(_) | ResolvedType::Borrow(_) => Ok((4, 4)),
     }
 }
 
@@ -1288,6 +1300,23 @@ fn emit_field_store(
             ));
             Ok(())
         }
+        ResolvedType::Own(_) | ResolvedType::Borrow(_) => {
+            // Handles flatten to i32. Any source that produces an i32 on the
+            // stack (LocalGet, Call to a resource intrinsic, etc.) works.
+            out.push_str(&format!("      local.get {ret_ptr}\n"));
+            emit_instr(
+                value,
+                Some(ty),
+                scope,
+                func_map,
+                type_map,
+                literal_table,
+                ret_ptr_slot,
+                out,
+            )?;
+            out.push_str(&format!("      i32.store offset={base_offset} align=4\n"));
+            Ok(())
+        }
         ResolvedType::Flags(names) => {
             let flags = match value {
                 Instruction::FlagsCtor { flags } => flags,
@@ -2071,6 +2100,50 @@ fn emit_instr(
                     .into(),
             ));
         }
+        Instruction::ResourceNew { resource, rep } => {
+            // Call `[resource-new]R` with the rep value; leaves the handle on
+            // the stack.
+            emit_instr(
+                rep,
+                Some("u32"),
+                scope,
+                func_map,
+                type_map,
+                literal_table,
+                ret_ptr_slot,
+                out,
+            )?;
+            out.push_str(&format!("      call ${}__new\n", mangle(resource)));
+        }
+        Instruction::ResourceRep { resource, handle } => {
+            // Call `[resource-rep]R` with the handle; leaves the rep on the
+            // stack.
+            emit_instr(
+                handle,
+                None,
+                scope,
+                func_map,
+                type_map,
+                literal_table,
+                ret_ptr_slot,
+                out,
+            )?;
+            out.push_str(&format!("      call ${}__rep\n", mangle(resource)));
+        }
+        Instruction::ResourceDrop { resource, handle } => {
+            // Call `[resource-drop]R` with the handle; no result.
+            emit_instr(
+                handle,
+                None,
+                scope,
+                func_map,
+                type_map,
+                literal_table,
+                ret_ptr_slot,
+                out,
+            )?;
+            out.push_str(&format!("      call ${}__drop\n", mangle(resource)));
+        }
         Instruction::TupleGet { value, index } => {
             // Mirror of RecordGet, with positional index lookup.
             let uid = match value.as_ref() {
@@ -2562,6 +2635,8 @@ fn branch_result_clause<'a>(
                         "i64".to_string()
                     }
                 }
+                // Handles are flat i32.
+                ResolvedType::Own(_) | ResolvedType::Borrow(_) => "i32".to_string(),
             };
             Ok((format!(" (result {core})"), Some(ty)))
         }

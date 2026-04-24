@@ -117,6 +117,9 @@ fn format_wit_type(
         }
         WitType::Enum(cases) => format!("enum {{ {} }}", cases.join(" | ")),
         WitType::Flags(names) => format!("flags {{ {} }}", names.join(" | ")),
+        WitType::Resource => "resource".to_string(),
+        WitType::Own(r) => format!("own<{}>", r),
+        WitType::Borrow(r) => format!("borrow<{}>", r),
     }
 }
 
@@ -423,6 +426,18 @@ fn render_instruction(
         }
         Instruction::FlagsCtor { flags } => {
             format!("{indent}{{ {} }}", flags.join(", "))
+        }
+        Instruction::ResourceNew { resource, rep } => {
+            let r = render_expr(rep, local_names, func_names);
+            format!("{indent}new {resource}({r})")
+        }
+        Instruction::ResourceRep {
+            resource: _,
+            handle,
+        } => render_expr(handle, local_names, func_names),
+        Instruction::ResourceDrop { resource, handle } => {
+            let h = render_expr(handle, local_names, func_names);
+            format!("{indent}{resource}.drop({h})")
         }
         Instruction::MatchOption {
             value,

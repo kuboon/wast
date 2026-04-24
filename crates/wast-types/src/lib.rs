@@ -38,6 +38,14 @@ pub enum WitType {
     Enum(Vec<String>),
     /// Bitflag set — up to 32 flags for a single i32, 33-64 for i64.
     Flags(Vec<String>),
+    /// A named resource type. Members (constructor/methods/statics) are
+    /// separate `WastFunc` rows with `[constructor]name` / `[method]name.op`
+    /// / `[static]name.op` exported names. At the core ABI, handles are i32.
+    Resource,
+    /// `own<T>` — an owning handle to resource `T`. Flat ABI: single i32.
+    Own(String),
+    /// `borrow<T>` — a borrowed handle to resource `T`. Flat ABI: single i32.
+    Borrow(String),
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]

@@ -1,0 +1,12 @@
+package wast:generated;
+
+interface generated-iface {
+  resource counter {
+    constructor(init: u32);
+    get: func() -> u32;
+  }
+}
+
+world generated {
+  export generated-iface;
+}
