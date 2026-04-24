@@ -1006,7 +1006,9 @@ fn emit_field_store(
                         src_base + 1
                     ));
                 }
-                Instruction::StringLiteral { bytes } if matches!(resolved, ResolvedType::String) => {
+                Instruction::StringLiteral { bytes }
+                    if matches!(resolved, ResolvedType::String) =>
+                {
                     let offset = literal_table.get(bytes).ok_or_else(|| {
                         CompileError::InvalidInput(
                             "StringLiteral missing from literal table".into(),
@@ -1021,7 +1023,9 @@ fn emit_field_store(
                         bytes.len()
                     ));
                 }
-                Instruction::ListLiteral { values } if matches!(resolved, ResolvedType::List(_)) => {
+                Instruction::ListLiteral { values }
+                    if matches!(resolved, ResolvedType::List(_)) =>
+                {
                     let ResolvedType::List(elem_ty) = resolved else {
                         unreachable!();
                     };
@@ -1268,12 +1272,9 @@ fn emit_field_store(
                     )));
                 }
             };
-            let disc = cases
-                .iter()
-                .position(|n| n == case)
-                .ok_or_else(|| {
-                    CompileError::InvalidInput(format!("case {case:?} not found in enum {ty:?}"))
-                })?;
+            let disc = cases.iter().position(|n| n == case).ok_or_else(|| {
+                CompileError::InvalidInput(format!("case {case:?} not found in enum {ty:?}"))
+            })?;
             // Enum uses smallest int that holds the count. For ≤256 cases: i32.store8.
             let (size, _) = size_align(ty, type_map)?;
             let store = match size {
@@ -1663,7 +1664,9 @@ fn instr_has_list_literal(i: &Instruction) -> bool {
         }
         Instruction::MatchVariant { value, arms } => {
             instr_has_list_literal(value)
-                || arms.iter().any(|arm| arm.body.iter().any(instr_has_list_literal))
+                || arms
+                    .iter()
+                    .any(|arm| arm.body.iter().any(instr_has_list_literal))
         }
         _ => false,
     }
@@ -2064,7 +2067,8 @@ fn emit_instr(
             // position) and emit_field_store (nested list field). Reaching
             // here means it was used mid-body as a flat value stream.
             return Err(CompileError::Unsupported(
-                "ListLiteral outside of return position / nested list field not supported yet".into(),
+                "ListLiteral outside of return position / nested list field not supported yet"
+                    .into(),
             ));
         }
         Instruction::TupleGet { value, index } => {

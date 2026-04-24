@@ -143,9 +143,7 @@ fn list_literal_i64_8byte_aligned() {
                     values: vec![
                         Instruction::Const { value: -1 },
                         Instruction::Const { value: 0 },
-                        Instruction::Const {
-                            value: i64::MAX,
-                        },
+                        Instruction::Const { value: i64::MAX },
                     ],
                 }])),
             },
@@ -259,16 +257,19 @@ fn record_with_list_literal_field() {
                 }])),
             },
         }],
-        types: vec![WastTypeRow {
-            uid: "bag".into(),
-            def: WastTypeDef {
-                source: TypeSource::Internal("bag".into()),
-                definition: WitType::Record(vec![
-                    ("items".into(), "list_u32".into()),
-                    ("label".into(), "string".into()),
-                ]),
+        types: vec![
+            WastTypeRow {
+                uid: "bag".into(),
+                def: WastTypeDef {
+                    source: TypeSource::Internal("bag".into()),
+                    definition: WitType::Record(vec![
+                        ("items".into(), "list_u32".into()),
+                        ("label".into(), "string".into()),
+                    ]),
+                },
             },
-        }, list_u32_type()],
+            list_u32_type(),
+        ],
     };
 
     let (engine, component) = load(&db);
