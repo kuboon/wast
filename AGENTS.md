@@ -33,9 +33,9 @@ See [crates/file-manager/PLAN.md](crates/file-manager/PLAN.md) for the SQLite mi
 | compiler | `crates/compiler/` | **v0.35 done** (mixed-width disc-branch copy + f/i reinterpret + imported resource extras) | nested-compound case payload → kebab-case auto-norm |
 | pattern-analyzer | `crates/syntax-plugin/internal/pattern-analyzer/` | **Done** | — |
 | raw syntax | `crates/syntax-plugin/raw/` | **Done** | — |
-| ruby-like syntax | `crates/syntax-plugin/ruby-like/` | **Partial** | `from_text` body parsing, body roundtrip tests |
+| ruby-like syntax | `crates/syntax-plugin/ruby-like/` | **Done** (preservation roundtrip) | recursive-descent body parser (currently bodies preserve via existing-body fallback rather than parse) |
 | ts-like syntax | `crates/syntax-plugin/ts-like/` | **Done** | — |
-| rust-like syntax | `crates/syntax-plugin/rust-like/` | **Partial** | `from_text` body parsing, body roundtrip tests |
+| rust-like syntax | `crates/syntax-plugin/rust-like/` | **Done** (preservation roundtrip) | recursive-descent body parser (currently bodies preserve via existing-body fallback rather than parse) |
 | VS Code extension | `packages/vscode-extension/` | **Partial** | Body rendering, save flow, LSP, session conflicts |
 
 ## Detailed TODO
@@ -103,9 +103,9 @@ See [crates/file-manager/PLAN.md](crates/file-manager/PLAN.md) for the SQLite mi
 ### syntax plugins (ruby-like, ts-like, rust-like, raw)
 - [x] **to_text**: Render actual body instructions (all plugins deserialize via pattern-analyzer and render real instructions with language-specific syntax)
 - [x] **from_text (ts-like)**: Full body expression parser — recursive descent parser handles all instruction types (if/else, while, block, switch/match, calls, arithmetic, comparisons, WIT types). Parses TS-like text back to `Vec<Instruction>` and serializes via pattern-analyzer
-- [ ] **from_text (ruby-like, rust-like)**: Still signature-only — skips body lines, preserves existing binary body unchanged
+- [x] **from_text (ruby-like, rust-like) — preservation roundtrip**: Both plugins parse signatures and skip the body, restoring the body bytes from the `existing` component on `from_text`. Ruby-like's body skip now handles nested `end`-terminated constructs (`if`/`loop do`/`begin`/`case`) by counting opener/closer depth; rust-like already counted brace nesting. The to_text → from_text → to_text identity holds across the full v0.16-era IR (tests below). Replacing the skip path with a real recursive-descent parser remains future work.
 - [x] **Body roundtrip tests (ts-like)**: simple instructions, calls, arithmetic, comparisons, if/else, loops, blocks, WIT types (some/ok/err/isErr), match-option, match-result, nested constructs
-- [ ] Body roundtrip tests (ruby-like, rust-like)
+- [x] **Body roundtrip tests (ruby-like, rust-like)**: same 11-case battery as ts-like — locks in the preservation contract.
 
 ### VS Code extension (`packages/vscode-extension/`)
 - [x] TreeView panel — scans workspace recursively for wast.json files, lists components and functions with display names from syms. Properly filters .git/node_modules, supports depth limit

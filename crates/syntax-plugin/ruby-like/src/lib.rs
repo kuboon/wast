@@ -848,14 +848,50 @@ impl bindings::exports::wast::core::syntax_plugin::Guest for Component {
                         let parsed =
                             combine_def_and_annotation(name, pnames, pending_annotation.take());
 
-                        // Walk the body to `end` unless it's a one-liner stub.
+                        // Walk the body to the matching `end` unless it's a
+                        // one-liner stub. Body content can have nested
+                        // `end`-terminated constructs (if/loop/begin/case),
+                        // so count nesting depth.
                         if !after_end {
                             i += 1;
-                            while i < lines.len() && lines[i].trim() != "end" {
+                            let mut depth: i32 = 0;
+                            while i < lines.len() {
+                                let bline = lines[i].trim();
+                                if bline.is_empty() {
+                                    i += 1;
+                                    continue;
+                                }
+                                // Strip an inline `# …` comment so the
+                                // opener heuristic ignores label suffixes
+                                // (`loop do # label0` etc.).
+                                let bare = bline
+                                    .split_once(" #")
+                                    .map(|(b, _)| b.trim())
+                                    .unwrap_or(bline);
+                                let opens = bare.starts_with("if ")
+                                    || bare == "if"
+                                    || bare.starts_with("unless ")
+                                    || bare.starts_with("while ")
+                                    || bare.starts_with("until ")
+                                    || bare.starts_with("for ")
+                                    || bare.starts_with("case ")
+                                    || bare == "case"
+                                    || bare == "begin"
+                                    || bare.starts_with("begin ")
+                                    || bare == "loop do"
+                                    || bare.starts_with("loop do ")
+                                    || bare.ends_with(" do");
+                                if opens {
+                                    depth += 1;
+                                }
+                                if bare == "end" || bare.starts_with("end ") {
+                                    if depth == 0 {
+                                        i += 1;
+                                        break; // outer def end
+                                    }
+                                    depth -= 1;
+                                }
                                 i += 1;
-                            }
-                            if i < lines.len() {
-                                i += 1; // skip 'end'
                             }
                         } else {
                             i += 1;
@@ -1214,5 +1250,239 @@ mod tests {
         let parsed = Component::from_text(text, comp);
         assert!(parsed.is_ok());
         assert_eq!(parsed.unwrap().funcs.len(), 0);
+    }
+
+    // -----------------------------------------------------------------------
+    // Body roundtrip tests
+    //
+    // ruby-like's `from_text` doesn't currently parse body content — it
+    // skips lines between the `def` header and the trailing `end`, then
+    // restores the body bytes from the `existing` component. These tests
+    // lock in that contract: to_text → from_text (with same component
+    // passed as `existing`) → to_text produces identical text. A future
+    // milestone would replace the skip-and-restore behaviour with a real
+    // body parser; until then, these tests guarantee at least
+    // round-trippable preservation.
+    // -----------------------------------------------------------------------
+
+    fn make_body_component(instructions: Vec<Instruction>) -> WastComponent {
+        let body = wast_pattern_analyzer::serialize_body(&instructions);
+        WastComponent {
+            funcs: vec![(
+                "f1".to_string(),
+                WastFunc {
+                    source: FuncSource::Internal("f1".to_string()),
+                    params: vec![("p1".to_string(), "t1".to_string())],
+                    result: Some("t1".to_string()),
+                    body: Some(body),
+                },
+            )],
+            types: vec![(
+                "t1".to_string(),
+                WastTypeDef {
+                    source: TypeSource::Internal("t1".to_string()),
+                    definition: WitType::Primitive(PrimitiveType::U32),
+                },
+            )],
+            syms: Syms {
+                wit_syms: vec![],
+                internal: vec![
+                    SymEntry {
+                        uid: "f1".to_string(),
+                        display_name: "my_func".to_string(),
+                    },
+                    SymEntry {
+                        uid: "t1".to_string(),
+                        display_name: "u32".to_string(),
+                    },
+                ],
+                local: vec![
+                    SymEntry {
+                        uid: "p1".to_string(),
+                        display_name: "x".to_string(),
+                    },
+                    SymEntry {
+                        uid: "v1".to_string(),
+                        display_name: "y".to_string(),
+                    },
+                    SymEntry {
+                        uid: "v2".to_string(),
+                        display_name: "v".to_string(),
+                    },
+                    SymEntry {
+                        uid: "v3".to_string(),
+                        display_name: "res".to_string(),
+                    },
+                    SymEntry {
+                        uid: "v4".to_string(),
+                        display_name: "opt".to_string(),
+                    },
+                ],
+            },
+        }
+    }
+
+    fn assert_body_roundtrip(instructions: Vec<Instruction>) {
+        let comp = make_body_component(instructions);
+        let text1 = Component::to_text(comp.clone());
+        let parsed = Component::from_text(text1.clone(), comp);
+        assert!(parsed.is_ok(), "from_text failed: {:?}", parsed.err());
+        let text2 = Component::to_text(parsed.unwrap());
+        assert_eq!(
+            text1, text2,
+            "body roundtrip text mismatch:\n--- expected ---\n{}\n--- actual ---\n{}",
+            text1, text2
+        );
+    }
+
+    #[test]
+    fn test_body_roundtrip_simple_instructions() {
+        assert_body_roundtrip(vec![
+            Instruction::LocalSet {
+                uid: "v1".into(),
+                value: Box::new(Instruction::Const { value: 42 }),
+            },
+            Instruction::Return,
+        ]);
+    }
+
+    #[test]
+    fn test_body_roundtrip_call() {
+        assert_body_roundtrip(vec![Instruction::Call {
+            func_uid: "f1".into(),
+            args: vec![("p1".into(), Instruction::Const { value: 10 })],
+        }]);
+    }
+
+    #[test]
+    fn test_body_roundtrip_arithmetic() {
+        assert_body_roundtrip(vec![Instruction::LocalSet {
+            uid: "v1".into(),
+            value: Box::new(Instruction::Arithmetic {
+                op: ArithOp::Add,
+                lhs: Box::new(Instruction::LocalGet { uid: "p1".into() }),
+                rhs: Box::new(Instruction::Const { value: 1 }),
+            }),
+        }]);
+    }
+
+    #[test]
+    fn test_body_roundtrip_compare() {
+        assert_body_roundtrip(vec![Instruction::LocalSet {
+            uid: "v1".into(),
+            value: Box::new(Instruction::Compare {
+                op: CompareOp::Lt,
+                lhs: Box::new(Instruction::LocalGet { uid: "p1".into() }),
+                rhs: Box::new(Instruction::Const { value: 100 }),
+            }),
+        }]);
+    }
+
+    #[test]
+    fn test_body_roundtrip_if_else() {
+        assert_body_roundtrip(vec![Instruction::If {
+            condition: Box::new(Instruction::Compare {
+                op: CompareOp::Eq,
+                lhs: Box::new(Instruction::LocalGet { uid: "p1".into() }),
+                rhs: Box::new(Instruction::Const { value: 0 }),
+            }),
+            then_body: vec![Instruction::Return],
+            else_body: vec![Instruction::Nop],
+        }]);
+    }
+
+    #[test]
+    fn test_body_roundtrip_loop() {
+        assert_body_roundtrip(vec![Instruction::Loop {
+            label: Some("loop0".into()),
+            body: vec![
+                Instruction::BrIf {
+                    label: "loop0".into(),
+                    condition: Box::new(Instruction::Compare {
+                        op: CompareOp::Lt,
+                        lhs: Box::new(Instruction::LocalGet { uid: "v1".into() }),
+                        rhs: Box::new(Instruction::Const { value: 10 }),
+                    }),
+                },
+                Instruction::Br {
+                    label: "loop0".into(),
+                },
+            ],
+        }]);
+    }
+
+    #[test]
+    fn test_body_roundtrip_block() {
+        assert_body_roundtrip(vec![Instruction::Block {
+            label: Some("done".into()),
+            body: vec![Instruction::Nop, Instruction::Return],
+        }]);
+    }
+
+    #[test]
+    fn test_body_roundtrip_wit_types() {
+        assert_body_roundtrip(vec![
+            Instruction::Some {
+                value: Box::new(Instruction::Const { value: 7 }),
+            },
+            Instruction::None,
+            Instruction::Ok {
+                value: Box::new(Instruction::Const { value: 1 }),
+            },
+            Instruction::Err {
+                value: Box::new(Instruction::Const { value: 2 }),
+            },
+            Instruction::IsErr {
+                value: Box::new(Instruction::LocalGet { uid: "v3".into() }),
+            },
+        ]);
+    }
+
+    #[test]
+    fn test_body_roundtrip_match_option() {
+        assert_body_roundtrip(vec![Instruction::MatchOption {
+            value: Box::new(Instruction::LocalGet { uid: "v4".into() }),
+            some_binding: "v2".into(),
+            some_body: vec![Instruction::LocalGet { uid: "v2".into() }],
+            none_body: vec![Instruction::Const { value: 0 }],
+        }]);
+    }
+
+    #[test]
+    fn test_body_roundtrip_match_result() {
+        assert_body_roundtrip(vec![Instruction::MatchResult {
+            value: Box::new(Instruction::LocalGet { uid: "v3".into() }),
+            ok_binding: "v2".into(),
+            ok_body: vec![Instruction::LocalGet { uid: "v2".into() }],
+            err_binding: "v1".into(),
+            err_body: vec![Instruction::Const { value: 0 }],
+        }]);
+    }
+
+    #[test]
+    fn test_body_roundtrip_nested_if_in_loop() {
+        assert_body_roundtrip(vec![Instruction::Loop {
+            label: Some("outer".into()),
+            body: vec![
+                Instruction::If {
+                    condition: Box::new(Instruction::IsErr {
+                        value: Box::new(Instruction::LocalGet { uid: "v3".into() }),
+                    }),
+                    then_body: vec![Instruction::Return],
+                    else_body: vec![Instruction::Nop],
+                },
+                Instruction::LocalSet {
+                    uid: "v1".into(),
+                    value: Box::new(Instruction::Arithmetic {
+                        op: ArithOp::Add,
+                        lhs: Box::new(Instruction::LocalGet { uid: "v1".into() }),
+                        rhs: Box::new(Instruction::Const { value: 1 }),
+                    }),
+                },
+                Instruction::Br {
+                    label: "outer".into(),
+                },
+            ],
+        }]);
     }
 }
