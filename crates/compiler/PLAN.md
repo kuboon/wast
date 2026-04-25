@@ -1,6 +1,6 @@
 # compiler — wast → wasm Component コンパイラ
 
-**現状: v0.31 完了**。numeric / control flow / calls / option / result / string / list / record / variant / tuple / char / enum / flags / ListLiteral / deep nested compound / exported & imported resource / LocalGet of compound in field position / heterogeneous result/variant の i32/i64 narrow + LocalGet の暗黙 widen まで端から端まで動く。
+**現状: v0.32 完了**。numeric / control flow / calls / option / result / string / list / record / variant / tuple / char / enum / flags / ListLiteral / deep nested compound / exported & imported resource / LocalGet of compound in field position / heterogeneous result/variant の i32/i64 narrow + LocalGet の暗黙 widen + heterogeneous result/variant の construction (memory layout 修正済) まで端から端まで動く。
 
 ## 全体アーキテクチャ (v0.11 以降)
 
@@ -112,10 +112,9 @@ Compound 戻り or body 内に Some/None/Ok/Err があるとき、**param+local 
 
 ## 残タスク (優先順)
 
-1. **construct-side widen** — Some/Ok/Err/VariantCtor の payload が narrow 型で wider コンテキストに入った時の widen。v0.31 は LocalGet (= 値読み出し点) のみで、構築側はまだ。
-2. **heterogeneous memory copy** — `result<string, u32>` のように case ごとに memory layout が異なるケースの emit_copy_from_local。disc 分岐 + case 別 copy が必要。
-3. **f32/f64 reinterpret / demote** — heterogeneous_narrow_op / implicit_widen_op は i32/i64 + f32→f64 promote のみ対応。i32/f32 reinterpret や f64→f32 demote は未対応。
-4. **imported resource の拡張** — v0.28 は constructor + method のみ。imported static method や imported resource を record/tuple の field で扱うテストも欲しい。
+1. **heterogeneous memory copy** — `result<string, u32>` のように case ごとに memory layout が異なるケースの emit_copy_from_local。disc 分岐 + case 別 copy が必要。
+2. **f32/f64 reinterpret / demote** — heterogeneous_narrow_op / implicit_widen_op は i32/i64 + f32→f64 promote のみ対応。i32/f32 reinterpret や f64→f32 demote は未対応。
+3. **imported resource の拡張** — v0.28 は constructor + method のみ。imported static method や imported resource を record/tuple の field で扱うテストも欲しい。
 
 ## 設計原則 (変わらず)
 

@@ -1515,8 +1515,13 @@ fn emit_field_store(
                 "      local.get {ret_ptr}\n      i32.const {disc}\n      i32.store8 offset={base_offset}\n"
             ));
             if let (Some(pty), Some(val)) = (declared_payload.as_deref(), payload.as_deref()) {
-                let (_, pay_align) = size_align(pty, type_map)?;
-                let payload_offset = align_up(1, pay_align);
+                // Canonical-ABI variant memory: payload sits at
+                // align_up(disc_size, max_case_align). Use the *outer* type's
+                // alignment (which equals max over all cases) — using a
+                // single case's alignment is wrong when the variant has
+                // mixed-alignment cases.
+                let (_, outer_align) = size_align(ty, type_map)?;
+                let payload_offset = align_up(1, outer_align);
                 emit_field_store(
                     val,
                     pty,
@@ -1590,8 +1595,9 @@ fn emit_field_store(
                     )));
                 }
             };
-            let (_, pay_align) = size_align(&pay_ty, type_map)?;
-            let payload_offset = align_up(1, pay_align);
+            // Use the result's outer alignment — which equals max(ok, err).
+            let (_, outer_align) = size_align(ty, type_map)?;
+            let payload_offset = align_up(1, outer_align);
             out.push_str(&format!(
                 "      local.get {ret_ptr}\n      i32.const {disc}\n      i32.store8 offset={base_offset}\n"
             ));
@@ -1833,10 +1839,11 @@ fn emit_variant_return_wrap(
         "      local.get {ret_ptr}\n      i32.const {disc}\n      i32.store8 offset=0\n"
     ));
 
-    // Store payload when the case carries one.
+    // Store payload when the case carries one. Payload offset uses the
+    // *variant's* alignment (max over cases), not the selected case's own
+    // alignment — that's what readers expect per the Canonical ABI.
     if let (Some(pty), Some(val)) = (declared_payload.as_deref(), payload.as_deref()) {
-        let (_, pay_align) = size_align(pty, type_map)?;
-        let payload_offset = align_up(1, pay_align);
+        let payload_offset = align_up(1, align);
         emit_field_store(
             val,
             pty,
@@ -2980,10 +2987,12 @@ fn emit_variant_ctor(
     ));
 
     // Store payload if present. Some/None's payload-less case skips entirely;
-    // Result cases always have a payload in our IR.
+    // Result cases always have a payload in our IR. Payload offset uses the
+    // *outer* type's alignment (max over cases) per the Canonical ABI —
+    // critical for heterogeneous variants like result<u32, u64> where the
+    // ok-case's own align (4) differs from the variant's max align (8).
     if let (Some(v), Some(pty)) = (value, payload_ty.as_deref()) {
-        let (_, pay_align) = size_align(pty, type_map)?;
-        let payload_offset = align_up(1, pay_align);
+        let payload_offset = align_up(1, align);
         let (store, align_pow2) = store_op(pty)?;
         out.push_str(&format!("      local.get {ret_ptr}\n"));
         emit_instr(
