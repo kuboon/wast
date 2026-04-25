@@ -263,9 +263,10 @@ async function initPluginShowcase() {
     }
   }
 
-  // partial-manager rejoins the partial returned by from_text with the
-  // full component so funcs/types not visible in the pane survive a Sync.
-  let partialManager = null;
+  // partial-manager.extract builds the partial each pane renders;
+  // partial-manager.merge rejoins parsed text back into full on Sync.
+  // Without it the showcase can't run, so bail loudly if it didn't load.
+  let partialManager;
   try {
     const m = await import(
       /* @vite-ignore */ new URL(
@@ -275,7 +276,10 @@ async function initPluginShowcase() {
     );
     partialManager = m.partialManager;
   } catch (err) {
-    console.warn("partial-manager load failed:", err);
+    host.append(
+      h("p", { class: "err" }, `partial-manager load failed: ${err.message ?? err}`),
+    );
+    return;
   }
 
   const wc = showcase.wastComponent;
@@ -357,24 +361,41 @@ async function initPluginShowcase() {
       }
     }
     if (targets.length === 0) return null;
-    if (!partialManager) {
-      // Fallback when partial-manager failed to load. Just filter wcRef
-      // shallowly; sync from this state will likely lose internals.
-      const keep = new Set(targets.map((t) => t.sym));
-      return { ...wcRef, funcs: wcRef.funcs.filter(([uid]) => keep.has(uid)) };
-    }
     return partialManager.extract(wcRef, targets);
   }
 
-  /** Pull the WastError list out of whatever a jco from_text rejection
-   * looks like (could be a thrown Error with a `.payload`, an array, or
-   * just a string message).
+  /** Pull the WastError list out of whatever a jco rejection looks like
+   * (could be a thrown Error with a `.payload`, an array, or just a
+   * string message).
    */
   function extractParseErrors(thrown) {
     if (Array.isArray(thrown)) return thrown;
     if (thrown?.payload && Array.isArray(thrown.payload)) return thrown.payload;
     if (thrown?.message) return [{ message: thrown.message }];
     return [{ message: String(thrown) }];
+  }
+
+  function clearErrors(box) {
+    box.innerHTML = "";
+    box.className = "pane-errors";
+  }
+
+  function showErrors(box, stage, errs) {
+    box.classList.add("err");
+    box.append(
+      h(
+        "strong",
+        {},
+        `${stage} failed (${errs.length} error${errs.length === 1 ? "" : "s"}):`,
+      ),
+    );
+    const ul = h("ul", {});
+    for (const e of errs) {
+      const msg = e.message ?? String(e);
+      const loc = e.location ? ` [${e.location}]` : "";
+      ul.append(h("li", {}, `${msg}${loc}`));
+    }
+    box.append(ul);
   }
 
   function renderGrid() {
@@ -405,59 +426,49 @@ async function initPluginShowcase() {
         box.classList.add("err");
       }
       sync.addEventListener("click", () => {
-        errBox.innerHTML = "";
-        errBox.className = "pane-errors";
+        clearErrors(errBox);
         const plugin = pluginMods[p.id];
         if (!plugin || !plugin.fromText) {
-          errBox.classList.add("err");
-          errBox.textContent = "this plugin does not implement from_text";
+          showErrors(errBox, "plugin", [
+            { message: `${p.id} does not implement from_text` },
+          ]);
           return;
         }
-        let stage = "from_text";
+
+        // Stage 1: syntax plugin parses pane text into a partial component.
+        // jco unpacks result<T, E> — Ok returns a value, Err throws.
+        let parsed;
         try {
-          // Pane text only contains the filtered subset, so from_text
-          // returns a *partial* WastComponent. partial-manager.merge
-          // rejoins it with the full wcRef — funcs/types not in the
-          // partial keep their existing entries in full.
-          // jco unpacks result<T, E> — Ok arrives as a plain value, Err throws.
-          const parsed = plugin.fromText(ta.value, wcRef);
-          let merged;
-          if (partialManager) {
-            stage = "merge";
-            merged = partialManager.merge(parsed, wcRef);
-          } else {
-            // Fallback: without partial-manager we'd lose internals.
-            // Keep the parsed-as-full behaviour but warn loudly.
-            console.warn("partial-manager unavailable; sync may drop funcs");
-            merged = parsed;
-          }
-          wcRef = merged;
-          // Rebuild toggles for any new uids introduced by the parser
-          // (e.g. when a fresh func/local name appears in the edited text).
-          for (const [uid, row] of wcRef.funcs) {
-            if (!toggles[uid]) {
-              toggles[uid] = {
-                show: row.source.tag === "exported",
-                withCallers: false,
-              };
-            }
-          }
-          renderControls();
-          renderGrid();
+          parsed = plugin.fromText(ta.value, wcRef);
         } catch (err) {
-          const errs = extractParseErrors(err);
-          errBox.classList.add("err");
-          errBox.append(
-            h("strong", {}, `${stage} failed (${errs.length} error${errs.length === 1 ? "" : "s"}):`),
-          );
-          const ul = h("ul", {});
-          for (const e of errs) {
-            const msg = e.message ?? String(e);
-            const loc = e.location ? ` [${e.location}]` : "";
-            ul.append(h("li", {}, `${msg}${loc}`));
-          }
-          errBox.append(ul);
+          showErrors(errBox, "from_text", extractParseErrors(err));
+          return;
         }
+
+        // Stage 2: partial-manager merges the partial back into full,
+        // checking signatures of imported/exported funcs against full's
+        // existing entries.
+        let merged;
+        try {
+          merged = partialManager.merge(parsed, wcRef);
+        } catch (err) {
+          showErrors(errBox, "merge", extractParseErrors(err));
+          return;
+        }
+
+        // Both stages succeeded — commit and re-render. Rendering errors
+        // are programmer bugs, so let them propagate to the console.
+        wcRef = merged;
+        for (const [uid, row] of wcRef.funcs) {
+          if (!toggles[uid]) {
+            toggles[uid] = {
+              show: row.source.tag === "exported",
+              withCallers: false,
+            };
+          }
+        }
+        renderControls();
+        renderGrid();
       });
       box.append(ta, h("div", { class: "pane-toolbar" }, [sync]));
       box.append(errBox);

@@ -380,6 +380,11 @@ main {
 }
 .plugin-box .pane-errors.err {
   color: var(--err);
+  background: rgba(248, 81, 73, 0.08);
+  border: 1px solid var(--err);
+  border-radius: 4px;
+  padding: 0.5rem 0.65rem;
+  margin-top: 0.4rem;
 }
 .plugin-box .pane-errors ul {
   margin: 0.25rem 0 0;
