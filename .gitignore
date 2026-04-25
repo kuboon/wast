@@ -35,6 +35,7 @@ Thumbs.db
 packages/web-demo/dist/
 packages/web-demo/public/components/
 packages/web-demo/public/plugins/
+packages/web-demo/public/tools/
 packages/web-demo/public/vendor/
 
 # Claude Code session state

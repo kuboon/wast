@@ -637,10 +637,7 @@ fn tokenize(text: &str) -> Result<Vec<Tok>, String> {
                             i += 3;
                         }
                         _ => {
-                            return Err(format!(
-                                "unknown escape \\{} at offset {i}",
-                                c as char
-                            ));
+                            return Err(format!("unknown escape \\{} at offset {i}", c as char));
                         }
                     }
                 } else {
@@ -853,10 +850,7 @@ fn parse_wit_type(sexp: &Sexp, lookup: &TypeLookup) -> Result<WitType, String> {
                             .and_then(|s| as_atom(s))
                             .ok_or("field needs name")?;
                         let ty = fkids.get(2).ok_or("field needs type")?;
-                        fields.push((
-                            strip_dollar(name).to_string(),
-                            parse_type_ref(ty, lookup)?,
-                        ));
+                        fields.push((strip_dollar(name).to_string(), parse_type_ref(ty, lookup)?));
                     }
                     Ok(WitType::Record(fields))
                 }
@@ -989,10 +983,7 @@ fn parse_type_source(sexp: &Sexp) -> Result<TypeSource, String> {
     })
 }
 
-fn parse_type_form(
-    sexp: &[Sexp],
-    lookup: &TypeLookup,
-) -> Result<(TypeUid, WastTypeDef), String> {
+fn parse_type_form(sexp: &[Sexp], lookup: &TypeLookup) -> Result<(TypeUid, WastTypeDef), String> {
     let kids = drop_comments(sexp);
     if kids.first().and_then(as_atom) != Some("type") {
         return Err("expected (type ...)".into());
@@ -1002,19 +993,10 @@ fn parse_type_form(
     let source = parse_type_source(kids.get(2).ok_or("type needs source")?)?;
     let def_sexp = kids.get(3).ok_or("type needs definition")?;
     let definition = parse_wit_type(def_sexp, lookup)?;
-    Ok((
-        uid,
-        WastTypeDef {
-            source,
-            definition,
-        },
-    ))
+    Ok((uid, WastTypeDef { source, definition }))
 }
 
-fn parse_func_form(
-    items: &[Sexp],
-    lookup: &TypeLookup,
-) -> Result<(FuncUid, WastFunc), String> {
+fn parse_func_form(items: &[Sexp], lookup: &TypeLookup) -> Result<(FuncUid, WastFunc), String> {
     let kids = drop_comments(items);
     if kids.first().and_then(as_atom) != Some("func") {
         return Err("expected (func ...)".into());
@@ -1035,8 +1017,7 @@ fn parse_func_form(
                 let head = cl.first().and_then(as_atom).unwrap_or("");
                 match head {
                     "param" => {
-                        let pname =
-                            cl.get(1).and_then(as_atom).ok_or("param name")?;
+                        let pname = cl.get(1).and_then(as_atom).ok_or("param name")?;
                         let pty = cl.get(2).ok_or("param type")?;
                         params.push((
                             strip_dollar(pname).to_string(),
@@ -1083,7 +1064,10 @@ fn parse_instruction(sexp: &Sexp) -> Result<Instruction, String> {
         "nop" => Ok(Instruction::Nop),
         "return" => Ok(Instruction::Return),
         "i64.const" => {
-            let v = kids.get(1).and_then(as_atom).ok_or("i64.const needs value")?;
+            let v = kids
+                .get(1)
+                .and_then(as_atom)
+                .ok_or("i64.const needs value")?;
             let n: i64 = v.parse().map_err(|e| format!("i64.const: {e}"))?;
             Ok(Instruction::Const { value: n })
         }
@@ -1495,13 +1479,15 @@ fn parse_syms_form(items: &[Sexp]) -> Result<Syms, String> {
                 return Err("expected (sym ...)".into());
             }
             let uid = match skids.get(1) {
-                Some(Sexp::Str(b)) => String::from_utf8(b.clone())
-                    .map_err(|e| format!("sym uid utf-8: {e}"))?,
+                Some(Sexp::Str(b)) => {
+                    String::from_utf8(b.clone()).map_err(|e| format!("sym uid utf-8: {e}"))?
+                }
                 _ => return Err("sym uid must be string".into()),
             };
             let name = match skids.get(2) {
-                Some(Sexp::Str(b)) => String::from_utf8(b.clone())
-                    .map_err(|e| format!("sym name utf-8: {e}"))?,
+                Some(Sexp::Str(b)) => {
+                    String::from_utf8(b.clone()).map_err(|e| format!("sym name utf-8: {e}"))?
+                }
                 _ => return Err("sym name must be string".into()),
             };
             entries.push((uid, name));
@@ -1530,10 +1516,7 @@ fn parse_syms_form(items: &[Sexp]) -> Result<Syms, String> {
     })
 }
 
-fn from_text_inner(
-    text: &str,
-    existing: &WastComponent,
-) -> Result<WastComponent, String> {
+fn from_text_inner(text: &str, existing: &WastComponent) -> Result<WastComponent, String> {
     let tokens = tokenize(text)?;
     let sexps = parse_sexps(&tokens)?;
 
@@ -1590,11 +1573,7 @@ fn from_text_inner(
         },
     };
 
-    Ok(WastComponent {
-        funcs,
-        types,
-        syms,
-    })
+    Ok(WastComponent { funcs, types, syms })
 }
 
 // ---------------------------------------------------------------------------

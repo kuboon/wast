@@ -263,6 +263,21 @@ async function initPluginShowcase() {
     }
   }
 
+  // partial-manager rejoins the partial returned by from_text with the
+  // full component so funcs/types not visible in the pane survive a Sync.
+  let partialManager = null;
+  try {
+    const m = await import(
+      /* @vite-ignore */ new URL(
+        "../public/tools/partial-manager/partial_manager.js",
+        import.meta.url,
+      ).href
+    );
+    partialManager = m.partialManager;
+  } catch (err) {
+    console.warn("partial-manager load failed:", err);
+  }
+
   const wc = showcase.wastComponent;
 
   // callGraph is keyed by source-inner name; normalize both ways so we can
@@ -286,12 +301,16 @@ async function initPluginShowcase() {
       .filter(Boolean);
   }
 
-  // Per-func UI state: { uid -> { show, withCallers } }. Default: show every
-  // EXPORTED func, don't auto-include callers.
+  // Per-func UI state: { uid -> { show, withCallers } }. Default: show
+  // only the topmost internal func — that highlights the partial-manager
+  // rule "no owned caller in B → Exported", because the lone target gets
+  // promoted to `export` even though it's `internal` in `full`.
+  const defaultUid = wc.funcs.find(([, row]) => row.source.tag === "internal")?.[0]
+    ?? wc.funcs[0]?.[0];
   const toggles = {};
-  for (const [uid, row] of wc.funcs) {
+  for (const [uid] of wc.funcs) {
     toggles[uid] = {
-      show: row.source.tag === "exported",
+      show: uid === defaultUid,
       withCallers: false,
     };
   }
@@ -320,23 +339,31 @@ async function initPluginShowcase() {
   const grid = h("div", { class: "plugin-grid" });
   host.append(controls, grid);
 
-  function filteredUids() {
-    const out = new Set();
+  /** Build the partial WastComponent that the panes should render.
+   *
+   * Goes through partial-manager.extract so the result is a proper partial:
+   *  - Show-without-callers targets are marked `Exported` in the partial
+   *    (sig changes will be caught by partial-manager.merge against full's
+   *    callers, since the syntax plugin can't see them).
+   *  - Show-with-callers targets stay `Internal`; callers are pulled in so
+   *    the syntax plugin can type-check call sites itself.
+   *  - Direct callees are pulled in as `Imported` (signature only).
+   */
+  function paneComponent() {
+    const targets = [];
     for (const [uid, t] of Object.entries(toggles)) {
-      if (t.show) out.add(uid);
-      if (t.withCallers) {
-        for (const c of callersOf(uid)) out.add(c);
+      if (t.show) {
+        targets.push({ sym: uid, includeCaller: t.withCallers });
       }
     }
-    return out;
-  }
-
-  function filteredComponent() {
-    const keep = filteredUids();
-    return {
-      ...wcRef,
-      funcs: wcRef.funcs.filter(([uid]) => keep.has(uid)),
-    };
+    if (targets.length === 0) return null;
+    if (!partialManager) {
+      // Fallback when partial-manager failed to load. Just filter wcRef
+      // shallowly; sync from this state will likely lose internals.
+      const keep = new Set(targets.map((t) => t.sym));
+      return { ...wcRef, funcs: wcRef.funcs.filter(([uid]) => keep.has(uid)) };
+    }
+    return partialManager.extract(wcRef, targets);
   }
 
   /** Pull the WastError list out of whatever a jco from_text rejection
@@ -352,8 +379,8 @@ async function initPluginShowcase() {
 
   function renderGrid() {
     grid.innerHTML = "";
-    const comp = filteredComponent();
-    if (comp.funcs.length === 0) {
+    const comp = paneComponent();
+    if (!comp || comp.funcs.length === 0) {
       grid.append(h("p", { class: "desc" }, "(nothing selected — toggle a func above)"));
       return;
     }
@@ -386,15 +413,25 @@ async function initPluginShowcase() {
           errBox.textContent = "this plugin does not implement from_text";
           return;
         }
+        let stage = "from_text";
         try {
-          // Pass the WHOLE component as `existing`, even though the pane
-          // text only shows the filtered subset — the plugin treats the
-          // text as authoritative for funcs it sees, and falls back to
-          // existing for funcs it doesn't.
+          // Pane text only contains the filtered subset, so from_text
+          // returns a *partial* WastComponent. partial-manager.merge
+          // rejoins it with the full wcRef — funcs/types not in the
+          // partial keep their existing entries in full.
+          // jco unpacks result<T, E> — Ok arrives as a plain value, Err throws.
           const parsed = plugin.fromText(ta.value, wcRef);
-          // jco unpacks the result<T, E> — Ok arrives as a plain value,
-          // Err throws.
-          wcRef = parsed;
+          let merged;
+          if (partialManager) {
+            stage = "merge";
+            merged = partialManager.merge(parsed, wcRef);
+          } else {
+            // Fallback: without partial-manager we'd lose internals.
+            // Keep the parsed-as-full behaviour but warn loudly.
+            console.warn("partial-manager unavailable; sync may drop funcs");
+            merged = parsed;
+          }
+          wcRef = merged;
           // Rebuild toggles for any new uids introduced by the parser
           // (e.g. when a fresh func/local name appears in the edited text).
           for (const [uid, row] of wcRef.funcs) {
@@ -411,7 +448,7 @@ async function initPluginShowcase() {
           const errs = extractParseErrors(err);
           errBox.classList.add("err");
           errBox.append(
-            h("strong", {}, `from_text failed (${errs.length} error${errs.length === 1 ? "" : "s"}):`),
+            h("strong", {}, `${stage} failed (${errs.length} error${errs.length === 1 ? "" : "s"}):`),
           );
           const ul = h("ul", {});
           for (const e of errs) {

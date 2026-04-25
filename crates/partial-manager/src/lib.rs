@@ -180,45 +180,24 @@ fn collect_calls(instr: &Instruction, out: &mut Vec<String>) {
 
 fn extract_impl(full: WastComponent, targets: Vec<ExtractTarget>) -> WastComponent {
     let target_uids: HashSet<&str> = targets.iter().map(|t| t.sym.as_str()).collect();
-
-    // Step 1: Collect target funcs that exist in full
-    let mut included_func_uids: HashSet<String> = HashSet::new();
-    for uid in &target_uids {
-        if full.funcs.iter().any(|(id, _)| id == uid) {
-            included_func_uids.insert(uid.to_string());
-        }
-    }
-
-    // Walk bodies of included funcs to find call references; add called funcs
-    // as imported (only direct calls, no recursion).
-    let mut called_uids: HashSet<String> = HashSet::new();
-    for (uid, func) in &full.funcs {
-        if included_func_uids.contains(uid.as_str()) {
-            if let Some(ref body) = func.body {
-                for called in extract_call_refs(body) {
-                    if !included_func_uids.contains(called.as_str()) {
-                        called_uids.insert(called);
-                    }
-                }
-            }
-        }
-    }
-    // Add called funcs as imported
-    for called in &called_uids {
-        if full.funcs.iter().any(|(id, _)| id == called) {
-            included_func_uids.insert(called.clone());
-        }
-    }
-
-    // If include_caller, scan ALL funcs for calls to any target; include callers
     let include_caller_targets: HashSet<&str> = targets
         .iter()
         .filter(|t| t.include_caller)
         .map(|t| t.sym.as_str())
         .collect();
+
+    // Step 1: collect the *owned* set — funcs that appear in the partial
+    // with their bodies. That is the targets, plus the direct callers of any
+    // include_caller target.
+    let mut owned: HashSet<String> = HashSet::new();
+    for uid in &target_uids {
+        if full.funcs.iter().any(|(id, _)| id == uid) {
+            owned.insert(uid.to_string());
+        }
+    }
     if !include_caller_targets.is_empty() {
         for (uid, func) in &full.funcs {
-            if included_func_uids.contains(uid.as_str()) {
+            if owned.contains(uid.as_str()) {
                 continue;
             }
             if let Some(ref body) = func.body {
@@ -227,13 +206,34 @@ fn extract_impl(full: WastComponent, targets: Vec<ExtractTarget>) -> WastCompone
                     .iter()
                     .any(|c| include_caller_targets.contains(c.as_str()))
                 {
-                    included_func_uids.insert(uid.clone());
+                    owned.insert(uid.clone());
                 }
             }
         }
     }
 
-    // Step 2: Collect type refs from all included funcs, then transitively
+    // Step 2: collect the *imported* set — callees of any owned func that
+    // aren't themselves owned. Their signatures appear in the partial; their
+    // bodies live in full.
+    let mut imported: HashSet<String> = HashSet::new();
+    for (uid, func) in &full.funcs {
+        if !owned.contains(uid.as_str()) {
+            continue;
+        }
+        if let Some(ref body) = func.body {
+            for called in extract_call_refs(body) {
+                if !owned.contains(called.as_str())
+                    && full.funcs.iter().any(|(id, _)| *id == called)
+                {
+                    imported.insert(called);
+                }
+            }
+        }
+    }
+
+    let included_func_uids: HashSet<String> = owned.union(&imported).cloned().collect();
+
+    // Step 3: collect type refs from all included funcs, then transitively.
     let mut type_seeds: Vec<String> = Vec::new();
     for (uid, func) in &full.funcs {
         if included_func_uids.contains(uid.as_str()) {
@@ -242,17 +242,37 @@ fn extract_impl(full: WastComponent, targets: Vec<ExtractTarget>) -> WastCompone
     }
     let needed_types = collect_types_transitively(&type_seeds, &full.types);
 
-    // Step 3: Build output funcs — targets keep their source as-is,
-    // called funcs and callers become imported(uid)
+    // Step 4: build output funcs.
+    //
+    // Source assignment rule:
+    //  - target *without* `include_caller` → forced to `Exported`. The partial
+    //    has no proof that all callers are present (a caller that *happens*
+    //    to be in `B` because it is itself a target doesn't establish that
+    //    no other caller exists in `full`). Locking the signature is the
+    //    safe default; `merge` enforces it against `full`'s callers.
+    //  - target *with* `include_caller` → keep original source. The flag is
+    //    the user's promise that all callers have been pulled in, so the
+    //    syntax plugin alone can verify call-site consistency.
+    //  - pulled-in caller (added because some target had `include_caller`)
+    //    → keep original source, keep body. The body is needed for the
+    //    syntax plugin's type check.
+    //  - pulled-in callee (signature-only stub) → `Imported(uid)`,
+    //    `body = None`.
     let out_funcs: Vec<(String, WastFunc)> = full
         .funcs
         .iter()
         .filter(|(uid, _)| included_func_uids.contains(uid.as_str()))
         .map(|(uid, func)| {
-            if target_uids.contains(uid.as_str()) {
-                (uid.clone(), func.clone())
+            if owned.contains(uid.as_str()) {
+                let is_target_no_callers = targets
+                    .iter()
+                    .any(|t| t.sym.as_str() == uid && !t.include_caller);
+                let mut out_func = func.clone();
+                if is_target_no_callers {
+                    out_func.source = FuncSource::Exported(uid.clone());
+                }
+                (uid.clone(), out_func)
             } else {
-                // This func was pulled in as a callee or caller — mark as imported
                 let mut imported_func = func.clone();
                 imported_func.source = FuncSource::Imported(uid.clone());
                 imported_func.body = None;
@@ -683,6 +703,107 @@ mod tests {
             }],
         );
         assert!(matches!(&result.funcs[0].1.source, FuncSource::Exported(_)));
+    }
+
+    #[test]
+    fn extract_target_without_include_caller_forces_exported() {
+        // Internal target with include_caller=false → forced to Exported.
+        // The partial has no proof that all callers are present, so the
+        // signature must be locked.
+        let full = WastComponent {
+            funcs: vec![mk_func("f1", FuncSource::Internal("f1".into()), &[], None)],
+            types: vec![],
+            syms: empty_syms(),
+        };
+        let result = extract_impl(
+            full,
+            vec![ExtractTarget {
+                sym: "f1".into(),
+                include_caller: false,
+            }],
+        );
+        assert!(matches!(&result.funcs[0].1.source, FuncSource::Exported(_)));
+    }
+
+    #[test]
+    fn extract_target_with_include_caller_and_pulled_caller_keep_original() {
+        // f1 is internal in full. f2 calls f1. With include_caller=true on
+        // f1, f2 is pulled in. Both keep their original source (Internal):
+        //  - f1 has the include_caller flag → caller list is complete →
+        //    signature can be edited → don't lock as Exported.
+        //  - f2 is a pulled-in caller (not a target) → keep original; its
+        //    body is preserved so the syntax plugin can check call sites.
+        let body_calls_f1 = mk_body_calling(&["f1"]);
+        let mut f2 = mk_func("f2", FuncSource::Internal("f2".into()), &[], None);
+        f2.1.body = Some(body_calls_f1);
+        let full = WastComponent {
+            funcs: vec![
+                mk_func("f1", FuncSource::Internal("f1".into()), &[], None),
+                f2,
+            ],
+            types: vec![],
+            syms: empty_syms(),
+        };
+        let result = extract_impl(
+            full,
+            vec![ExtractTarget {
+                sym: "f1".into(),
+                include_caller: true,
+            }],
+        );
+        let f1 = result.funcs.iter().find(|(u, _)| u == "f1").unwrap();
+        let f2 = result.funcs.iter().find(|(u, _)| u == "f2").unwrap();
+        assert!(
+            matches!(&f1.1.source, FuncSource::Internal(_)),
+            "f1 with include_caller → keep Internal"
+        );
+        assert!(
+            matches!(&f2.1.source, FuncSource::Internal(_)),
+            "pulled-in caller f2 → keep Internal"
+        );
+        assert!(
+            f2.1.body.is_some(),
+            "pulled-in caller body must be preserved"
+        );
+    }
+
+    #[test]
+    fn extract_two_targets_one_calls_other_both_get_exported() {
+        // target=[poly, square], both include_caller=false. poly calls
+        // square. Even though square has a caller (poly) inside the
+        // partial, that doesn't establish "all callers visible" — there
+        // might be other callers in full. Both targets are forced Exported.
+        let body = mk_body_calling(&["square"]);
+        let mut poly = mk_func("poly", FuncSource::Internal("poly".into()), &[], None);
+        poly.1.body = Some(body);
+        let full = WastComponent {
+            funcs: vec![
+                mk_func("square", FuncSource::Internal("square".into()), &[], None),
+                poly,
+            ],
+            types: vec![],
+            syms: empty_syms(),
+        };
+        let result = extract_impl(
+            full,
+            vec![
+                ExtractTarget {
+                    sym: "poly".into(),
+                    include_caller: false,
+                },
+                ExtractTarget {
+                    sym: "square".into(),
+                    include_caller: false,
+                },
+            ],
+        );
+        let square = result.funcs.iter().find(|(u, _)| u == "square").unwrap();
+        let poly = result.funcs.iter().find(|(u, _)| u == "poly").unwrap();
+        assert!(
+            matches!(&square.1.source, FuncSource::Exported(_)),
+            "target without include_caller → Exported (even with poly visible)"
+        );
+        assert!(matches!(&poly.1.source, FuncSource::Exported(_)));
     }
 
     #[test]
