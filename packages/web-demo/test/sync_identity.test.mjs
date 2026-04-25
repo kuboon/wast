@@ -39,6 +39,7 @@ function summarize(wc) {
 }
 
 const PLUGINS = [
+  { id: "raw", path: "raw/raw.js", supportsFromText: true },
   { id: "ruby-like", path: "ruby-like/ruby_like.js", supportsFromText: true },
   { id: "ts-like", path: "ts-like/ts_like.js", supportsFromText: true },
   { id: "rust-like", path: "rust-like/rust_like.js", supportsFromText: true },

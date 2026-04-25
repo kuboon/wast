@@ -16,6 +16,7 @@ const showcase = JSON.parse(
 );
 
 const PLUGINS = [
+  { id: "raw", path: "raw/raw.js" },
   { id: "ruby-like", path: "ruby-like/ruby_like.js" },
   { id: "ts-like", path: "ts-like/ts_like.js" },
   { id: "rust-like", path: "rust-like/rust_like.js" },

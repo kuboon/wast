@@ -211,7 +211,7 @@ const PLUGINS = [
     id: "raw",
     label: "raw",
     module: "raw/raw.js",
-    capability: "to_text only — no from_text",
+    capability: "S-expression — full structural roundtrip (signature + body)",
   },
   {
     id: "ruby-like",
@@ -365,12 +365,7 @@ async function initPluginShowcase() {
       const errBox = h("div", { class: "pane-errors" });
       const sync = h(
         "button",
-        {
-          type: "button",
-          class: "pane-sync",
-          // raw plugin doesn't implement from_text, so disable.
-          ...(p.id === "raw" ? { disabled: "disabled" } : {}),
-        },
+        { type: "button", class: "pane-sync" },
         "Sync from this pane →",
       );
       try {
