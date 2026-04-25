@@ -595,15 +595,18 @@ fn find_rightmost_top_level(s: &str, pattern: &str) -> Option<usize> {
     last
 }
 
-/// Split `s` on `delimiter` at top-level (not inside parens).
+/// Split `s` on `delimiter` at top-level (not inside any of `()`, `[]`,
+/// `{}`, or `<>` brackets). Respecting `{}` and `<>` is essential for
+/// rendered compound types like `record { x: u32, y: u32 }` and
+/// `Option<Result<u32, u64>>`.
 fn split_top_level(s: &str, delimiter: char) -> Vec<&str> {
     let mut parts = Vec::new();
     let mut depth = 0i32;
     let mut start = 0;
     for (i, ch) in s.char_indices() {
         match ch {
-            '(' => depth += 1,
-            ')' => depth -= 1,
+            '(' | '[' | '{' | '<' => depth += 1,
+            ')' | ']' | '}' | '>' => depth -= 1,
             c if c == delimiter && depth == 0 => {
                 parts.push(&s[start..i]);
                 start = i + ch.len_utf8();
@@ -1193,15 +1196,22 @@ fn parse_type_ref_str(
                 return uid.clone();
             }
         }
-        s.to_string()
-    } else {
-        for (uid, name) in type_names {
-            if name == s {
-                return uid.clone();
-            }
-        }
-        s.to_string()
+        return s.to_string();
     }
+    for (uid, name) in type_names {
+        if name == s {
+            return uid.clone();
+        }
+    }
+    // Fall back to matching the rendered form of each existing type so a
+    // round-trip on `option<u32>` lands back at the original `opt_u32`
+    // uid instead of inventing a brand-new type ref.
+    for (uid, td) in types {
+        if format_wit_type(&td.definition, types, type_names) == s {
+            return uid.clone();
+        }
+    }
+    s.to_string()
 }
 
 /// Parse a signature string like `name(p1: type1, p2: type2): ret`
@@ -1223,8 +1233,8 @@ fn parse_signature(sig: &str) -> Option<ParsedFunc> {
     let params: Vec<(String, String)> = if params_str.trim().is_empty() {
         vec![]
     } else {
-        params_str
-            .split(',')
+        split_top_level(params_str, ',')
+            .into_iter()
             .map(|p| {
                 let p = p.trim();
                 if let Some(colon) = p.find(':') {
@@ -1355,8 +1365,13 @@ impl bindings::exports::wast::core::syntax_plugin::Guest for Component {
                 let sig_str = sig_str.trim_end_matches(';');
                 match parse_signature(sig_str) {
                     Some(parsed) => {
-                        let (func_uid, source_uid) =
-                            resolve_func_uid(&parsed.name, &rev_func, &existing_by_source, true);
+                        let (func_uid, source_uid) = resolve_func_uid(
+                            &parsed.name,
+                            &rev_func,
+                            &existing_by_source,
+                            &existing_funcs,
+                            true,
+                        );
 
                         let params = resolve_params(
                             &parsed.params,
@@ -1406,8 +1421,13 @@ impl bindings::exports::wast::core::syntax_plugin::Guest for Component {
                 let sig_str = sig_str.trim_end_matches('{').trim();
                 match parse_signature(sig_str) {
                     Some(parsed) => {
-                        let (func_uid, source_uid) =
-                            resolve_func_uid(&parsed.name, &rev_func, &existing_by_source, false);
+                        let (func_uid, source_uid) = resolve_func_uid(
+                            &parsed.name,
+                            &rev_func,
+                            &existing_by_source,
+                            &existing_funcs,
+                            false,
+                        );
 
                         let existing_body = existing_by_source
                             .get(&source_uid)
@@ -1459,8 +1479,13 @@ impl bindings::exports::wast::core::syntax_plugin::Guest for Component {
                 let sig_str = sig_str.trim_end_matches('{').trim();
                 match parse_signature(sig_str) {
                     Some(parsed) => {
-                        let (func_uid, source_uid) =
-                            resolve_func_uid(&parsed.name, &rev_func, &existing_by_source, false);
+                        let (func_uid, source_uid) = resolve_func_uid(
+                            &parsed.name,
+                            &rev_func,
+                            &existing_by_source,
+                            &existing_funcs,
+                            false,
+                        );
 
                         let existing_body = existing_by_source
                             .get(&source_uid)
@@ -1518,6 +1543,36 @@ impl bindings::exports::wast::core::syntax_plugin::Guest for Component {
             return Err(errors);
         }
 
+        // Post-process: ts-like surface syntax doesn't render Call arg
+        // parameter names (positional only), so the body parser leaves
+        // them empty. Recover them from each call target's signature so
+        // the IR round-trips structurally — the IR's Call args carry
+        // (param_name, value) pairs to keep the wast layer keyword-style.
+        let params_by_func: HashMap<String, Vec<String>> = funcs
+            .iter()
+            .map(|(uid, f)| {
+                (
+                    uid.clone(),
+                    f.params.iter().map(|(n, _)| n.clone()).collect(),
+                )
+            })
+            .collect();
+        for (_, f) in funcs.iter_mut() {
+            if let Some(body) = &f.body {
+                if let Ok(mut instrs) = wast_pattern_analyzer::deserialize_body(body) {
+                    let mut changed = false;
+                    for instr in &mut instrs {
+                        if fixup_call_args(instr, &params_by_func) {
+                            changed = true;
+                        }
+                    }
+                    if changed {
+                        f.body = Some(wast_pattern_analyzer::serialize_body(&instrs));
+                    }
+                }
+            }
+        }
+
         Ok(WastComponent {
             funcs,
             types: existing.types,
@@ -1530,23 +1585,159 @@ impl bindings::exports::wast::core::syntax_plugin::Guest for Component {
     }
 }
 
+/// Recursively walk an instruction, filling in missing `Call` arg
+/// parameter names from the target func's signature. Returns true if any
+/// edit was made (so the caller knows to re-serialize the body).
+fn fixup_call_args(instr: &mut Instruction, params_by_func: &HashMap<String, Vec<String>>) -> bool {
+    let mut changed = false;
+    match instr {
+        Instruction::Call { func_uid, args } => {
+            if let Some(pnames) = params_by_func.get(func_uid) {
+                for (i, (n, v)) in args.iter_mut().enumerate() {
+                    if n.is_empty()
+                        && let Some(pn) = pnames.get(i)
+                    {
+                        *n = pn.clone();
+                        changed = true;
+                    }
+                    if fixup_call_args(v, params_by_func) {
+                        changed = true;
+                    }
+                }
+            } else {
+                for (_, v) in args.iter_mut() {
+                    if fixup_call_args(v, params_by_func) {
+                        changed = true;
+                    }
+                }
+            }
+        }
+        Instruction::LocalSet { value, .. }
+        | Instruction::Some { value }
+        | Instruction::Ok { value }
+        | Instruction::Err { value }
+        | Instruction::IsErr { value }
+        | Instruction::StringLen { value }
+        | Instruction::ListLen { value } => {
+            if fixup_call_args(value, params_by_func) {
+                changed = true;
+            }
+        }
+        Instruction::Arithmetic { lhs, rhs, .. } | Instruction::Compare { lhs, rhs, .. } => {
+            if fixup_call_args(lhs, params_by_func) {
+                changed = true;
+            }
+            if fixup_call_args(rhs, params_by_func) {
+                changed = true;
+            }
+        }
+        Instruction::If {
+            condition,
+            then_body,
+            else_body,
+        } => {
+            if fixup_call_args(condition, params_by_func) {
+                changed = true;
+            }
+            for c in then_body {
+                if fixup_call_args(c, params_by_func) {
+                    changed = true;
+                }
+            }
+            for c in else_body {
+                if fixup_call_args(c, params_by_func) {
+                    changed = true;
+                }
+            }
+        }
+        Instruction::Block { body, .. } | Instruction::Loop { body, .. } => {
+            for c in body {
+                if fixup_call_args(c, params_by_func) {
+                    changed = true;
+                }
+            }
+        }
+        Instruction::BrIf { condition, .. } => {
+            if fixup_call_args(condition, params_by_func) {
+                changed = true;
+            }
+        }
+        Instruction::MatchOption {
+            value,
+            some_body,
+            none_body,
+            ..
+        } => {
+            if fixup_call_args(value, params_by_func) {
+                changed = true;
+            }
+            for c in some_body {
+                if fixup_call_args(c, params_by_func) {
+                    changed = true;
+                }
+            }
+            for c in none_body {
+                if fixup_call_args(c, params_by_func) {
+                    changed = true;
+                }
+            }
+        }
+        Instruction::MatchResult {
+            value,
+            ok_body,
+            err_body,
+            ..
+        } => {
+            if fixup_call_args(value, params_by_func) {
+                changed = true;
+            }
+            for c in ok_body {
+                if fixup_call_args(c, params_by_func) {
+                    changed = true;
+                }
+            }
+            for c in err_body {
+                if fixup_call_args(c, params_by_func) {
+                    changed = true;
+                }
+            }
+        }
+        _ => {}
+    }
+    changed
+}
+
 /// Resolve a function name to (func_uid, source_uid).
 fn resolve_func_uid(
     name: &str,
     rev_func: &HashMap<String, String>,
     existing_by_source: &HashMap<String, (&str, &WastFunc)>,
+    existing_funcs: &HashMap<String, &WastFunc>,
     _is_import: bool,
 ) -> (String, String) {
     if let Some(source_uid) = rev_func.get(name) {
         if let Some((func_uid, _)) = existing_by_source.get(source_uid.as_str()) {
-            (func_uid.to_string(), source_uid.clone())
-        } else {
-            (source_uid.clone(), source_uid.clone())
+            return (func_uid.to_string(), source_uid.clone());
         }
-    } else {
-        let uid = generate_uid();
-        (uid.clone(), uid)
+        return (source_uid.clone(), source_uid.clone());
     }
+    // No syms entry overrides the rendered name. `to_text` falls back to
+    // the source-val first, then the func-uid. Try both directions before
+    // fabricating a fresh UID — otherwise body Calls referencing the
+    // existing UID become dangling references.
+    if let Some((func_uid, _)) = existing_by_source.get(name) {
+        return (func_uid.to_string(), name.to_string());
+    }
+    if let Some(f) = existing_funcs.get(name) {
+        let source_val = match &f.source {
+            FuncSource::Internal(s) | FuncSource::Imported(s) | FuncSource::Exported(s) => {
+                s.clone()
+            }
+        };
+        return (name.to_string(), source_val);
+    }
+    let uid = generate_uid();
+    (uid.clone(), uid)
 }
 
 /// Resolve parameter names and types from parsed strings.
@@ -1555,21 +1746,20 @@ fn resolve_params(
     rev_local: &HashMap<String, String>,
     types: &[(TypeUid, WastTypeDef)],
     type_names: &HashMap<String, String>,
-    new_syms_local: &mut Vec<SymEntry>,
+    _new_syms_local: &mut Vec<SymEntry>,
 ) -> Vec<(FuncUid, WitTypeRef)> {
     parsed
         .iter()
         .map(|(pname, ptype)| {
-            let param_uid = if let Some(uid) = rev_local.get(pname.as_str()) {
-                uid.clone()
-            } else {
-                let uid = generate_uid();
-                new_syms_local.push(SymEntry {
-                    uid: uid.clone(),
-                    display_name: pname.clone(),
-                });
-                uid
-            };
+            // When syms.local maps the rendered name back to an explicit
+            // UID, reuse it. Otherwise the displayed name IS the UID
+            // (that's what to_text falls back to when no sym overrides
+            // it) — using the name verbatim keeps body LocalGet refs
+            // pointing at the same param.
+            let param_uid = rev_local
+                .get(pname.as_str())
+                .cloned()
+                .unwrap_or_else(|| pname.clone());
             let type_ref = parse_type_ref_str(ptype, types, type_names);
             (param_uid, type_ref)
         })

@@ -608,15 +608,44 @@ fn parse_type_ref_str(
                 return uid.clone();
             }
         }
-        s.to_string()
-    } else {
-        for (uid, name) in type_names {
-            if name == s {
-                return uid.clone();
-            }
-        }
-        s.to_string()
+        return s.to_string();
     }
+    for (uid, name) in type_names {
+        if name == s {
+            return uid.clone();
+        }
+    }
+    // Fall back to matching the rendered form of each existing type so
+    // round-tripping `Option<u32>` lands back at the original `opt_u32`
+    // uid instead of inventing a brand-new type ref.
+    for (uid, td) in types {
+        if format_wit_type(&td.definition, types, type_names) == s {
+            return uid.clone();
+        }
+    }
+    s.to_string()
+}
+
+/// Split `s` on `delimiter` at top-level (not inside any of `()`, `[]`,
+/// `{}`, `<>` brackets). Compound rendered types use those brackets and
+/// the parameter splitter must respect them.
+fn split_top_level(s: &str, delimiter: char) -> Vec<&str> {
+    let mut parts = Vec::new();
+    let mut depth = 0i32;
+    let mut start = 0;
+    for (i, ch) in s.char_indices() {
+        match ch {
+            '(' | '[' | '{' | '<' => depth += 1,
+            ')' | ']' | '}' | '>' => depth -= 1,
+            c if c == delimiter && depth == 0 => {
+                parts.push(&s[start..i]);
+                start = i + ch.len_utf8();
+            }
+            _ => {}
+        }
+    }
+    parts.push(&s[start..]);
+    parts
 }
 
 /// Parse a signature like `name(p1: type1, p2: type2) -> ret`
@@ -637,8 +666,8 @@ fn parse_signature(sig: &str) -> Option<ParsedFunc> {
     let params: Vec<(String, String)> = if params_str.trim().is_empty() {
         vec![]
     } else {
-        params_str
-            .split(',')
+        split_top_level(params_str, ',')
+            .into_iter()
             .map(|p| {
                 let p = p.trim();
                 if let Some(colon) = p.find(':') {
@@ -677,17 +706,27 @@ fn resolve_func_uid(
     name: &str,
     rev_func: &HashMap<String, String>,
     existing_by_source: &HashMap<String, (&str, &WastFunc)>,
+    existing_funcs: &HashMap<String, &WastFunc>,
 ) -> (String, String) {
     if let Some(source_uid) = rev_func.get(name) {
         if let Some((func_uid, _)) = existing_by_source.get(source_uid.as_str()) {
-            (func_uid.to_string(), source_uid.clone())
-        } else {
-            (source_uid.clone(), source_uid.clone())
+            return (func_uid.to_string(), source_uid.clone());
         }
-    } else {
-        let uid = generate_uid();
-        (uid.clone(), uid)
+        return (source_uid.clone(), source_uid.clone());
     }
+    if let Some((func_uid, _)) = existing_by_source.get(name) {
+        return (func_uid.to_string(), name.to_string());
+    }
+    if let Some(f) = existing_funcs.get(name) {
+        let source_val = match &f.source {
+            FuncSource::Internal(s) | FuncSource::Imported(s) | FuncSource::Exported(s) => {
+                s.clone()
+            }
+        };
+        return (name.to_string(), source_val);
+    }
+    let uid = generate_uid();
+    (uid.clone(), uid)
 }
 
 fn resolve_params(
@@ -695,21 +734,18 @@ fn resolve_params(
     rev_local: &HashMap<String, String>,
     types: &[(TypeUid, WastTypeDef)],
     type_names: &HashMap<String, String>,
-    new_syms_local: &mut Vec<SymEntry>,
+    _new_syms_local: &mut Vec<SymEntry>,
 ) -> Vec<(FuncUid, WitTypeRef)> {
     parsed
         .iter()
         .map(|(pname, ptype)| {
-            let param_uid = if let Some(uid) = rev_local.get(pname.as_str()) {
-                uid.clone()
-            } else {
-                let uid = generate_uid();
-                new_syms_local.push(SymEntry {
-                    uid: uid.clone(),
-                    display_name: pname.clone(),
-                });
-                uid
-            };
+            // Reuse the explicit syms.local UID when one exists; otherwise
+            // the displayed name IS the UID (matches what to_text emits in
+            // the absence of a sym override).
+            let param_uid = rev_local
+                .get(pname.as_str())
+                .cloned()
+                .unwrap_or_else(|| pname.clone());
             let type_ref = parse_type_ref_str(ptype, types, type_names);
             (param_uid, type_ref)
         })
@@ -846,8 +882,12 @@ impl bindings::exports::wast::core::syntax_plugin::Guest for Component {
                         let sig_str = &decl[fn_start + 3..];
                         match parse_signature(sig_str) {
                             Some(parsed) => {
-                                let (func_uid, source_uid) =
-                                    resolve_func_uid(&parsed.name, &rev_func, &existing_by_source);
+                                let (func_uid, source_uid) = resolve_func_uid(
+                                    &parsed.name,
+                                    &rev_func,
+                                    &existing_by_source,
+                                    &existing_funcs,
+                                );
 
                                 let params = resolve_params(
                                     &parsed.params,
@@ -919,8 +959,12 @@ impl bindings::exports::wast::core::syntax_plugin::Guest for Component {
                                 i += 1;
                             }
 
-                            let (func_uid, source_uid) =
-                                resolve_func_uid(&parsed.name, &rev_func, &existing_by_source);
+                            let (func_uid, source_uid) = resolve_func_uid(
+                                &parsed.name,
+                                &rev_func,
+                                &existing_by_source,
+                                &existing_funcs,
+                            );
 
                             let params = resolve_params(
                                 &parsed.params,
@@ -993,8 +1037,12 @@ impl bindings::exports::wast::core::syntax_plugin::Guest for Component {
                             i += 1;
                         }
 
-                        let (func_uid, source_uid) =
-                            resolve_func_uid(&parsed.name, &rev_func, &existing_by_source);
+                        let (func_uid, source_uid) = resolve_func_uid(
+                            &parsed.name,
+                            &rev_func,
+                            &existing_by_source,
+                            &existing_funcs,
+                        );
 
                         let params = resolve_params(
                             &parsed.params,

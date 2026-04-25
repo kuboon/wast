@@ -603,9 +603,7 @@ fn parse_type_ref_str(
     type_names: &HashMap<String, String>,
 ) -> WitTypeRef {
     let s = s.trim();
-    // Check if it's a primitive — if so, look for a matching type UID, otherwise use the name as UID
     if parse_primitive(s).is_some() {
-        // Look for an existing type entry for this primitive
         for (uid, td) in types {
             if let WitType::Primitive(p) = &td.definition {
                 if primitive_name(p) == s {
@@ -613,23 +611,49 @@ fn parse_type_ref_str(
                 }
             }
         }
-        // Also check type_names reverse
         for (uid, name) in type_names {
             if name == s {
                 return uid.clone();
             }
         }
-        // Fall back to the string itself as UID
-        s.to_string()
-    } else {
-        // Named type — reverse lookup
-        for (uid, name) in type_names {
-            if name == s {
-                return uid.clone();
-            }
-        }
-        s.to_string()
+        return s.to_string();
     }
+    for (uid, name) in type_names {
+        if name == s {
+            return uid.clone();
+        }
+    }
+    // Fall back to matching the rendered form of each existing type so a
+    // round-trip on `option<u32>` lands back at the original `opt_u32`
+    // uid instead of inventing a brand-new type ref.
+    for (uid, td) in types {
+        if format_wit_type(&td.definition, types, type_names) == s {
+            return uid.clone();
+        }
+    }
+    s.to_string()
+}
+
+/// Split `s` on `delimiter` at top-level (not inside any of `()`, `[]`,
+/// `{}`, `<>` brackets). Required for parsing rendered compound types
+/// like `record { x: u32, y: u32 }` or `tuple<u32, u32>`.
+fn split_top_level(s: &str, delimiter: char) -> Vec<&str> {
+    let mut parts = Vec::new();
+    let mut depth = 0i32;
+    let mut start = 0;
+    for (i, ch) in s.char_indices() {
+        match ch {
+            '(' | '[' | '{' | '<' => depth += 1,
+            ')' | ']' | '}' | '>' => depth -= 1,
+            c if c == delimiter && depth == 0 => {
+                parts.push(&s[start..i]);
+                start = i + ch.len_utf8();
+            }
+            _ => {}
+        }
+    }
+    parts.push(&s[start..]);
+    parts
 }
 
 /// Parse a `def` header — `name(p1, p2)` — with no type annotations. Types
@@ -647,8 +671,8 @@ fn parse_def_header(sig: &str) -> Option<(String, Vec<String>)> {
     let pnames: Vec<String> = if params_str.is_empty() {
         vec![]
     } else {
-        params_str
-            .split(',')
+        split_top_level(params_str, ',')
+            .into_iter()
             .map(|p| p.trim().to_string())
             .collect()
     };
@@ -671,7 +695,10 @@ fn parse_rbs_annotation(line: &str) -> Option<(Vec<String>, Option<String>)> {
     let types: Vec<String> = if inner.trim().is_empty() {
         vec![]
     } else {
-        inner.split(',').map(|s| s.trim().to_string()).collect()
+        split_top_level(inner, ',')
+            .into_iter()
+            .map(|s| s.trim().to_string())
+            .collect()
     };
     let tail = after_name[inner_end + 1..].trim();
     let result = if let Some(r) = tail.strip_prefix("->") {
@@ -901,6 +928,7 @@ impl bindings::exports::wast::core::syntax_plugin::Guest for Component {
                             &parsed.name,
                             &rev_func,
                             &existing_by_source,
+                            &existing_funcs,
                             next_is_import,
                         );
 
@@ -991,21 +1019,28 @@ fn resolve_func_uid(
     name: &str,
     rev_func: &HashMap<String, String>,
     existing_by_source: &HashMap<String, (&str, &WastFunc)>,
+    existing_funcs: &HashMap<String, &WastFunc>,
     _is_import: bool,
 ) -> (String, String) {
     if let Some(source_uid) = rev_func.get(name) {
-        // Found source uid from sym table. Find the func_uid from existing.
         if let Some((func_uid, _)) = existing_by_source.get(source_uid.as_str()) {
-            (func_uid.to_string(), source_uid.clone())
-        } else {
-            // Source uid known but not in existing funcs — use source_uid as func_uid too
-            (source_uid.clone(), source_uid.clone())
+            return (func_uid.to_string(), source_uid.clone());
         }
-    } else {
-        // New function — generate UIDs
-        let uid = generate_uid();
-        (uid.clone(), uid)
+        return (source_uid.clone(), source_uid.clone());
     }
+    if let Some((func_uid, _)) = existing_by_source.get(name) {
+        return (func_uid.to_string(), name.to_string());
+    }
+    if let Some(f) = existing_funcs.get(name) {
+        let source_val = match &f.source {
+            FuncSource::Internal(s) | FuncSource::Imported(s) | FuncSource::Exported(s) => {
+                s.clone()
+            }
+        };
+        return (name.to_string(), source_val);
+    }
+    let uid = generate_uid();
+    (uid.clone(), uid)
 }
 
 /// Resolve parameter names and types from parsed strings.
@@ -1014,22 +1049,19 @@ fn resolve_params(
     rev_local: &HashMap<String, String>,
     types: &[(TypeUid, WastTypeDef)],
     type_names: &HashMap<String, String>,
-    new_syms_local: &mut Vec<SymEntry>,
+    _new_syms_local: &mut Vec<SymEntry>,
 ) -> Vec<(FuncUid, WitTypeRef)> {
     parsed
         .iter()
         .map(|(pname, ptype)| {
-            let param_uid = if let Some(uid) = rev_local.get(pname.as_str()) {
-                uid.clone()
-            } else {
-                // New param — generate uid and add sym
-                let uid = generate_uid();
-                new_syms_local.push(SymEntry {
-                    uid: uid.clone(),
-                    display_name: pname.clone(),
-                });
-                uid
-            };
+            // Reuse the explicit syms.local UID when one exists; otherwise
+            // the displayed name IS the UID (matches what to_text emits in
+            // the absence of a sym override). Generating fresh UIDs here
+            // would sever body LocalGet refs.
+            let param_uid = rev_local
+                .get(pname.as_str())
+                .cloned()
+                .unwrap_or_else(|| pname.clone());
             let type_ref = parse_type_ref_str(ptype, types, type_names);
             (param_uid, type_ref)
         })
