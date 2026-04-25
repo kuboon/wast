@@ -1,6 +1,6 @@
 # compiler — wast → wasm Component コンパイラ
 
-**現状: v0.33 完了**。numeric / control flow / calls / option / result / string / list / record / variant / tuple / char / enum / flags / ListLiteral / deep nested compound / exported & imported resource / heterogeneous result/variant の narrow + 暗黙 widen + payload offset 修正 + uniform-width multi-slot LocalGet copy (`result<string, u32>` 等) まで端から端まで動く。
+**現状: v0.35 完了**。numeric / control flow / calls / option / result / string / list / record / variant / tuple / char / enum / flags / ListLiteral / deep nested compound / exported & imported resource (constructor + method + static + dtor) / heterogeneous result/variant の narrow (i32/i64 + f32↔i32 / f64↔i64 reinterpret + f64→f32 demote) + 暗黙 widen + payload offset 修正 + uniform-width 多スロット copy + mixed-width disc-branch 多スロット copy (`result<u64, string>` 等) まで端から端まで動く。
 
 ## 全体アーキテクチャ (v0.11 以降)
 
@@ -112,9 +112,8 @@ Compound 戻り or body 内に Some/None/Ok/Err があるとき、**param+local 
 
 ## 残タスク (優先順)
 
-1. **mixed-width joined slot copy** — `[i64, i32]` のように joined スロットの幅が違う heterogeneous (case で record vs scalar 等) は disc 分岐が必要。v0.33 は uniform-width のみ対応。
-2. **f32/f64 reinterpret / demote** — heterogeneous_narrow_op / implicit_widen_op は i32/i64 + f32→f64 promote のみ対応。i32/f32 reinterpret や f64→f32 demote は未対応。
-3. **imported resource の拡張** — v0.28 は constructor + method のみ。imported static method や imported resource を record/tuple の field で扱うテストも欲しい。
+1. **case payload に nested option/result/variant** — `case_flat_slot_offsets` は primitive / string / list / record / tuple / enum / flags / handle のみ対応。case の payload に option<T> や result<T,E> や variant が来た時は disc 内蔵なので別途対応が必要。
+2. **WIT 識別子の自動 kebab-case 化** — v0.35 のテスト作成中に判明: record の field 名や型 uid に underscore があると wit-component が拒否する。`format_wit_type` / synthesize_world は `wit_name` で uid → kebab-case 化しているが、record の field 名は素通し。field 名と uid の両方で `_` → `-` に統一したい。
 
 ## 設計原則 (変わらず)
 

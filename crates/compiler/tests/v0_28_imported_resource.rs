@@ -45,6 +45,12 @@ impl wast::generated::imported_iface::HostCounter for HostState {
         c.value
     }
 
+    fn zero(&mut self) -> Resource<HostCounter> {
+        // Static factory: produce a fresh counter with rep=0. Same backing
+        // store as the regular constructor.
+        self.table.push(HostCounter { value: 0 }).unwrap()
+    }
+
     fn drop(&mut self, rep: Resource<HostCounter>) -> wasmtime::Result<()> {
         let c = self.table.delete(rep)?;
         self.drops.lock().unwrap().push(c.value);
@@ -81,6 +87,47 @@ fn build_db() -> WastDb {
                     params: vec![("self_".into(), "borrow_counter".into())],
                     result: Some("u32".into()),
                     body: None,
+                },
+            },
+            WastFuncRow {
+                uid: "ctr_zero".into(),
+                func: WastFunc {
+                    source: FuncSource::Imported("[static]counter.zero".into()),
+                    params: vec![],
+                    result: Some("own_counter".into()),
+                    body: None,
+                },
+            },
+            WastFuncRow {
+                uid: "via_zero".into(),
+                func: WastFunc {
+                    source: FuncSource::Exported("via-zero".into()),
+                    params: vec![],
+                    result: Some("u32".into()),
+                    body: Some(serialize_body(&[
+                        Instruction::LocalSet {
+                            uid: "h".into(),
+                            value: Box::new(Instruction::Call {
+                                func_uid: "[static]counter.zero".into(),
+                                args: vec![],
+                            }),
+                        },
+                        Instruction::LocalSet {
+                            uid: "v".into(),
+                            value: Box::new(Instruction::Call {
+                                func_uid: "[method]counter.get".into(),
+                                args: vec![(
+                                    "self_".into(),
+                                    Instruction::LocalGet { uid: "h".into() },
+                                )],
+                            }),
+                        },
+                        Instruction::ResourceDrop {
+                            resource: "counter".into(),
+                            handle: Box::new(Instruction::LocalGet { uid: "h".into() }),
+                        },
+                        Instruction::LocalGet { uid: "v".into() },
+                    ])),
                 },
             },
             WastFuncRow {
@@ -172,4 +219,36 @@ fn imported_resource_roundtrip() {
     let v = generated.call_roundtrip(&mut store, 7).unwrap();
     assert_eq!(v, 7);
     assert_eq!(drops.lock().unwrap().as_slice(), &[99, 7]);
+}
+
+#[test]
+fn imported_resource_static_method() {
+    // via-zero() calls the imported `[static]counter.zero` factory, then
+    // `[method]counter.get` on the returned handle, then drops it. The
+    // factory always produces value=0 on the host side, so we expect
+    // get → 0 and drops → [0].
+    let db = build_db();
+    let wasm = wast_compiler::compile(&db, "").expect("compile ok");
+    let engine = Engine::new(&Config::new()).unwrap();
+    let component = Component::from_binary(&engine, &wasm).expect("component load");
+
+    let mut linker: Linker<HostState> = Linker::new(&engine);
+    Generated::add_to_linker(&mut linker, |s: &mut HostState| s).unwrap();
+    let drops = Arc::new(Mutex::new(Vec::new()));
+    let mut store = Store::new(
+        &engine,
+        HostState {
+            table: ResourceTable::new(),
+            drops: drops.clone(),
+        },
+    );
+    let generated = Generated::instantiate(&mut store, &component, &linker).unwrap();
+
+    assert_eq!(generated.call_via_zero(&mut store).unwrap(), 0u32);
+    assert_eq!(drops.lock().unwrap().as_slice(), &[0]);
+
+    // Call again — distinct host handles are produced each time but they
+    // all carry value=0.
+    assert_eq!(generated.call_via_zero(&mut store).unwrap(), 0u32);
+    assert_eq!(drops.lock().unwrap().as_slice(), &[0, 0]);
 }

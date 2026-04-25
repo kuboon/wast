@@ -208,8 +208,14 @@ pub fn flat_slots(ty_ref: &str, type_map: &TypeMap) -> Result<Vec<&'static str>,
 
 /// Narrow a value on the stack from a joined (wider) core type back to the
 /// case's declared core type. Used at lift/destructure time for
-/// heterogeneous Result/Variant cases. v0.29 scope is i32/i64 only; f/i
-/// reinterpret combos and f32/f64 demote are deferred.
+/// heterogeneous Result/Variant cases.
+///
+/// - i64 → i32: `i32.wrap_i64`
+/// - i32 ↔ f32, i64 ↔ f64: bit-reinterpret (same width, different
+///   interpretation; the joined slot stores either type's bit pattern)
+/// - f64 → f32: `f32.demote_f64` (lossy in general, but the case's f32
+///   was widened via `f64.promote_f32` and the same value flows back —
+///   bit-pattern reinterpret would also be valid for the round-trip case)
 fn heterogeneous_narrow_op(
     from: &'static str,
     to: &'static str,
@@ -217,9 +223,13 @@ fn heterogeneous_narrow_op(
     match (from, to) {
         (a, b) if a == b => Ok(""),
         ("i64", "i32") => Ok("i32.wrap_i64"),
+        ("i32", "f32") => Ok("f32.reinterpret_i32"),
+        ("f32", "i32") => Ok("i32.reinterpret_f32"),
+        ("i64", "f64") => Ok("f64.reinterpret_i64"),
+        ("f64", "i64") => Ok("i64.reinterpret_f64"),
+        ("f64", "f32") => Ok("f32.demote_f64"),
         _ => Err(CompileError::Unsupported(format!(
-            "heterogeneous narrow from {from} to {to} not supported yet — \
-             v0.29 handles i64→i32 only (wrap_i64)"
+            "heterogeneous narrow from {from} to {to} not supported yet"
         ))),
     }
 }
@@ -257,6 +267,12 @@ fn implicit_widen_op(from: &str, to: &str) -> Result<Option<&'static str>, Compi
             }
         }
         ("f32", "f64") => Ok(Some("f64.promote_f32")),
+        // Same-width bit reinterprets — used when a constructed value
+        // needs to land in a slot whose joined core type differs.
+        ("i32", "f32") => Ok(Some("f32.reinterpret_i32")),
+        ("f32", "i32") => Ok(Some("i32.reinterpret_f32")),
+        ("i64", "f64") => Ok(Some("f64.reinterpret_i64")),
+        ("f64", "i64") => Ok(Some("i64.reinterpret_f64")),
         _ => Err(CompileError::Unsupported(format!(
             "implicit widen from {from} ({from_core}) to {to} ({to_core}) not supported"
         ))),
@@ -1249,43 +1265,197 @@ fn emit_variant_like_copy(
     let pay_off = base_offset + align_up(1, max_align);
 
     let payload_slots = &flat[1..];
-    // Multi-slot payloads can be copied unconditionally when every joined
-    // slot has the same core type. In that uniform case each slot's `i`-th
-    // store lands at `pay_off + i * slot_width`, and any case whose actual
-    // data uses fewer slots leaves "junk" in trailing positions — but those
-    // bytes fall outside the case's own size_align footprint, so its
-    // reader (which consults the disc first) never sees them.
-    //
-    // Mixed-width joined slots (e.g. `[i64, i32]` from a record vs scalar
-    // case) genuinely need a runtime disc branch with per-case writes,
-    // which is still deferred.
-    let core_ty = payload_slots[0];
-    if !payload_slots.iter().all(|s| *s == core_ty) {
-        return Err(CompileError::Unsupported(format!(
-            "LocalGet copy of {outer_ty:?} with mixed-width joined payload \
-             slots ({payload_slots:?}) not supported yet — needs disc-branch \
-             per-case write"
-        )));
-    }
-    let (store, slot_width) = match core_ty {
-        "i32" => ("i32.store", 4usize),
-        "i64" => ("i64.store", 8),
-        "f32" => ("f32.store", 4),
-        "f64" => ("f64.store", 8),
-        other => {
-            return Err(CompileError::Unsupported(format!(
-                "LocalGet copy payload core type {other:?}"
-            )));
+    let uniform = payload_slots.iter().all(|s| *s == payload_slots[0]);
+    if uniform {
+        // Fast path: every joined slot is the same core type. Each slot's
+        // `i`-th store lands at `pay_off + i * slot_width`. Cases whose
+        // actual data uses fewer slots leave "junk" in trailing positions —
+        // but those bytes fall outside the case's own size_align footprint,
+        // so its reader (which consults the disc first) never sees them.
+        let core_ty = payload_slots[0];
+        let (store, slot_width) = match core_ty {
+            "i32" => ("i32.store", 4usize),
+            "i64" => ("i64.store", 8),
+            "f32" => ("f32.store", 4),
+            "f64" => ("f64.store", 8),
+            other => {
+                return Err(CompileError::Unsupported(format!(
+                    "LocalGet copy payload core type {other:?}"
+                )));
+            }
+        };
+        for (i, _) in payload_slots.iter().enumerate() {
+            let off = pay_off + i * slot_width;
+            out.push_str(&format!(
+                "      local.get {ret_ptr}\n      local.get {}\n      {store} offset={off} align={slot_width}\n",
+                src_base + 1 + i
+            ));
         }
-    };
-    for (i, _) in payload_slots.iter().enumerate() {
-        let off = pay_off + i * slot_width;
+        return Ok(());
+    }
+
+    // v0.35: mixed-width joined slots — emit a disc-branched per-case copy.
+    // Each case branch stores only the slots that case actually needs, at
+    // the case's natural in-payload offsets, narrowing where the joined
+    // slot is wider than the case's flat slot.
+    emit_variant_like_copy_branched(
+        src_base,
+        ret_ptr,
+        pay_off,
+        payload_slots,
+        payload_tys,
+        type_map,
+        out,
+    )
+}
+
+/// v0.35: per-case disc branch for mixed-width joined slots. Each case's
+/// flat slots are walked separately; for every case-flat-slot we read the
+/// matching joined source slot, narrow with `heterogeneous_narrow_op` if
+/// the joined slot is wider, and store at the case's natural in-payload
+/// byte offset. Cases that use fewer slots than `joined_slots.len()` simply
+/// don't touch the trailing slots — and those memory bytes are within the
+/// variant's allocated payload region but outside the case's `size_align`
+/// footprint, so its reader never observes them.
+fn emit_variant_like_copy_branched(
+    src_base: usize,
+    ret_ptr: usize,
+    pay_off: usize,
+    joined_slots: &[&'static str],
+    payload_tys: &[Option<String>],
+    type_map: &TypeMap,
+    out: &mut String,
+) -> Result<(), CompileError> {
+    let n = payload_tys.len();
+    if n == 0 {
+        return Ok(());
+    }
+    // Build chain: if (disc==0) { case 0 } else if (disc==1) { case 1 } ...
+    for case_idx in 0..n.saturating_sub(1) {
         out.push_str(&format!(
-            "      local.get {ret_ptr}\n      local.get {}\n      {store} offset={off} align={slot_width}\n",
-            src_base + 1 + i
+            "      local.get {src_base}\n      i32.const {case_idx}\n      i32.eq\n      if\n"
         ));
+        emit_case_inline(
+            src_base,
+            ret_ptr,
+            pay_off,
+            joined_slots,
+            payload_tys[case_idx].as_deref(),
+            type_map,
+            out,
+        )?;
+        out.push_str("      else\n");
+    }
+    // Final case (no further `else if`)
+    emit_case_inline(
+        src_base,
+        ret_ptr,
+        pay_off,
+        joined_slots,
+        payload_tys[n - 1].as_deref(),
+        type_map,
+        out,
+    )?;
+    for _ in 0..n.saturating_sub(1) {
+        out.push_str("      end\n");
     }
     Ok(())
+}
+
+fn emit_case_inline(
+    src_base: usize,
+    ret_ptr: usize,
+    pay_off: usize,
+    joined_slots: &[&'static str],
+    payload_ty: Option<&str>,
+    type_map: &TypeMap,
+    out: &mut String,
+) -> Result<(), CompileError> {
+    let Some(pty) = payload_ty else {
+        return Ok(()); // unit case has no payload
+    };
+    let case_offsets = case_flat_slot_offsets(pty, type_map)?;
+    for (i, (offset, case_core)) in case_offsets.iter().enumerate() {
+        let joined_core = joined_slots.get(i).copied().ok_or_else(|| {
+            CompileError::InvalidInput(format!(
+                "case payload type {pty:?} flat slot {i} but joined has only \
+                 {} payload slots",
+                joined_slots.len()
+            ))
+        })?;
+        out.push_str(&format!(
+            "      local.get {ret_ptr}\n      local.get {}\n",
+            src_base + 1 + i
+        ));
+        let narrow = heterogeneous_narrow_op(joined_core, case_core)?;
+        if !narrow.is_empty() {
+            out.push_str(&format!("      {narrow}\n"));
+        }
+        let (store, align) = match *case_core {
+            "i32" => ("i32.store", 4usize),
+            "i64" => ("i64.store", 8),
+            "f32" => ("f32.store", 4),
+            "f64" => ("f64.store", 8),
+            other => {
+                return Err(CompileError::Unsupported(format!(
+                    "case slot core type {other:?}"
+                )));
+            }
+        };
+        let total_off = pay_off + offset;
+        out.push_str(&format!("      {store} offset={total_off} align={align}\n"));
+    }
+    Ok(())
+}
+
+/// Walk a type's natural in-memory layout and produce
+/// `(byte_offset, core_type)` pairs in flat-slot order. Used by the
+/// mixed-width disc-branch path to know where each joined slot's narrowed
+/// value should land for a given case.
+fn case_flat_slot_offsets(
+    ty: &str,
+    type_map: &TypeMap,
+) -> Result<Vec<(usize, &'static str)>, CompileError> {
+    match resolve_type(ty, type_map)? {
+        ResolvedType::Primitive(p) => Ok(vec![(0, wit_to_core(&p)?)]),
+        ResolvedType::String | ResolvedType::List(_) => Ok(vec![(0, "i32"), (4, "i32")]),
+        ResolvedType::Own(_) | ResolvedType::Borrow(_) => Ok(vec![(0, "i32")]),
+        ResolvedType::Enum(_) | ResolvedType::Flags(_) => {
+            // Enum and small-flags fit in a single i32 slot at offset 0.
+            // (>32-flag bitmasks would need i64; deferred.)
+            Ok(vec![(0, "i32")])
+        }
+        ResolvedType::Record(fields) => {
+            let mut out = Vec::new();
+            let mut byte_off = 0usize;
+            for (_, ftype) in &fields {
+                let (size, align) = size_align(ftype, type_map)?;
+                byte_off = align_up(byte_off, align);
+                for (sub_off, sub_core) in case_flat_slot_offsets(ftype, type_map)? {
+                    out.push((byte_off + sub_off, sub_core));
+                }
+                byte_off += size;
+            }
+            Ok(out)
+        }
+        ResolvedType::Tuple(elems) => {
+            let mut out = Vec::new();
+            let mut byte_off = 0usize;
+            for ety in &elems {
+                let (size, align) = size_align(ety, type_map)?;
+                byte_off = align_up(byte_off, align);
+                for (sub_off, sub_core) in case_flat_slot_offsets(ety, type_map)? {
+                    out.push((byte_off + sub_off, sub_core));
+                }
+                byte_off += size;
+            }
+            Ok(out)
+        }
+        other => Err(CompileError::Unsupported(format!(
+            "case_flat_slot_offsets for {other:?} not supported yet \
+             (option/result/variant nested in heterogeneous case payload)"
+        ))),
+    }
 }
 
 /// Store `value` (of type `ty`) at `[ret_ptr + base_offset ..]` using the
