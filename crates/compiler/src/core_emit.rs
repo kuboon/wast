@@ -1237,12 +1237,6 @@ fn emit_variant_like_copy(
         // Pure-disc (e.g., all variant cases are unit) — done.
         return Ok(());
     }
-    if flat.len() > 2 {
-        return Err(CompileError::Unsupported(format!(
-            "LocalGet copy of {outer_ty:?} with multi-slot payload not supported \
-             (current compiler limit: homogeneous single-slot join)"
-        )));
-    }
 
     // Compute payload byte offset from the max alignment across cases.
     let mut max_align = 1usize;
@@ -1254,11 +1248,27 @@ fn emit_variant_like_copy(
     }
     let pay_off = base_offset + align_up(1, max_align);
 
-    // The payload is stored using the flat-joined core type's natural store
-    // op. `flat[1]` is the joined type (e.g. "i64" for a result<u32, u64>).
-    let core_ty = flat[1];
-    let (store, align) = match core_ty {
-        "i32" => ("i32.store", 4),
+    let payload_slots = &flat[1..];
+    // Multi-slot payloads can be copied unconditionally when every joined
+    // slot has the same core type. In that uniform case each slot's `i`-th
+    // store lands at `pay_off + i * slot_width`, and any case whose actual
+    // data uses fewer slots leaves "junk" in trailing positions — but those
+    // bytes fall outside the case's own size_align footprint, so its
+    // reader (which consults the disc first) never sees them.
+    //
+    // Mixed-width joined slots (e.g. `[i64, i32]` from a record vs scalar
+    // case) genuinely need a runtime disc branch with per-case writes,
+    // which is still deferred.
+    let core_ty = payload_slots[0];
+    if !payload_slots.iter().all(|s| *s == core_ty) {
+        return Err(CompileError::Unsupported(format!(
+            "LocalGet copy of {outer_ty:?} with mixed-width joined payload \
+             slots ({payload_slots:?}) not supported yet — needs disc-branch \
+             per-case write"
+        )));
+    }
+    let (store, slot_width) = match core_ty {
+        "i32" => ("i32.store", 4usize),
         "i64" => ("i64.store", 8),
         "f32" => ("f32.store", 4),
         "f64" => ("f64.store", 8),
@@ -1268,10 +1278,13 @@ fn emit_variant_like_copy(
             )));
         }
     };
-    out.push_str(&format!(
-        "      local.get {ret_ptr}\n      local.get {}\n      {store} offset={pay_off} align={align}\n",
-        src_base + 1
-    ));
+    for (i, _) in payload_slots.iter().enumerate() {
+        let off = pay_off + i * slot_width;
+        out.push_str(&format!(
+            "      local.get {ret_ptr}\n      local.get {}\n      {store} offset={off} align={slot_width}\n",
+            src_base + 1 + i
+        ));
+    }
     Ok(())
 }
 
