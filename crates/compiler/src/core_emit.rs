@@ -224,6 +224,45 @@ fn heterogeneous_narrow_op(
     }
 }
 
+/// v0.31: implicit widen at value-use sites. When a single-slot primitive
+/// flows from a narrower local into a wider consumer (e.g. `LocalGet(u32)`
+/// inside an `Arithmetic` whose expected type is `u64`), emit the
+/// appropriate widening op. Returns `Ok(None)` for no-op (same core types),
+/// `Ok(Some(op))` for a one-instruction widen, and `Err(...)` for combos
+/// that aren't supported yet. f/i reinterpret and signed-only-on-source
+/// edge cases follow the source's `is_signed` choice.
+fn implicit_widen_op(from: &str, to: &str) -> Result<Option<&'static str>, CompileError> {
+    if from == to {
+        return Ok(None);
+    }
+    // Non-primitive compound types (handles, lists, records, etc.) flow
+    // through unchanged — widen is a primitive-only concept.
+    let Ok(from_core) = wit_to_core(from) else {
+        return Ok(None);
+    };
+    let Ok(to_core) = wit_to_core(to) else {
+        return Ok(None);
+    };
+    if from_core == to_core {
+        return Ok(None);
+    }
+    match (from_core, to_core) {
+        ("i32", "i64") => {
+            // Signed source → arithmetic sign-extend; everything else
+            // (u32, bool, char) → zero-extend.
+            if is_signed(from) {
+                Ok(Some("i64.extend_i32_s"))
+            } else {
+                Ok(Some("i64.extend_i32_u"))
+            }
+        }
+        ("f32", "f64") => Ok(Some("f64.promote_f32")),
+        _ => Err(CompileError::Unsupported(format!(
+            "implicit widen from {from} ({from_core}) to {to} ({to_core}) not supported"
+        ))),
+    }
+}
+
 fn join_core_type(a: &'static str, b: &'static str) -> Result<&'static str, CompileError> {
     // Canonical ABI flat-join, restricted to v0.6 primitive payloads:
     if a == b {
@@ -2020,7 +2059,19 @@ fn emit_instr(
         Instruction::Nop => out.push_str("      nop\n"),
         Instruction::Return => out.push_str("      return\n"),
         Instruction::LocalGet { uid } => {
-            let (first_idx, slots, _) = slot_info(uid, scope, type_map)?;
+            let (first_idx, slots, local_ty) = slot_info(uid, scope, type_map)?;
+            // Single-slot primitives may need implicit widening when the
+            // consumer's expected type is wider than the local's declared
+            // type (e.g. u32 local used in a u64 context).
+            if slots.len() == 1 {
+                if let Some(want) = expected
+                    && let Some(op) = implicit_widen_op(local_ty, want)?
+                {
+                    out.push_str(&format!("      local.get {first_idx}\n"));
+                    out.push_str(&format!("      {op}\n"));
+                    return Ok(());
+                }
+            }
             for i in 0..slots.len() {
                 out.push_str(&format!("      local.get {}\n", first_idx + i));
             }
