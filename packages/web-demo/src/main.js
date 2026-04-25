@@ -207,10 +207,30 @@ async function main() {
 // ---------------------------------------------------------------------------
 
 const PLUGINS = [
-  { id: "raw", label: "raw", module: "raw/raw.js" },
-  { id: "ruby-like", label: "ruby-like", module: "ruby-like/ruby_like.js" },
-  { id: "ts-like", label: "ts-like", module: "ts-like/ts_like.js" },
-  { id: "rust-like", label: "rust-like", module: "rust-like/rust_like.js" },
+  {
+    id: "raw",
+    label: "raw",
+    module: "raw/raw.js",
+    capability: "to_text only — no from_text",
+  },
+  {
+    id: "ruby-like",
+    label: "ruby-like",
+    module: "ruby-like/ruby_like.js",
+    capability: "signature edits roundtrip · body edits dropped (preservation)",
+  },
+  {
+    id: "ts-like",
+    label: "ts-like",
+    module: "ts-like/ts_like.js",
+    capability: "signature + body edits roundtrip (v0.16-era IR)",
+  },
+  {
+    id: "rust-like",
+    label: "rust-like",
+    module: "rust-like/rust_like.js",
+    capability: "signature edits roundtrip · body edits dropped (preservation)",
+  },
 ];
 
 async function initPluginShowcase() {
@@ -276,11 +296,21 @@ async function initPluginShowcase() {
     };
   }
 
+  // The wast-component is mutable: edits in the controls table or
+  // successful from_text parses replace `wc.funcs` / `wc.syms` in place,
+  // and we re-render the panes from the new state.
+  // Holds Mut so we can reassign on parse.
+  let wcRef = wc;
+
   host.append(
     h("p", { class: "desc" }, [
       "This is ",
       h("strong", {}, "one wast component"),
-      " with 12 functions that call each other. Toggle which ones appear, rename any, and watch the same IR render as four different surface syntaxes. The four plugins are WASM Components themselves, transpiled by ",
+      " with 12 functions that call each other. Toggle which ones appear, rename any, or ",
+      h("strong", {}, "edit a pane and click Sync"),
+      " to round-trip through ",
+      h("code", {}, "from_text"),
+      " — the other panes will reflect your changes via the IR. The four plugins are WASM Components themselves, transpiled by ",
       h("code", {}, "jco"),
       " and loaded as ES modules.",
     ]),
@@ -304,9 +334,20 @@ async function initPluginShowcase() {
   function filteredComponent() {
     const keep = filteredUids();
     return {
-      ...wc,
-      funcs: wc.funcs.filter(([uid]) => keep.has(uid)),
+      ...wcRef,
+      funcs: wcRef.funcs.filter(([uid]) => keep.has(uid)),
     };
+  }
+
+  /** Pull the WastError list out of whatever a jco from_text rejection
+   * looks like (could be a thrown Error with a `.payload`, an array, or
+   * just a string message).
+   */
+  function extractParseErrors(thrown) {
+    if (Array.isArray(thrown)) return thrown;
+    if (thrown?.payload && Array.isArray(thrown.payload)) return thrown.payload;
+    if (thrown?.message) return [{ message: thrown.message }];
+    return [{ message: String(thrown) }];
   }
 
   function renderGrid() {
@@ -319,17 +360,78 @@ async function initPluginShowcase() {
     for (const p of PLUGINS) {
       const box = h("div", { class: "plugin-box" });
       box.append(h("h3", {}, p.label));
-      const pre = h("pre", {});
+      const ta = h("textarea", { class: "pane-text", spellcheck: "false" });
+      ta.rows = 14;
+      const errBox = h("div", { class: "pane-errors" });
+      const sync = h(
+        "button",
+        {
+          type: "button",
+          class: "pane-sync",
+          // raw plugin doesn't implement from_text, so disable.
+          ...(p.id === "raw" ? { disabled: "disabled" } : {}),
+        },
+        "Sync from this pane →",
+      );
       try {
         const plugin = pluginMods[p.id];
         if (!plugin) throw new Error("plugin module not loaded");
-        pre.textContent = plugin.toText(comp);
+        ta.value = plugin.toText(comp);
         box.classList.add("ok");
       } catch (err) {
-        pre.textContent = `error: ${err.message || err}`;
+        ta.value = `error: ${err.message || err}`;
         box.classList.add("err");
       }
-      box.append(pre);
+      sync.addEventListener("click", () => {
+        errBox.innerHTML = "";
+        errBox.className = "pane-errors";
+        const plugin = pluginMods[p.id];
+        if (!plugin || !plugin.fromText) {
+          errBox.classList.add("err");
+          errBox.textContent = "this plugin does not implement from_text";
+          return;
+        }
+        try {
+          // Pass the WHOLE component as `existing`, even though the pane
+          // text only shows the filtered subset — the plugin treats the
+          // text as authoritative for funcs it sees, and falls back to
+          // existing for funcs it doesn't.
+          const parsed = plugin.fromText(ta.value, wcRef);
+          // jco unpacks the result<T, E> — Ok arrives as a plain value,
+          // Err throws.
+          wcRef = parsed;
+          // Rebuild toggles for any new uids introduced by the parser
+          // (e.g. when a fresh func/local name appears in the edited text).
+          for (const [uid, row] of wcRef.funcs) {
+            if (!toggles[uid]) {
+              toggles[uid] = {
+                show: row.source.tag === "exported",
+                withCallers: false,
+              };
+            }
+          }
+          renderControls();
+          renderGrid();
+        } catch (err) {
+          const errs = extractParseErrors(err);
+          errBox.classList.add("err");
+          errBox.append(
+            h("strong", {}, `from_text failed (${errs.length} error${errs.length === 1 ? "" : "s"}):`),
+          );
+          const ul = h("ul", {});
+          for (const e of errs) {
+            const msg = e.message ?? String(e);
+            const loc = e.location ? ` [${e.location}]` : "";
+            ul.append(h("li", {}, `${msg}${loc}`));
+          }
+          errBox.append(ul);
+        }
+      });
+      box.append(ta, h("div", { class: "pane-toolbar" }, [sync]));
+      box.append(errBox);
+      box.append(
+        h("p", { class: "pane-cap" }, p.capability),
+      );
       grid.append(box);
     }
   }
@@ -347,11 +449,11 @@ async function initPluginShowcase() {
       ])),
     );
     const tbody = h("tbody", {});
-    for (const [uid, row] of wc.funcs) {
+    for (const [uid, row] of wcRef.funcs) {
       const tr = h("tr", {});
 
       const showBox = h("input", { type: "checkbox" });
-      showBox.checked = toggles[uid].show;
+      showBox.checked = toggles[uid]?.show ?? false;
       showBox.addEventListener("change", () => {
         toggles[uid].show = showBox.checked;
         renderGrid();
@@ -359,7 +461,7 @@ async function initPluginShowcase() {
       tr.append(h("td", {}, showBox));
 
       const callerBox = h("input", { type: "checkbox" });
-      callerBox.checked = toggles[uid].withCallers;
+      callerBox.checked = toggles[uid]?.withCallers ?? false;
       const nCallers = callersOf(uid).length;
       callerBox.disabled = nCallers === 0;
       callerBox.title =
@@ -378,13 +480,13 @@ async function initPluginShowcase() {
         type: "text",
         placeholder: `(default: ${uid})`,
       });
-      const existing = wc.syms.internal.find((e) => e.uid === uid);
+      const existing = wcRef.syms.internal.find((e) => e.uid === uid);
       nameInput.value = existing?.displayName ?? "";
       nameInput.addEventListener("input", () => {
         const val = nameInput.value.trim();
-        wc.syms.internal = wc.syms.internal.filter((e) => e.uid !== uid);
+        wcRef.syms.internal = wcRef.syms.internal.filter((e) => e.uid !== uid);
         if (val !== "") {
-          wc.syms.internal.push({ uid, displayName: val });
+          wcRef.syms.internal.push({ uid, displayName: val });
         }
         renderGrid();
       });
