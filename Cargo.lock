@@ -2271,6 +2271,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "wast-syntax-core"
+version = "0.1.0"
+dependencies = [
+ "wast-types",
+]
+
+[[package]]
 name = "wast-syntax-raw"
 version = "0.1.0"
 dependencies = [
@@ -2284,6 +2291,8 @@ name = "wast-syntax-ruby-like"
 version = "0.1.0"
 dependencies = [
  "wast-pattern-analyzer",
+ "wast-syntax-core",
+ "wast-types",
  "wit-bindgen 0.55.0",
  "wit-bindgen-rt",
 ]
@@ -2293,6 +2302,8 @@ name = "wast-syntax-rust-like"
 version = "0.1.0"
 dependencies = [
  "wast-pattern-analyzer",
+ "wast-syntax-core",
+ "wast-types",
  "wit-bindgen 0.55.0",
  "wit-bindgen-rt",
 ]
@@ -2302,6 +2313,8 @@ name = "wast-syntax-ts-like"
 version = "0.1.0"
 dependencies = [
  "wast-pattern-analyzer",
+ "wast-syntax-core",
+ "wast-types",
  "wit-bindgen 0.55.0",
  "wit-bindgen-rt",
 ]

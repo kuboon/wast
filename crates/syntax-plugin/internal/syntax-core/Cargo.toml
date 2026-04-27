@@ -1,0 +1,10 @@
+[package]
+name = "wast-syntax-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+wast-types = { path = "../../../wast-types" }
+
+[lib]

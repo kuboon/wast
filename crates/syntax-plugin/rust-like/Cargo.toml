@@ -8,6 +8,8 @@ license.workspace = true
 wit-bindgen = { workspace = true }
 wit-bindgen-rt = { workspace = true }
 wast-pattern-analyzer = { path = "../internal/pattern-analyzer" }
+wast-syntax-core = { path = "../internal/syntax-core" }
+wast-types = { path = "../../wast-types" }
 
 [lib]
 crate-type = ["cdylib"]

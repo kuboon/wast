@@ -9,6 +9,7 @@ members = [
     "crates/syntax-plugin/ts-like",
     "crates/syntax-plugin/rust-like",
     "crates/syntax-plugin/internal/pattern-analyzer",
+    "crates/syntax-plugin/internal/syntax-core",
     "crates/syntax-plugin/raw",
     "crates/wast-types",
 ]

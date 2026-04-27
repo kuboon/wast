@@ -2,139 +2,93 @@
 #[rustfmt::skip]
 mod bindings;
 
+mod convert;
+
 use bindings::wast::core::types::*;
-use std::collections::BTreeMap as HashMap;
+use std::collections::HashMap;
 use wast_pattern_analyzer::{ArithOp, CompareOp, Instruction};
+use wast_syntax_core::{RenderContext, TypePrinter};
 
 struct Component;
 
 // ---------------------------------------------------------------------------
-// Helpers
+// Surface — TS-flavored WIT type lexemes.
 // ---------------------------------------------------------------------------
 
-/// Build a map from UID -> display name using the various sym tables.
-fn build_func_name_map(syms: &Syms) -> HashMap<String, String> {
-    let mut map = HashMap::new();
-    for entry in &syms.internal {
-        map.insert(entry.uid.clone(), entry.display_name.clone());
-    }
-    for (uid, display) in &syms.wit_syms {
-        map.insert(uid.clone(), display.clone());
-    }
-    map
-}
+struct TsTypePrinter;
 
-fn build_local_name_map(syms: &Syms) -> HashMap<String, String> {
-    let mut map = HashMap::new();
-    for entry in &syms.local {
-        map.insert(entry.uid.clone(), entry.display_name.clone());
+impl TypePrinter for TsTypePrinter {
+    fn primitive(&self, p: &wast_types::PrimitiveType) -> String {
+        primitive_name(p).to_string()
     }
-    map
-}
-
-fn build_type_name_map(_types: &[(TypeUid, WastTypeDef)], syms: &Syms) -> HashMap<String, String> {
-    let mut map = HashMap::new();
-    for entry in &syms.internal {
-        map.insert(entry.uid.clone(), entry.display_name.clone());
+    fn option(&self, inner: &str) -> String {
+        format!("option<{inner}>")
     }
-    for (uid, display) in &syms.wit_syms {
-        map.insert(uid.clone(), display.clone());
+    fn result(&self, ok: &str, err: &str) -> String {
+        format!("result<{ok}, {err}>")
     }
-    map
-}
-
-fn resolve_type_ref(
-    type_ref: &WitTypeRef,
-    types: &[(TypeUid, WastTypeDef)],
-    type_names: &HashMap<String, String>,
-) -> String {
-    for (uid, typedef) in types {
-        if uid == type_ref {
-            return format_wit_type(&typedef.definition, types, type_names);
-        }
+    fn list(&self, inner: &str) -> String {
+        format!("list<{inner}>")
     }
-    type_names
-        .get(type_ref.as_str())
-        .cloned()
-        .unwrap_or_else(|| type_ref.clone())
-}
-
-fn format_wit_type(
-    wit_type: &WitType,
-    types: &[(TypeUid, WastTypeDef)],
-    type_names: &HashMap<String, String>,
-) -> String {
-    match wit_type {
-        WitType::Primitive(p) => primitive_name(p).to_string(),
-        WitType::Option(inner) => {
-            format!("option<{}>", resolve_type_ref(inner, types, type_names))
-        }
-        WitType::Result((ok, err)) => {
-            format!(
-                "result<{}, {}>",
-                resolve_type_ref(ok, types, type_names),
-                resolve_type_ref(err, types, type_names)
-            )
-        }
-        WitType::List(inner) => {
-            format!("list<{}>", resolve_type_ref(inner, types, type_names))
-        }
-        WitType::Record(fields) => {
-            let parts: Vec<String> = fields
-                .iter()
-                .map(|(name, tref)| {
-                    let n = type_names
-                        .get(name.as_str())
-                        .cloned()
-                        .unwrap_or_else(|| name.clone());
-                    format!("{}: {}", n, resolve_type_ref(tref, types, type_names))
-                })
-                .collect();
-            format!("record {{ {} }}", parts.join(", "))
-        }
-        WitType::Variant(cases) => {
-            let parts: Vec<String> = cases
-                .iter()
-                .map(|(name, tref)| {
-                    let n = type_names
-                        .get(name.as_str())
-                        .cloned()
-                        .unwrap_or_else(|| name.clone());
-                    match tref {
-                        Some(t) => format!("{}({})", n, resolve_type_ref(t, types, type_names)),
-                        None => n,
-                    }
-                })
-                .collect();
-            format!("variant {{ {} }}", parts.join(", "))
-        }
-        WitType::Tuple(refs) => {
-            let parts: Vec<String> = refs
-                .iter()
-                .map(|r| resolve_type_ref(r, types, type_names))
-                .collect();
-            format!("tuple<{}>", parts.join(", "))
-        }
-        WitType::Enum(cases) => format!("enum {{ {} }}", cases.join(" | ")),
-        WitType::Flags(names) => format!("flags {{ {} }}", names.join(" | ")),
-        WitType::Resource => "resource".to_string(),
-        WitType::Own(r) => format!("own<{}>", r),
-        WitType::Borrow(r) => format!("borrow<{}>", r),
+    fn record(&self, fields: &[(String, String)]) -> String {
+        let parts: Vec<String> = fields.iter().map(|(n, t)| format!("{n}: {t}")).collect();
+        format!("record {{ {} }}", parts.join(", "))
+    }
+    fn variant(&self, cases: &[(String, Option<String>)]) -> String {
+        let parts: Vec<String> = cases
+            .iter()
+            .map(|(n, t)| match t {
+                Some(t) => format!("{n}({t})"),
+                None => n.clone(),
+            })
+            .collect();
+        format!("variant {{ {} }}", parts.join(", "))
+    }
+    fn tuple(&self, items: &[String]) -> String {
+        format!("tuple<{}>", items.join(", "))
+    }
+    fn enum_(&self, cases: &[String]) -> String {
+        format!("enum {{ {} }}", cases.join(" | "))
+    }
+    fn flags(&self, cases: &[String]) -> String {
+        format!("flags {{ {} }}", cases.join(" | "))
+    }
+    fn resource(&self) -> String {
+        "resource".into()
+    }
+    fn own(&self, target: &str) -> String {
+        format!("own<{target}>")
+    }
+    fn borrow(&self, target: &str) -> String {
+        format!("borrow<{target}>")
     }
 }
 
-fn primitive_name(p: &PrimitiveType) -> &'static str {
+fn format_type_ref(type_ref: &WitTypeRef, ctx: &RenderContext) -> String {
+    wast_syntax_core::resolve_type_ref(type_ref, ctx, &TsTypePrinter)
+}
+
+fn format_wit_type_native(t: &wast_types::WitType, ctx: &RenderContext) -> String {
+    wast_syntax_core::format_wit_type(t, ctx, &TsTypePrinter)
+}
+
+fn primitive_name(p: &wast_types::PrimitiveType) -> &'static str {
+    use wast_types::PrimitiveType as P;
     match p {
-        PrimitiveType::U32 => "u32",
-        PrimitiveType::U64 => "u64",
-        PrimitiveType::I32 => "i32",
-        PrimitiveType::I64 => "i64",
-        PrimitiveType::F32 => "f32",
-        PrimitiveType::F64 => "f64",
-        PrimitiveType::Bool => "bool",
-        PrimitiveType::Char => "char",
-        PrimitiveType::String => "string",
+        P::U32 => "u32",
+        P::U64 => "u64",
+        P::I32 => "i32",
+        P::I64 => "i64",
+        P::F32 => "f32",
+        P::F64 => "f64",
+        P::Bool => "bool",
+        P::Char => "char",
+        P::String => "string",
     }
+}
+
+fn primitive_name_binding(p: &PrimitiveType) -> &'static str {
+    primitive_name(&convert::primitive(p))
 }
 
 fn parse_primitive(s: &str) -> Option<PrimitiveType> {
@@ -1099,21 +1053,15 @@ fn parse_func_body(
 // to_text
 // ---------------------------------------------------------------------------
 
-fn func_to_text(
-    func_uid: &str,
-    func: &WastFunc,
-    func_names: &HashMap<String, String>,
-    local_names: &HashMap<String, String>,
-    type_names: &HashMap<String, String>,
-    types: &[(TypeUid, WastTypeDef)],
-) -> String {
+fn func_to_text(func_uid: &str, func: &WastFunc, ctx: &RenderContext) -> String {
     let source_uid = match &func.source {
         FuncSource::Internal(u) | FuncSource::Imported(u) | FuncSource::Exported(u) => u.clone(),
     };
 
-    let name = func_names
+    let name = ctx
+        .func_names
         .get(&source_uid)
-        .or_else(|| func_names.get(func_uid))
+        .or_else(|| ctx.func_names.get(func_uid))
         .cloned()
         .unwrap_or_else(|| func_uid.to_string());
 
@@ -1121,18 +1069,15 @@ fn func_to_text(
         .params
         .iter()
         .map(|(param_uid, type_ref)| {
-            let pname = local_names
-                .get(param_uid.as_str())
-                .cloned()
-                .unwrap_or_else(|| param_uid.clone());
-            let tname = resolve_type_ref(type_ref, types, type_names);
+            let pname = ctx.local_name(param_uid).to_string();
+            let tname = format_type_ref(type_ref, ctx);
             format!("{}: {}", pname, tname)
         })
         .collect::<Vec<_>>()
         .join(", ");
 
     let result_str = match &func.result {
-        Some(type_ref) => format!(": {}", resolve_type_ref(type_ref, types, type_names)),
+        Some(type_ref) => format!(": {}", format_type_ref(type_ref, ctx)),
         None => String::new(),
     };
 
@@ -1143,7 +1088,7 @@ fn func_to_text(
         FuncSource::Exported(_) => {
             let returns = func.result.is_some();
             let body_str = match &func.body {
-                Some(b) => render_body(b, "  ", returns, local_names, func_names),
+                Some(b) => render_body(b, "  ", returns, &ctx.local_names, &ctx.func_names),
                 None => "  // [no body]".to_string(),
             };
             format!(
@@ -1154,7 +1099,7 @@ fn func_to_text(
         FuncSource::Internal(_) => {
             let returns = func.result.is_some();
             let body_str = match &func.body {
-                Some(b) => render_body(b, "  ", returns, local_names, func_names),
+                Some(b) => render_body(b, "  ", returns, &ctx.local_names, &ctx.func_names),
                 None => "  // [no body]".to_string(),
             };
             format!(
@@ -1180,25 +1125,25 @@ struct ParsedFunc {
 fn parse_type_ref_str(
     s: &str,
     types: &[(TypeUid, WastTypeDef)],
-    type_names: &HashMap<String, String>,
+    ctx: &RenderContext,
 ) -> WitTypeRef {
     let s = s.trim();
     if parse_primitive(s).is_some() {
         for (uid, td) in types {
             if let WitType::Primitive(p) = &td.definition {
-                if primitive_name(p) == s {
+                if primitive_name_binding(p) == s {
                     return uid.clone();
                 }
             }
         }
-        for (uid, name) in type_names {
+        for (uid, name) in &ctx.type_names {
             if name == s {
                 return uid.clone();
             }
         }
         return s.to_string();
     }
-    for (uid, name) in type_names {
+    for (uid, name) in &ctx.type_names {
         if name == s {
             return uid.clone();
         }
@@ -1207,7 +1152,7 @@ fn parse_type_ref_str(
     // round-trip on `option<u32>` lands back at the original `opt_u32`
     // uid instead of inventing a brand-new type ref.
     for (uid, td) in types {
-        if format_wit_type(&td.definition, types, type_names) == s {
+        if format_wit_type_native(&convert::wit_type(&td.definition), ctx) == s {
             return uid.clone();
         }
     }
@@ -1285,37 +1230,30 @@ fn generate_uid() -> String {
 
 impl bindings::exports::wast::core::syntax_plugin::Guest for Component {
     fn to_text(component: WastComponent) -> String {
-        let func_names = build_func_name_map(&component.syms);
-        let local_names = build_local_name_map(&component.syms);
-        let type_names = build_type_name_map(&component.types, &component.syms);
+        let native_syms = convert::syms(&component.syms);
+        let native_types = convert::type_list(&component.types);
+        let ctx = RenderContext::new(&native_syms, &native_types);
 
         let mut parts: Vec<String> = Vec::new();
-
         for (func_uid, func) in &component.funcs {
-            parts.push(func_to_text(
-                func_uid,
-                func,
-                &func_names,
-                &local_names,
-                &type_names,
-                &component.types,
-            ));
+            parts.push(func_to_text(func_uid, func, &ctx));
         }
-
         parts.join("\n\n")
     }
 
     fn from_text(text: String, existing: WastComponent) -> Result<WastComponent, Vec<WastError>> {
-        let func_names = build_func_name_map(&existing.syms);
-        let local_names = build_local_name_map(&existing.syms);
-        let type_names = build_type_name_map(&existing.types, &existing.syms);
+        let native_syms = convert::syms(&existing.syms);
+        let native_types = convert::type_list(&existing.types);
+        let ctx = RenderContext::new(&native_syms, &native_types);
 
         // Reverse maps: display_name -> uid
-        let rev_func: HashMap<String, String> = func_names
+        let rev_func: HashMap<String, String> = ctx
+            .func_names
             .iter()
             .map(|(k, v)| (v.clone(), k.clone()))
             .collect();
-        let rev_local: HashMap<String, String> = local_names
+        let rev_local: HashMap<String, String> = ctx
+            .local_names
             .iter()
             .map(|(k, v)| (v.clone(), k.clone()))
             .collect();
@@ -1377,13 +1315,13 @@ impl bindings::exports::wast::core::syntax_plugin::Guest for Component {
                             &parsed.params,
                             &rev_local,
                             &existing.types,
-                            &type_names,
+                            &ctx,
                             &mut new_syms_local,
                         );
                         let result = parsed
                             .result_type
                             .as_ref()
-                            .map(|r| parse_type_ref_str(r, &existing.types, &type_names));
+                            .map(|r| parse_type_ref_str(r, &existing.types, &ctx));
 
                         let body = existing_by_source
                             .get(&source_uid)
@@ -1442,13 +1380,13 @@ impl bindings::exports::wast::core::syntax_plugin::Guest for Component {
                             &parsed.params,
                             &rev_local,
                             &existing.types,
-                            &type_names,
+                            &ctx,
                             &mut new_syms_local,
                         );
                         let result = parsed
                             .result_type
                             .as_ref()
-                            .map(|r| parse_type_ref_str(r, &existing.types, &type_names));
+                            .map(|r| parse_type_ref_str(r, &existing.types, &ctx));
 
                         ensure_func_sym(&source_uid, &parsed.name, &mut new_syms_internal);
 
@@ -1500,13 +1438,13 @@ impl bindings::exports::wast::core::syntax_plugin::Guest for Component {
                             &parsed.params,
                             &rev_local,
                             &existing.types,
-                            &type_names,
+                            &ctx,
                             &mut new_syms_local,
                         );
                         let result = parsed
                             .result_type
                             .as_ref()
-                            .map(|r| parse_type_ref_str(r, &existing.types, &type_names));
+                            .map(|r| parse_type_ref_str(r, &existing.types, &ctx));
 
                         ensure_func_sym(&source_uid, &parsed.name, &mut new_syms_internal);
 
@@ -1745,7 +1683,7 @@ fn resolve_params(
     parsed: &[(String, String)],
     rev_local: &HashMap<String, String>,
     types: &[(TypeUid, WastTypeDef)],
-    type_names: &HashMap<String, String>,
+    ctx: &RenderContext,
     _new_syms_local: &mut Vec<SymEntry>,
 ) -> Vec<(FuncUid, WitTypeRef)> {
     parsed
@@ -1760,7 +1698,7 @@ fn resolve_params(
                 .get(pname.as_str())
                 .cloned()
                 .unwrap_or_else(|| pname.clone());
-            let type_ref = parse_type_ref_str(ptype, types, type_names);
+            let type_ref = parse_type_ref_str(ptype, types, ctx);
             (param_uid, type_ref)
         })
         .collect()

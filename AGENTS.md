@@ -30,6 +30,7 @@ WastComponent <──wast-codec──> bytes(wast.json, world.wit, syms.en.yaml)
 | wast-types (shared serde types) | `crates/wast-types/` | **Done** | — |
 | compiler | `crates/compiler/` | **v0.35 done** (mixed-width disc-branch copy + f/i reinterpret + imported resource extras) | nested-compound case payload → kebab-case auto-norm |
 | pattern-analyzer | `crates/syntax-plugin/internal/pattern-analyzer/` | **Done** | — |
+| syntax-core (Rust scaffolding for plugins) | `crates/syntax-plugin/internal/syntax-core/` | **Done** (RenderContext + TypePrinter visitor) | optional: BodyPrinter visitor for Instruction rendering |
 | raw syntax | `crates/syntax-plugin/raw/` | **Done** | — |
 | ruby-like syntax | `crates/syntax-plugin/ruby-like/` | **Done** (preservation roundtrip) | recursive-descent body parser (currently bodies preserve via existing-body fallback rather than parse) |
 | ts-like syntax | `crates/syntax-plugin/ts-like/` | **Done** | — |
@@ -123,7 +124,8 @@ The WASI-fs-based variant (`crates/file-manager/`) was retired 2026-04 — jco c
 | **syms** | Human display names only (not needed for wasm generation). Per-language files |
 | **wast-codec** | WastComponent ↔ wast.json bytes (future wast.db SQLite). world.wit consistency validation. Byte-oriented, host-driven I/O |
 | **partial-manager** | extract / merge (stage 2 validation) |
-| **syntax-plugin** | wast <-> text bidirectional conversion (stage 1 validation). New UID generation |
+| **syntax-plugin** | wast <-> text bidirectional conversion (stage 1 validation). New UID generation. **The WIT `syntax-plugin` interface is the language-agnostic contract — anyone can implement it in any language that targets WASM Components.** |
+| **wast-syntax-core** | Optional Rust scaffolding for plugins written in Rust: name maps, WIT-type traversal, type-uid resolution. Not part of the WIT contract. See [docs/PLUGIN-AUTHORING.md](docs/PLUGIN-AUTHORING.md). |
 | **CLI / Editor** | User operations and workflow control |
 
 ## Development Commands
