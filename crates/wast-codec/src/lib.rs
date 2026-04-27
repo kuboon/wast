@@ -1,12 +1,12 @@
 wit_bindgen::generate!({
-    path: "../../wit-hosted",
-    world: "file-manager-hosted-world",
+    path: "../../wit-codec",
+    world: "codec-world",
 });
 
 mod syms_yaml;
 mod wit_parser;
 
-use crate::wast::file_manager_hosted::types::{
+use crate::wast::codec::types::{
     ComponentFiles, FuncSource as BindingFuncSource, PrimitiveType as BindingPrimitiveType,
     SymEntry as BindingSymEntry, Syms as BindingSyms, TypeSource as BindingTypeSource,
     WastComponent, WastError, WastFunc as BindingWastFunc, WastTypeDef as BindingWastTypeDef,
@@ -417,8 +417,8 @@ fn validate_against_wit(world_wit: &[u8], db: &WastDb) -> Result<(), WastError> 
     validate_against_parsed_world(&parsed, db)
 }
 
-impl exports::wast::file_manager_hosted::file_manager_bindgen::Guest for Component {
-    fn bindgen(world_wit: Vec<u8>) -> Result<ComponentFiles, WastError> {
+impl exports::wast::codec::codec::Guest for Component {
+    fn compile_wit(world_wit: Vec<u8>) -> Result<ComponentFiles, WastError> {
         let parsed = parse_world_bytes(&world_wit)?;
 
         let mut funcs: Vec<WastFuncRow> = Vec::new();
@@ -520,7 +520,7 @@ export!(Component);
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::exports::wast::file_manager_hosted::file_manager_bindgen::Guest;
+    use crate::exports::wast::codec::codec::Guest;
 
     fn sample_parsed_world() -> ParsedWorld {
         wit_parser::parse_world(
@@ -591,8 +591,8 @@ world bot {
     }
 
     #[test]
-    fn bindgen_and_read_roundtrip() {
-        let files = <Component as Guest>::bindgen(sample_world_bytes()).expect("bindgen");
+    fn compile_wit_and_read_roundtrip() {
+        let files = <Component as Guest>::compile_wit(sample_world_bytes()).expect("compile_wit");
         let component =
             <Component as Guest>::read(files.wast_json, files.syms_en_yaml).expect("read");
 
@@ -603,7 +603,7 @@ world bot {
 
     #[test]
     fn merge_returns_updated_serialized_files() {
-        let full = <Component as Guest>::bindgen(sample_world_bytes()).expect("bindgen");
+        let full = <Component as Guest>::compile_wit(sample_world_bytes()).expect("compile_wit");
         let mut partial =
             <Component as Guest>::read(full.wast_json.clone(), full.syms_en_yaml.clone())
                 .expect("read");

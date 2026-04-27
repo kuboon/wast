@@ -1,9 +1,9 @@
 //! Shared serde types for WAST on-disk storage.
 //!
 //! The WIT bindgen types don't derive Serialize/Deserialize, so we define
-//! parallel types here with serde derives. Each host crate (file-manager,
-//! file-manager-hosted) keeps its own `binding_to_native` / `native_to_binding`
-//! conversion functions.
+//! parallel types here with serde derives. The wast-codec crate
+//! (`crates/wast-codec/`) keeps its own `binding_to_native` /
+//! `native_to_binding` conversion functions.
 //!
 //! The on-disk layout is **row-oriented**: each func/type entry inlines its
 //! `uid` alongside its payload, so JSON records map 1:1 to SQLite rows when

@@ -2219,6 +2219,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "wast-codec"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "wast-types",
+ "wit-bindgen 0.55.0",
+ "wit-bindgen-rt",
+]
+
+[[package]]
 name = "wast-compiler"
 version = "0.1.0"
 dependencies = [
@@ -2239,28 +2250,6 @@ dependencies = [
  "wast-compiler",
  "wast-pattern-analyzer",
  "wast-types",
-]
-
-[[package]]
-name = "wast-file-manager"
-version = "0.1.0"
-dependencies = [
- "serde",
- "serde_json",
- "wast-types",
- "wit-bindgen 0.55.0",
- "wit-bindgen-rt",
-]
-
-[[package]]
-name = "wast-file-manager-hosted"
-version = "0.1.0"
-dependencies = [
- "serde",
- "serde_json",
- "wast-types",
- "wit-bindgen 0.55.0",
- "wit-bindgen-rt",
 ]
 
 [[package]]

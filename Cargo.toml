@@ -3,8 +3,7 @@ resolver = "2"
 members = [
     "crates/compiler",
     "crates/demo-gen",
-    "crates/file-manager",
-    "crates/file-manager-hosted",
+    "crates/wast-codec",
     "crates/partial-manager",
     "crates/syntax-plugin/ruby-like",
     "crates/syntax-plugin/ts-like",

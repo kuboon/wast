@@ -1,4 +1,4 @@
-package wast:file-manager-hosted@0.1.0;
+package wast:codec@0.1.0;
 
 interface types {
   type type-uid = string;
@@ -84,14 +84,17 @@ interface types {
   }
 }
 
-interface file-manager-bindgen {
+interface codec {
   use types.{component-files, wast-component, wast-error};
-  bindgen: func(world-wit: list<u8>) -> result<component-files, wast-error>;
+  /// Parse a `world.wit` and synthesize the initial `component-files` (empty
+  /// `wast.json` + optional `syms.en.yaml`) populated with the world's
+  /// exported / imported funcs and types.
+  compile-wit: func(world-wit: list<u8>) -> result<component-files, wast-error>;
   read: func(wast-json: list<u8>, syms-en-yaml: option<list<u8>>) -> result<wast-component, wast-error>;
   write: func(world-wit: list<u8>, component: wast-component) -> result<component-files, wast-error>;
   merge: func(world-wit: list<u8>, full: component-files, partial: wast-component) -> result<component-files, wast-error>;
 }
 
-world file-manager-hosted-world {
-  export file-manager-bindgen;
+world codec-world {
+  export codec;
 }

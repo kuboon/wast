@@ -7,7 +7,7 @@ WAST provides an intermediate layer between human-readable text files and WASM C
 ```
 text <──syntax plugin──> partial/full WastComponent
 partial WastComponent <──partial manager──> full WastComponent
-WastComponent <──file manager──> [wast.json, world.wit, syms]
+WastComponent <──wast-codec──> bytes(wast.json, world.wit, syms.en.yaml)
 [wast.json, world.wit] --compiler--> wasm component
 ```
 
@@ -18,8 +18,7 @@ WastComponent <──file manager──> [wast.json, world.wit, syms]
 - **`wast.json`** — current format, row-oriented JSON designed for mechanical migration to SQLite rows
 - **`wast.db`** — future SQLite format (same logical schema, indexed for caller/callee traversal)
 - Both hold identical `WastComponent` content; format choice is pure serialization
-
-See [crates/file-manager/PLAN.md](crates/file-manager/PLAN.md) for the SQLite migration roadmap.
+- The codec is byte-oriented: hosts pass full file contents in/out. Partial r/w on workspace files isn't available in vscode-web, so the SQLite migration must either load the whole DB into memory or have the host implement a page-level VFS via WIT imports.
 
 ## Module Status
 
@@ -27,8 +26,7 @@ See [crates/file-manager/PLAN.md](crates/file-manager/PLAN.md) for the SQLite mi
 |---|---|---|---|
 | WIT contract | `wit/wast-core.wit` | **Done** | — |
 | partial-manager | `crates/partial-manager/` | **Done** | — |
-| file-manager | `crates/file-manager/` | **Done** (JSON, row-oriented) | SQLite migration |
-| file-manager-hosted | `crates/file-manager-hosted/` | **Done** (JSON, row-oriented) | — |
+| wast-codec | `crates/wast-codec/` | **Done** (JSON, row-oriented) | SQLite migration |
 | wast-types (shared serde types) | `crates/wast-types/` | **Done** | — |
 | compiler | `crates/compiler/` | **v0.35 done** (mixed-width disc-branch copy + f/i reinterpret + imported resource extras) | nested-compound case payload → kebab-case auto-norm |
 | pattern-analyzer | `crates/syntax-plugin/internal/pattern-analyzer/` | **Done** | — |
@@ -46,7 +44,7 @@ See [crates/file-manager/PLAN.md](crates/file-manager/PLAN.md) for the SQLite mi
 - [x] **merge**: Validate that all func references in partial's internal funcs exist in full (missing_dependency check)
 
 ### compiler (`crates/compiler/`) — top priority
-- [x] Extract shared serde types into new `crates/wast-types/` crate (prerequisite; both file-manager crates and compiler depend on it)
+- [x] Extract shared serde types into new `crates/wast-types/` crate (prerequisite; the wast-codec and compiler depend on it)
 - [x] Scaffold `crates/compiler/` as plain rlib (no `-hosted` suffix; future wasm-component migration is mechanical)
 - [x] v0: emit fixed Component WAT for WASI CLI empty run (`wasi:cli/run@0.2.0`), verify via `wasmtime::component::Command` → `Ok(())`
 - [x] v0.1: emit `u32 -> u32` identity function, verify via Rust `wasmtime::component` harness
@@ -87,18 +85,17 @@ See [crates/file-manager/PLAN.md](crates/file-manager/PLAN.md) for the SQLite mi
 - [ ] Roadmap: case payload nested option/result/variant in disc-branch copy → WIT identifier kebab-case auto-normalization
 - See [crates/compiler/PLAN.md](crates/compiler/PLAN.md) for full context
 
-### file-manager (`crates/file-manager/src/lib.rs`)
-- [x] **bindgen**: Parse `world.wit` and populate exported/imported funcs and types into initial wast.json
-- [x] **write/merge**: Deeper world.wit validation (wit_path existence + param count matching for exported/imported funcs)
-- [x] Row-oriented JSON schema (each func/type is an object with inline `uid`, ready for SQLite row mapping)
-- [ ] Migrate to SQLite (`wast.db`) once JSON compiler path stabilizes
-- [ ] Populate `calls: Vec<String>` on each func via `pattern-analyzer::deserialize_body` at write time (caller→callee edge index for future SQLite indexing)
-
-### file-manager-hosted (`crates/file-manager-hosted/src/lib.rs`)
+### wast-codec (`crates/wast-codec/src/lib.rs`)
 - [x] Content-based API: accept `world.wit` / `wast.json` / `syms.en.yaml` bytes and return serialized outputs, so web and desktop hosts can use the same component without WASI or sync fs
 - [x] `read` from serialized `wast.json` + optional `syms.en.yaml` and return `wast-component`
-- [x] `write` / `merge` parity with `crates/file-manager/`
-- [ ] Same `calls` index population as file-manager
+- [x] `write` / `merge` (full WastComponent ↔ component-files round-trip)
+- [x] **compile-wit**: Parse `world.wit` and populate exported/imported funcs and types into initial wast.json (renamed from the old `bindgen` method)
+- [x] **write/merge**: Deeper world.wit validation (wit_path existence + param count matching for exported/imported funcs)
+- [x] Row-oriented JSON schema (each func/type is an object with inline `uid`, ready for SQLite row mapping)
+- [ ] Populate `calls: Vec<String>` on each func via `pattern-analyzer::deserialize_body` at write time (caller→callee edge index for future SQLite indexing)
+- [ ] Migrate storage to SQLite (`wast.db`) once JSON compiler path stabilizes; partial r/w is impossible in vscode-web (workspace fs is whole-file only) so the codec stays byte-oriented and the host (or a future host-imported page-level VFS) decides chunking
+
+The WASI-fs-based variant (`crates/file-manager/`) was retired 2026-04 — jco couldn't transpile its WASI fs deps and vscode-web's workspace fs has no partial-access API anyway, so the byte-oriented codec model fits both vscode-web and desktop hosts cleanly.
 
 ### syntax plugins (ruby-like, ts-like, rust-like, raw)
 - [x] **to_text**: Render actual body instructions (all plugins deserialize via pattern-analyzer and render real instructions with language-specific syntax)
@@ -112,7 +109,7 @@ See [crates/file-manager/PLAN.md](crates/file-manager/PLAN.md) for the SQLite mi
 - [x] TreeView panel — scans workspace recursively for wast.json files, lists components and functions with display names from syms. Properly filters .git/node_modules, supports depth limit
 - [x] Virtual document provider (`wast://` scheme) — opens function metadata and signatures. **BUT**: function bodies show placeholder `"# [body not available — requires syntax plugin]"` because wast.json body is opaque `number[]` not decodable in JS without syntax plugin WASM
 - [ ] Virtual document body rendering — requires loading syntax-plugin WASM component in extension to call `to_text` for body display
-- [ ] Save flow (`from_text` → merge → write) — requires syntax-plugin + file-manager WASM integration
+- [ ] Save flow (`from_text` → merge → write) — requires syntax-plugin + wast-codec WASM integration
 - [ ] LSP diagnostics (real-time `from_text` validation)
 - [x] fs.watch for external wast.json changes — detects changes, refreshes tree, notifies open virtual documents
 - [ ] Session conflict handling
@@ -124,7 +121,7 @@ See [crates/file-manager/PLAN.md](crates/file-manager/PLAN.md) for the SQLite mi
 | **wast** | UID, types, body. Zero name information |
 | **wit** | Interface boundary and type definitions (integrated into WastComponent) |
 | **syms** | Human display names only (not needed for wasm generation). Per-language files |
-| **file-manager** | WastComponent <-> wast.json (future wast.db SQLite). world.wit consistency validation. WASI-based |
+| **wast-codec** | WastComponent ↔ wast.json bytes (future wast.db SQLite). world.wit consistency validation. Byte-oriented, host-driven I/O |
 | **partial-manager** | extract / merge (stage 2 validation) |
 | **syntax-plugin** | wast <-> text bidirectional conversion (stage 1 validation). New UID generation |
 | **CLI / Editor** | User operations and workflow control |

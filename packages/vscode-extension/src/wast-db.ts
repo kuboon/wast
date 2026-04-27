@@ -1,7 +1,7 @@
 /**
  * Types and reader for wast.json and syms.*.yaml files.
  *
- * Mirrors the Rust serde_types used by file-manager, so the VS Code extension
+ * Mirrors the Rust serde types in `wast-types`, so the VS Code extension
  * can read component data directly without a wasm runtime.
  *
  * On-disk format today is `wast.json` (row-oriented JSON). Future migration
@@ -12,7 +12,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 
 // ---------------------------------------------------------------------------
-// wast.json types (matches crates/file-manager/src/serde_types.rs)
+// wast.json types (matches crates/wast-types/src/lib.rs)
 //
 // Row-oriented: each func/type row inlines its uid alongside its payload
 // so the JSON maps 1:1 to SQLite rows when the `wast.db` migration lands.

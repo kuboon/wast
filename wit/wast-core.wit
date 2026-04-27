@@ -98,23 +98,10 @@ interface partial-manager {
   merge: func(partial: wast-component, full: wast-component) -> result<wast-component, list<wast-error>>;
 }
 
-interface file-manager {
-  use types.{wast-component, wast-error, extract-target};
-
-  bindgen: func(path: string) -> result<_, wast-error>;
-  read: func(path: string, targets: option<list<extract-target>>) -> result<wast-component, wast-error>;
-  write: func(path: string, component: wast-component) -> result<_, wast-error>;
-  merge: func(path: string, partial: wast-component) -> result<_, wast-error>;
-}
-
 world syntax-plugin-world {
   export syntax-plugin;
 }
 
 world partial-manager-world {
   export partial-manager;
-}
-
-world file-manager-world {
-  export file-manager;
 }

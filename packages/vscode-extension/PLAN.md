@@ -22,7 +22,7 @@ Should be work on vscode.dev web.
 ## Dependencies
 
 - Wasm component runtime
-- All wasm components (syntax-plugin, partial-manager, file-manager)
+- All wasm components (syntax-plugin, partial-manager, wast-codec)
 
 ## Status
 
