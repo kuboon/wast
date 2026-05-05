@@ -41,6 +41,7 @@
           "type": "string",
           "default": "ruby-like",
           "enum": [
+            "raw",
             "ruby-like",
             "ts-like",
             "rust-like"
@@ -51,11 +52,16 @@
     }
   },
   "scripts": {
-    "build": "tsc",
+    "bundle-components": "node scripts/bundle-components.mjs",
+    "build": "pnpm bundle-components && tsc",
     "test": "echo \"no tests yet\"",
     "lint": "echo \"no linter configured yet\""
   },
+  "dependencies": {
+    "@bytecodealliance/preview2-shim": "^0.17.0"
+  },
   "devDependencies": {
+    "@bytecodealliance/jco": "^1.19.0",
     "@types/node": "^22",
     "@types/vscode": "^1.100.0",
     "typescript": "^5.8.0"

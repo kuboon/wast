@@ -1,24 +1,19 @@
 /**
  * TreeView data provider for WAST components.
  *
- * Scans workspace folders for directories containing wast.json, then shows
- * each component as a parent node with its functions as children.
+ * Walks workspace folders via `vscode.workspace.fs` (works in both desktop
+ * and web hosts) looking for directories that contain a `wast.json`. Each
+ * such directory is one component; its functions appear as children.
  */
 
 import * as vscode from "vscode";
-import * as fs from "node:fs";
-import * as path from "node:path";
 import { type LoadedComponent, type LoadedFunc, readComponent } from "./wast-db.js";
-
-// ---------------------------------------------------------------------------
-// Tree item types
-// ---------------------------------------------------------------------------
 
 class ComponentItem extends vscode.TreeItem {
   constructor(public readonly component: LoadedComponent) {
     super(component.name, vscode.TreeItemCollapsibleState.Expanded);
     this.contextValue = "wastComponent";
-    this.tooltip = component.dir;
+    this.tooltip = component.dirUri.fsPath;
     this.iconPath = new vscode.ThemeIcon("package");
   }
 }
@@ -34,8 +29,6 @@ class FuncItem extends vscode.TreeItem {
     this.description = func.sourceType;
     this.tooltip = `${func.uid} (${func.sourceType})`;
     this.iconPath = new vscode.ThemeIcon("symbol-function");
-
-    // Clicking a function opens the virtual document for the component
     this.command = {
       command: "wast.openVirtualDoc",
       title: "Open WAST Component",
@@ -46,22 +39,22 @@ class FuncItem extends vscode.TreeItem {
 
 type WastTreeItem = ComponentItem | FuncItem;
 
-// ---------------------------------------------------------------------------
-// Provider
-// ---------------------------------------------------------------------------
-
 export class WastTreeProvider implements vscode.TreeDataProvider<WastTreeItem> {
   private _onDidChangeTreeData = new vscode.EventEmitter<WastTreeItem | undefined | void>();
   readonly onDidChangeTreeData = this._onDidChangeTreeData.event;
 
   private components: LoadedComponent[] = [];
+  /** Initial scan promise so consumers can await readiness if needed. */
+  private scanPromise: Promise<void> = Promise.resolve();
 
   constructor() {
-    this.scanWorkspace();
+    this.scanPromise = this.scanWorkspace();
   }
 
-  refresh(): void {
-    this.scanWorkspace();
+  /** Re-scan the workspace; resolves once components have been re-loaded. */
+  async refresh(): Promise<void> {
+    this.scanPromise = this.scanWorkspace();
+    await this.scanPromise;
     this._onDidChangeTreeData.fire();
   }
 
@@ -69,63 +62,73 @@ export class WastTreeProvider implements vscode.TreeDataProvider<WastTreeItem> {
     return element;
   }
 
-  getChildren(element?: WastTreeItem): WastTreeItem[] {
+  async getChildren(element?: WastTreeItem): Promise<WastTreeItem[]> {
+    // Wait for the initial scan before serving children — VS Code calls
+    // getChildren synchronously after createTreeView, so on first call
+    // `this.components` may still be empty.
+    await this.scanPromise;
+
     if (!element) {
-      // Root level: return component nodes
       return this.components.map((c) => new ComponentItem(c));
     }
-
     if (element instanceof ComponentItem) {
       return element.component.funcs.map((f) => new FuncItem(element.component, f));
     }
-
     return [];
+  }
+
+  /** Find a loaded component by directory URI (used by other providers). */
+  findByDir(dirUri: vscode.Uri): LoadedComponent | undefined {
+    return this.components.find((c) => c.dirUri.toString() === dirUri.toString());
   }
 
   // ---------------------------------------------------------------------------
   // Workspace scanning
   // ---------------------------------------------------------------------------
 
-  private scanWorkspace(): void {
+  private async scanWorkspace(): Promise<void> {
     this.components = [];
     const lang = vscode.workspace.getConfiguration("wast").get<string>("symsLanguage", "en");
-
     const folders = vscode.workspace.workspaceFolders;
     if (!folders) return;
 
     for (const folder of folders) {
-      this.scanDir(folder.uri.fsPath, lang, 0);
+      await this.scanDir(folder.uri, lang, 0);
     }
   }
 
-  /**
-   * Recursively scan for directories containing wast.json, up to a depth limit.
-   */
-  private scanDir(dir: string, lang: string, depth: number): void {
+  /** Recursively walk subtree until either a `wast.json` is found (component
+   * leaf, no further descent) or the depth limit is hit. Skips `.git` and
+   * `node_modules` for sanity. */
+  private async scanDir(dirUri: vscode.Uri, lang: string, depth: number): Promise<void> {
     if (depth > 5) return;
 
-    const dbPath = path.join(dir, "wast.json");
-    if (fs.existsSync(dbPath)) {
-      const component = readComponent(dir, lang);
-      if (component) {
-        this.components.push(component);
-      }
-      // Don't recurse into component dirs (wast.json marks a leaf)
+    const dbUri = vscode.Uri.joinPath(dirUri, "wast.json");
+    let dbExists = false;
+    try {
+      await vscode.workspace.fs.stat(dbUri);
+      dbExists = true;
+    } catch {
+      // not a component directory
+    }
+
+    if (dbExists) {
+      const component = await readComponent(dirUri, lang);
+      if (component) this.components.push(component);
       return;
     }
 
-    // Recurse into subdirectories
-    let entries: fs.Dirent[];
+    let entries: [string, vscode.FileType][];
     try {
-      entries = fs.readdirSync(dir, { withFileTypes: true });
+      entries = await vscode.workspace.fs.readDirectory(dirUri);
     } catch {
       return;
     }
 
-    for (const entry of entries) {
-      if (entry.isDirectory() && !entry.name.startsWith(".") && entry.name !== "node_modules") {
-        this.scanDir(path.join(dir, entry.name), lang, depth + 1);
-      }
+    for (const [name, kind] of entries) {
+      if (kind !== vscode.FileType.Directory) continue;
+      if (name.startsWith(".") || name === "node_modules") continue;
+      await this.scanDir(vscode.Uri.joinPath(dirUri, name), lang, depth + 1);
     }
   }
 }

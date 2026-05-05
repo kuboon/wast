@@ -17,7 +17,14 @@ importers:
         version: 1.19.0(@emnapi/core@1.10.0)(@emnapi/runtime@1.10.0)
 
   packages/vscode-extension:
+    dependencies:
+      '@bytecodealliance/preview2-shim':
+        specifier: ^0.17.0
+        version: 0.17.9
     devDependencies:
+      '@bytecodealliance/jco':
+        specifier: ^1.19.0
+        version: 1.19.0(@emnapi/core@1.10.0)(@emnapi/runtime@1.10.0)
       '@types/node':
         specifier: ^22
         version: 22.19.17
