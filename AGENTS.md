@@ -35,7 +35,7 @@ WastComponent <──wast-codec──> bytes(wast.json, world.wit, syms.en.yaml)
 | ruby-like syntax | `crates/syntax-plugin/ruby-like/` | **Done** (preservation roundtrip) | recursive-descent body parser (currently bodies preserve via existing-body fallback rather than parse) |
 | ts-like syntax | `crates/syntax-plugin/ts-like/` | **Done** | — |
 | rust-like syntax | `crates/syntax-plugin/rust-like/` | **Done** (preservation roundtrip) | recursive-descent body parser (currently bodies preserve via existing-body fallback rather than parse) |
-| VS Code extension | `packages/vscode-extension/` | **Phase 1 done** (wasm components bundled, real `to_text` rendering) | save flow, compile command, web-host support |
+| VS Code extension | `packages/vscode-extension/` | **Phase 2 done** (editable virtual docs, save round-trips through codec) | compile command, web-host support |
 
 ## Detailed TODO
 
@@ -110,7 +110,7 @@ The WASI-fs-based variant (`crates/file-manager/`) was retired 2026-04 — jco c
 - [x] TreeView panel — scans workspace recursively for wast.json files, lists components and functions with display names from syms. Properly filters .git/node_modules, supports depth limit
 - [x] **Phase 1**: bundle wasm components (4 syntax plugins + partial-manager + codec) into `dist/components/`, switch all fs reads to `vscode.workspace.fs` (web-host-ready), virtual docs render real surface text via the configured `syntax-plugin.to_text`. `?func=uid` URIs go through `partial-manager.extract` first so a single-func view is a self-consistent partial.
 - [x] fs.watch for external wast.json changes — detects changes, refreshes tree, notifies open virtual documents
-- [ ] **Phase 2**: edit + save flow — make the virtual doc editable (likely via untitled scheme or custom text editor), pipe save through `from_text` → `partial-manager.merge` → `codec.write` → `vscode.workspace.fs.writeFile`. Errors surface as Diagnostics.
+- [x] **Phase 2**: editable virtual docs via `FileSystemProvider` (replaces the read-only `TextDocumentContentProvider`). `writeFile` runs `from_text` → `partial-manager.merge` → `codec.write` and persists `wast.json` (+ `syms.<lang>.yaml` when the codec emits one). Per-stage failures throw `FileSystemError`s that surface as VS Code's "Unable to save file" toast with the stage label and the underlying `WastError` messages.
 - [ ] **Phase 3**: compile command — wrap `compiler` rlib as a wasm Component with `compile(component, world-wit) -> wasm-bytes`, bundle alongside the others, expose as `WAST: Compile current component`.
 - [ ] **Phase 4**: vscode-web compatibility — resolve jco's bare-specifier imports (`@bytecodealliance/preview2-shim/*`) under the web extension host (currently relies on Node's `node_modules` resolution).
 - [ ] LSP diagnostics (real-time `from_text` validation while editing)

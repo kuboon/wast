@@ -165,6 +165,16 @@ async function readUtf8(uri: vscode.Uri): Promise<string | null> {
   }
 }
 
+/** Read raw bytes of `<dir>/world.wit` if present. */
+export async function readWorldWit(dirUri: vscode.Uri): Promise<Uint8Array | null> {
+  const uri = vscode.Uri.joinPath(dirUri, "world.wit");
+  try {
+    return await vscode.workspace.fs.readFile(uri);
+  } catch {
+    return null;
+  }
+}
+
 /**
  * Read a component directory's wast.json + syms.<lang>.yaml.
  * Returns null if wast.json is missing or unparseable.
