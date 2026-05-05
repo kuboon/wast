@@ -24,6 +24,7 @@ const targets = [
   { crate: "wast-syntax-rust-like", artifact: "wast_syntax_rust_like.wasm", id: "rust-like" },
   { crate: "wast-partial-manager", artifact: "wast_partial_manager.wasm", id: "partial-manager" },
   { crate: "wast-codec", artifact: "wast_codec.wasm", id: "codec" },
+  { crate: "wast-compiler-component", artifact: "wast_compiler_component.wasm", id: "compiler" },
 ];
 
 await rm(out, { recursive: true, force: true });

@@ -1,0 +1,21 @@
+[package]
+name = "wast-compiler-component"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+wit-bindgen = { workspace = true }
+wit-bindgen-rt = { workspace = true }
+wast-types = { path = "../wast-types" }
+wast-compiler = { path = "../compiler" }
+
+[package.metadata.component]
+package = "wast:compiler"
+
+[package.metadata.component.target]
+path = "../../wit-compiler"
+world = "compiler-world"

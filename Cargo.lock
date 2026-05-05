@@ -2244,6 +2244,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "wast-compiler-component"
+version = "0.1.0"
+dependencies = [
+ "wast-compiler",
+ "wast-types",
+ "wit-bindgen 0.55.0",
+ "wit-bindgen-rt",
+]
+
+[[package]]
 name = "wast-demo-gen"
 version = "0.1.0"
 dependencies = [

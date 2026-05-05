@@ -50,10 +50,15 @@ export interface Codec {
   ): ComponentFiles;
 }
 
+export interface Compiler {
+  compile(component: WastComponent, worldWit: Uint8Array): Uint8Array;
+}
+
 export interface LoadedRuntime {
   syntaxPlugins: Record<SyntaxPluginId, SyntaxPlugin>;
   partialManager: PartialManager;
   codec: Codec;
+  compiler: Compiler;
 }
 
 const PLUGIN_IDS: SyntaxPluginId[] = ["raw", "ruby-like", "ts-like", "rust-like"];
@@ -103,10 +108,14 @@ async function doLoad(context: vscode.ExtensionContext): Promise<LoadedRuntime> 
   const codecUri = vscode.Uri.joinPath(componentsRoot, "codec", "codec.js");
   const cdc: { codec: Codec } = await import(codecUri.fsPath);
 
+  const compilerUri = vscode.Uri.joinPath(componentsRoot, "compiler", "compiler.js");
+  const cmp: { compiler: Compiler } = await import(compilerUri.fsPath);
+
   return {
     syntaxPlugins,
     partialManager: pm.partialManager,
     codec: cdc.codec,
+    compiler: cmp.compiler,
   };
 }
 

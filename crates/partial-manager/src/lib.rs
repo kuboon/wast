@@ -341,11 +341,23 @@ fn merge_impl(
 ) -> Result<WastComponent, Vec<WastError>> {
     let mut errors: Vec<WastError> = Vec::new();
 
-    // Merge funcs
+    // Merge funcs.
+    //
+    // Source semantics:
+    //  - Imported(uid): the partial only carries this func's signature (no
+    //    body in the partial). Verify the signature matches `full` and
+    //    leave the full entry untouched.
+    //  - Exported(uid): the partial owns this func's *implementation*. Its
+    //    signature is the boundary contract, so a sig change must match
+    //    `full`'s entry (otherwise hidden callers would break). The body
+    //    / params / result are propagated; we preserve `full`'s original
+    //    `source` tag (a partial-promoted `Internal` should stay Internal
+    //    in `full`).
+    //  - Internal(uid): the partial fully owns this func (it had a caller
+    //    inside the partial). Add or replace the entry in `full`.
     for (uid, pfunc) in &partial.funcs {
         match &pfunc.source {
-            FuncSource::Imported(_) | FuncSource::Exported(_) => {
-                // Must exist in full with matching signature
+            FuncSource::Imported(_) => {
                 if let Some((_, ffunc)) = full.funcs.iter().find(|(fid, _)| fid == uid) {
                     if !signatures_match(pfunc, ffunc) {
                         errors.push(err(
@@ -360,8 +372,29 @@ fn merge_impl(
                     ));
                 }
             }
+            FuncSource::Exported(_) => {
+                if let Some(entry) = full.funcs.iter_mut().find(|(fid, _)| fid == uid) {
+                    if !signatures_match(pfunc, &entry.1) {
+                        errors.push(err(
+                            format!("signature_mismatch: func '{}'", uid),
+                            Some(uid.clone()),
+                        ));
+                        continue;
+                    }
+                    // Sig matches → propagate body / params / result.
+                    // Preserve `full`'s source tag so a partial-promoted
+                    // Internal func stays Internal in `full`.
+                    let original_source = entry.1.source.clone();
+                    entry.1 = pfunc.clone();
+                    entry.1.source = original_source;
+                } else {
+                    errors.push(err(
+                        format!("signature_mismatch: func '{}' not found in full", uid),
+                        Some(uid.clone()),
+                    ));
+                }
+            }
             FuncSource::Internal(_) => {
-                // Check for conflict with non-internal
                 if let Some((_, ffunc)) = full.funcs.iter().find(|(fid, _)| fid == uid) {
                     if !matches!(&ffunc.source, FuncSource::Internal(_)) {
                         errors.push(err(
@@ -374,7 +407,6 @@ fn merge_impl(
                         continue;
                     }
                 }
-                // Add or update
                 if let Some(entry) = full.funcs.iter_mut().find(|(fid, _)| fid == uid) {
                     entry.1 = pfunc.clone();
                 } else {
@@ -940,6 +972,51 @@ mod tests {
         };
         let result = merge_impl(partial, full).unwrap();
         assert_eq!(result.funcs.len(), 1);
+    }
+
+    #[test]
+    fn merge_exported_propagates_body_and_keeps_full_source() {
+        // partial.f1 = Exported with body B' and matching signature.
+        // full.f1   = Internal with body B (sig matches).
+        // Expectation:
+        //   - sig matches -> no error
+        //   - full.f1.body becomes B' (the partial's body)
+        //   - full.f1.source stays Internal (partial's Exported was a
+        //     boundary marker, not a kind change)
+        let mut partial_func = mk_func(
+            "f1",
+            FuncSource::Exported("f1".into()),
+            &[("x", "i32")],
+            Some("i32"),
+        );
+        partial_func.1.body = Some(vec![1, 2, 3]); // edited body
+        let partial = WastComponent {
+            funcs: vec![partial_func],
+            types: vec![],
+            syms: empty_syms(),
+        };
+
+        let mut full_func = mk_func(
+            "f1",
+            FuncSource::Internal("f1".into()),
+            &[("x", "i32")],
+            Some("i32"),
+        );
+        full_func.1.body = Some(vec![9, 9]); // original body
+        let full = WastComponent {
+            funcs: vec![full_func],
+            types: vec![],
+            syms: empty_syms(),
+        };
+
+        let merged = merge_impl(partial, full).unwrap();
+        assert_eq!(merged.funcs.len(), 1);
+        let (_, m) = &merged.funcs[0];
+        assert_eq!(m.body, Some(vec![1, 2, 3]), "body should propagate");
+        assert!(
+            matches!(&m.source, FuncSource::Internal(_)),
+            "source tag from `full` should be preserved (Internal)"
+        );
     }
 
     #[test]

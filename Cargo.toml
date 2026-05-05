@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
     "crates/compiler",
+    "crates/compiler-component",
     "crates/demo-gen",
     "crates/wast-codec",
     "crates/partial-manager",

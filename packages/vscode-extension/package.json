@@ -12,6 +12,27 @@
     "workspaceContains:**/wast.json"
   ],
   "contributes": {
+    "commands": [
+      {
+        "command": "wast.compileComponent",
+        "title": "WAST: Compile current component",
+        "category": "WAST"
+      },
+      {
+        "command": "wast.refreshTree",
+        "title": "WAST: Refresh tree",
+        "category": "WAST"
+      }
+    ],
+    "menus": {
+      "view/item/context": [
+        {
+          "command": "wast.compileComponent",
+          "when": "view == wastComponents && viewItem == wastComponent",
+          "group": "wast"
+        }
+      ]
+    },
     "viewsContainers": {
       "activitybar": [
         {
