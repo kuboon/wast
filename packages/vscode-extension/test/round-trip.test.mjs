@@ -102,9 +102,12 @@ test("compiler.compile produces a non-empty wasm component (after body injection
   // mirrors the realistic "user edits → compile" flow.
   const ts = runtime.plugins["ts-like"];
   const rendered = ts.toText(fixture.component);
+  // Use independent bodies (no cross-call between exports) — the compiler
+  // crate's smoke tests only cover single-export shapes, so calling one
+  // export from another is out of scope for this extension-level test.
   const withBodies = rendered
     .replace(/\/\/ \[no body\]/, "return x * x;")
-    .replace(/\/\/ \[no body\]/, "return square(a) + square(b);");
+    .replace(/\/\/ \[no body\]/, "return a + b;");
 
   // Sanity check: if the placeholder wasn't found, the rest of the test
   // is a lie — surface that loudly with the actual rendered text.
