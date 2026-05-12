@@ -6,7 +6,7 @@ use bindings::wast::core::types::{
     ExtractTarget, FuncSource, SymEntry, Syms, TypeSource, WastComponent, WastError, WastFunc,
     WastTypeDef, WitType,
 };
-use std::collections::BTreeSet as BTreeSet;
+use std::collections::BTreeSet;
 use wast_pattern_analyzer::Instruction;
 
 struct Component;

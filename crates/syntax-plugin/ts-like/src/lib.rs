@@ -1526,7 +1526,10 @@ impl bindings::exports::wast::core::syntax_plugin::Guest for Component {
 /// Recursively walk an instruction, filling in missing `Call` arg
 /// parameter names from the target func's signature. Returns true if any
 /// edit was made (so the caller knows to re-serialize the body).
-fn fixup_call_args(instr: &mut Instruction, params_by_func: &BTreeMap<String, Vec<String>>) -> bool {
+fn fixup_call_args(
+    instr: &mut Instruction,
+    params_by_func: &BTreeMap<String, Vec<String>>,
+) -> bool {
     let mut changed = false;
     match instr {
         Instruction::Call { func_uid, args } => {

@@ -355,7 +355,10 @@ fn render_instruction(
             resource: _,
             handle,
         } => render_expr(handle, local_names, func_names),
-        Instruction::ResourceDrop { resource: _, handle } => {
+        Instruction::ResourceDrop {
+            resource: _,
+            handle,
+        } => {
             let h = render_expr(handle, local_names, func_names);
             format!("{indent}{h}.drop")
         }
