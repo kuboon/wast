@@ -60,24 +60,50 @@ export async function loadHarness(fixtureName = "basic") {
 }
 
 export function describeError(err) {
-  if (Array.isArray(err?.payload)) {
-    return err.payload
-      .map((e) => `${e.message}${e.location ? ` [${e.location}]` : ""}`)
+  if (err == null) return String(err);
+
+  // jco often wraps wasm traps so the payload is hidden behind one of
+  // these property names. Probe each shape explicitly.
+  const payload =
+    err.payload ?? err.cause ?? err.value ?? err.error ?? err.inner;
+  if (Array.isArray(payload)) {
+    return payload
+      .map((e) => `${e.message ?? e}${e?.location ? ` [${e.location}]` : ""}`)
       .join("; ");
   }
+  if (payload && typeof payload === "object" && "message" in payload) {
+    const loc = payload.location ? ` [${payload.location}]` : "";
+    return `${payload.message}${loc}`;
+  }
+
   if (Array.isArray(err)) {
     return err
-      .map((e) => `${e.message ?? e}${e.location ? ` [${e.location}]` : ""}`)
+      .map((e) => `${e.message ?? e}${e?.location ? ` [${e.location}]` : ""}`)
       .join("; ");
   }
-  if (err && typeof err === "object") {
-    try {
-      return JSON.stringify(err);
-    } catch {
-      return String(err);
-    }
+
+  if (err instanceof Error) {
+    return err.stack ?? err.message;
   }
-  return err?.message ?? String(err);
+
+  if (typeof err === "object") {
+    // Some thrown values (especially component-model traps) carry their
+    // info on non-enumerable properties, so JSON.stringify returns "{}".
+    // Dump everything getOwnPropertyNames can see, including symbols.
+    const own = {};
+    for (const k of Object.getOwnPropertyNames(err)) {
+      try {
+        own[k] = err[k];
+      } catch {
+        own[k] = "<unreadable>";
+      }
+    }
+    const json = JSON.stringify(own);
+    if (json !== "{}") return json;
+    return `${err.constructor?.name ?? "Object"} ${err.toString()}`;
+  }
+
+  return String(err);
 }
 
 export function funcUids(component) {

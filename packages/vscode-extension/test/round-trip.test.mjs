@@ -101,10 +101,18 @@ test("compiler.compile produces a non-empty wasm component (after body injection
   // ts-like to inject real bodies for both exports, then compile — this
   // mirrors the realistic "user edits → compile" flow.
   const ts = runtime.plugins["ts-like"];
-  const withBodies = ts
-    .toText(fixture.component)
+  const rendered = ts.toText(fixture.component);
+  const withBodies = rendered
     .replace(/\/\/ \[no body\]/, "return x * x;")
     .replace(/\/\/ \[no body\]/, "return square(a) + square(b);");
+
+  // Sanity check: if the placeholder wasn't found, the rest of the test
+  // is a lie — surface that loudly with the actual rendered text.
+  assert.notEqual(
+    withBodies,
+    rendered,
+    `ts-like placeholder '// [no body]' not found in rendered output:\n${rendered}`,
+  );
 
   const parsed = ts.fromText(withBodies, fixture.component);
   const merged = runtime.partialManager.merge(parsed, fixture.component);
@@ -113,7 +121,10 @@ test("compiler.compile produces a non-empty wasm component (after body injection
   try {
     wasm = runtime.compiler.compile(merged, fixture.worldWit);
   } catch (err) {
-    assert.fail(`compile threw: ${describeError(err)}`);
+    assert.fail(
+      `compile threw: ${describeError(err)}\n` +
+        `--- ts-like.toText(merged) was:\n${ts.toText(merged)}`,
+    );
   }
   assert.ok(wasm.byteLength > 0, "compiler produced empty output");
   // Wasm magic: 0x00 0x61 0x73 0x6D.
