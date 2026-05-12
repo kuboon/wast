@@ -92,14 +92,11 @@ export class WastFileSystemProvider implements vscode.FileSystemProvider {
     }
     const full = toWastComponent(loaded);
 
-    const targets = parseFuncTargets(uri);
+    const targets = parseSelection(uri);
     let view = full;
     if (targets.length > 0) {
       try {
-        view = this.runtime.partialManager.extract(
-          full,
-          targets.map((sym) => ({ sym, includeCaller: false })),
-        );
+        view = this.runtime.partialManager.extract(full, targets);
       } catch (err) {
         return ENC.encode(renderErrorBanner("partial-manager.extract", err));
       }
@@ -276,31 +273,57 @@ export function decodeDirUri(uri: vscode.Uri): vscode.Uri | null {
   }
 }
 
-function parseFuncTargets(uri: vscode.Uri): string[] {
-  return new URLSearchParams(uri.query).getAll("func");
+/** A single func included in a partial view, plus whether to drag in
+ *  its callers (matches `partial-manager.extract`'s target shape). */
+export interface FuncSelection {
+  uid: string;
+  withCallers: boolean;
 }
 
-/** Build a wast:// URI for a component, optionally narrowed to func uids. */
+/** Parse `?func=A&func=B&funcc=C` into partial-manager targets.
+ *
+ *  - `func=uid`  → show without callers
+ *  - `funcc=uid` → show *with* callers (`+callers` checkbox in the tree)
+ *
+ *  If a uid appears in both lists, `funcc` wins (the more inclusive view). */
+export function parseSelection(uri: vscode.Uri): { sym: string; includeCaller: boolean }[] {
+  const params = new URLSearchParams(uri.query);
+  const withCallers = new Set(params.getAll("funcc"));
+  const out: { sym: string; includeCaller: boolean }[] = [];
+  for (const uid of withCallers) out.push({ sym: uid, includeCaller: true });
+  for (const uid of params.getAll("func")) {
+    if (!withCallers.has(uid)) out.push({ sym: uid, includeCaller: false });
+  }
+  return out;
+}
+
+/** Build a wast:// URI for a component, optionally narrowed to a selection. */
 export function buildUri(
   component: LoadedComponent,
-  funcUids?: string[],
+  selection?: FuncSelection[],
 ): vscode.Uri {
   const encoded = encodeDir(component.dirUri);
   let query = "";
-  if (funcUids && funcUids.length > 0) {
+  if (selection && selection.length > 0) {
     const params = new URLSearchParams();
-    for (const uid of funcUids) params.append("func", uid);
+    for (const { uid, withCallers } of selection) {
+      params.append(withCallers ? "funcc" : "func", uid);
+    }
     query = params.toString();
   }
   return vscode.Uri.parse(`wast:/${encoded}/component${query ? "?" + query : ""}`);
 }
 
 /** Build a tab title for a virtual document. */
-export function buildTitle(component: LoadedComponent, funcUids?: string[]): string {
-  if (!funcUids || funcUids.length === 0) return component.name;
-  const names = funcUids.map((uid) => {
+export function buildTitle(
+  component: LoadedComponent,
+  selection?: FuncSelection[],
+): string {
+  if (!selection || selection.length === 0) return component.name;
+  const names = selection.map(({ uid, withCallers }) => {
     const f = component.funcs.find((fn) => fn.uid === uid);
-    return f?.displayName ?? uid;
+    const base = f?.displayName ?? uid;
+    return withCallers ? `${base}+callers` : base;
   });
   return `${component.name} — ${names.join(", ")}`;
 }
