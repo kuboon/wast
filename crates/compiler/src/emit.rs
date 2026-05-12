@@ -8,7 +8,7 @@
 //! handles the Canonical ABI wiring for primitives, option/result, and
 //! (future) string/list/record/variant.
 
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 
 use wast_pattern_analyzer::deserialize_body;
 use wast_types::{FuncSource, WastDb, WastFuncRow};
@@ -140,12 +140,12 @@ pub fn compile_component(db: &WastDb, _world_wit: &str) -> Result<Vec<u8>, Compi
         .funcs
         .iter()
         .map(|r| (source_key(&r.func.source).to_string(), &r.func))
-        .collect::<HashMap<_, _>>();
+        .collect::<BTreeMap<_, _>>();
     let type_map: TypeMap = db
         .types
         .iter()
         .map(|r| (r.uid.clone(), &r.def.definition))
-        .collect::<HashMap<_, _>>();
+        .collect::<BTreeMap<_, _>>();
 
     let literal_table = collect_literal_table(db)?;
     let core_wat = emit_core_module(db, &func_map, &type_map, &literal_table)?;
@@ -422,7 +422,7 @@ fn flat_result_clause(result: Option<&str>, type_map: &TypeMap) -> Result<String
 fn synthesize_world(db: &WastDb, type_map: &TypeMap) -> Result<String, CompileError> {
     // Partition funcs into resource members vs top-level by name convention.
     // Member names: `[constructor]R` / `[method]R.op` / `[static]R.op`.
-    let mut resource_members: HashMap<String, Vec<ResourceMember<'_>>> = HashMap::new();
+    let mut resource_members: BTreeMap<String, Vec<ResourceMember<'_>>> = BTreeMap::new();
     let mut top_level: Vec<&WastFuncRow> = Vec::new();
     for row in &db.funcs {
         let name = source_key(&row.func.source);
@@ -744,7 +744,7 @@ pub(crate) fn mangle(name: &str) -> String {
 /// function bodies. `offsets` maps byte-string → memory offset (dedup'd);
 /// `heap_start` is the offset the bump allocator should begin at.
 pub(crate) struct LiteralTable {
-    pub offsets: std::collections::HashMap<Vec<u8>, usize>,
+    pub offsets: std::collections::BTreeMap<Vec<u8>, usize>,
     pub heap_start: usize,
 }
 
@@ -756,7 +756,7 @@ impl LiteralTable {
 
 fn collect_literal_table(db: &WastDb) -> Result<LiteralTable, CompileError> {
     let mut seen: Vec<Vec<u8>> = Vec::new();
-    let mut seen_set: std::collections::HashSet<Vec<u8>> = std::collections::HashSet::new();
+    let mut seen_set: std::collections::BTreeSet<Vec<u8>> = std::collections::BTreeSet::new();
 
     for row in &db.funcs {
         let Some(bytes) = row.func.body.as_ref() else {
@@ -770,7 +770,7 @@ fn collect_literal_table(db: &WastDb) -> Result<LiteralTable, CompileError> {
         collect_literals_rec(&instrs, &mut seen, &mut seen_set);
     }
 
-    let mut offsets = std::collections::HashMap::new();
+    let mut offsets = std::collections::BTreeMap::new();
     let mut cur = STATIC_DATA_BASE;
     for lit in &seen {
         offsets.insert(lit.clone(), cur);
@@ -786,7 +786,7 @@ fn collect_literal_table(db: &WastDb) -> Result<LiteralTable, CompileError> {
 fn collect_literals_rec(
     instrs: &[wast_pattern_analyzer::Instruction],
     out: &mut Vec<Vec<u8>>,
-    seen: &mut std::collections::HashSet<Vec<u8>>,
+    seen: &mut std::collections::BTreeSet<Vec<u8>>,
 ) {
     use wast_pattern_analyzer::Instruction;
     for i in instrs {

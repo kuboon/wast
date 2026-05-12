@@ -9,8 +9,8 @@ importers:
   .:
     dependencies:
       '@bytecodealliance/preview2-shim':
-        specifier: ^0.17.8
-        version: 0.17.8
+        specifier: ^0.17.9
+        version: 0.17.9
     devDependencies:
       '@bytecodealliance/jco':
         specifier: ^1.19.0
@@ -19,20 +19,20 @@ importers:
   packages/vscode-extension:
     dependencies:
       '@bytecodealliance/preview2-shim':
-        specifier: ^0.17.0
+        specifier: ^0.17.9
         version: 0.17.9
     devDependencies:
       '@bytecodealliance/jco':
         specifier: ^1.19.0
         version: 1.19.0(@emnapi/core@1.10.0)(@emnapi/runtime@1.10.0)
       '@types/node':
-        specifier: ^22
-        version: 22.19.17
+        specifier: ^22.19.19
+        version: 22.19.19
       '@types/vscode':
-        specifier: ^1.100.0
-        version: 1.110.0
+        specifier: ^1.118.0
+        version: 1.118.0
       typescript:
-        specifier: ^5.8.0
+        specifier: ^5.9.3
         version: 5.9.3
 
   packages/web-demo:
@@ -54,9 +54,6 @@ packages:
   '@bytecodealliance/jco@1.19.0':
     resolution: {integrity: sha512-I57cVbL24/u/zCBwHq7D9PyIMP81hFFYF4hL/pW5biRGVLQAZuwEAUaEmghOouyt77bU2ExqscP2wkLvr3nfDw==}
     hasBin: true
-
-  '@bytecodealliance/preview2-shim@0.17.8':
-    resolution: {integrity: sha512-wS5kg8u0KCML1UeHQPJ1IuOI24x/XLentCzsqPER1+gDNC5Cz2hG4G2blLOZap+3CEGhIhnJ9mmZYj6a2W0Lww==}
 
   '@bytecodealliance/preview2-shim@0.17.9':
     resolution: {integrity: sha512-i0R3eQBe6PA/o/1EFE3Owe4In2rcccb6QxnjpntM/lPe3/duJ0bRQTVZM2Ufpo99X4eofGeltQUkape1C91FFA==}
@@ -353,11 +350,11 @@ packages:
   '@tybys/wasm-util@0.10.1':
     resolution: {integrity: sha512-9tTaPJLSiejZKx+Bmog4uSubteqTvFrVrURwkmHixBo0G4seD0zUxp98E1DzUBJxLQ3NPwXrGKDiVjwx/DpPsg==}
 
-  '@types/node@22.19.17':
-    resolution: {integrity: sha512-wGdMcf+vPYM6jikpS/qhg6WiqSV/OhG+jeeHT/KlVqxYfD40iYJf9/AE1uQxVWFvU7MipKRkRv8NSHiCGgPr8Q==}
+  '@types/node@22.19.19':
+    resolution: {integrity: sha512-dyh/xO2Fh5bYrfWaaqGrRQQGkNdmYw6AmaAUvYeUMNTWQtvb796ikLdmTchRmOlOiIJ1TDXfWgVx1QkUlQ6Hew==}
 
-  '@types/vscode@1.110.0':
-    resolution: {integrity: sha512-AGuxUEpU4F4mfuQjxPPaQVyuOMhs+VT/xRok1jiHVBubHK7lBRvCuOMZG0LKUwxncrPorJ5qq/uil3IdZBd5lA==}
+  '@types/vscode@1.118.0':
+    resolution: {integrity: sha512-Ah6eTlqDcwIMELEVwQMO++rJAFBRz/oLluLD/vWdYrH1KuI9kfpaM+7pg0OvvascgcJy+ghLCERAYouM4QbzGw==}
 
   acorn@8.16.0:
     resolution: {integrity: sha512-UVJyE9MttOsBQIDKw1skb9nAwQuR5wuGD3+82K6JgJlm/Y+KI92oNsMNGZCYdDsVtRHSak0pcV5Dno5+4jh9sw==}
@@ -789,8 +786,6 @@ snapshots:
       - '@emnapi/core'
       - '@emnapi/runtime'
 
-  '@bytecodealliance/preview2-shim@0.17.8': {}
-
   '@bytecodealliance/preview2-shim@0.17.9': {}
 
   '@bytecodealliance/weval@0.4.1(@emnapi/core@1.10.0)(@emnapi/runtime@1.10.0)':
@@ -1012,11 +1007,11 @@ snapshots:
       tslib: 2.8.1
     optional: true
 
-  '@types/node@22.19.17':
+  '@types/node@22.19.19':
     dependencies:
       undici-types: 6.21.0
 
-  '@types/vscode@1.110.0': {}
+  '@types/vscode@1.118.0': {}
 
   acorn@8.16.0: {}
 

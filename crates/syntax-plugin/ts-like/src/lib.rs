@@ -5,7 +5,7 @@ mod bindings;
 mod convert;
 
 use bindings::wast::core::types::*;
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use wast_pattern_analyzer::{ArithOp, CompareOp, Instruction};
 use wast_syntax_core::{RenderContext, TypePrinter};
 
@@ -114,8 +114,8 @@ fn render_body(
     body: &[u8],
     indent: &str,
     returns_value: bool,
-    local_names: &HashMap<String, String>,
-    func_names: &HashMap<String, String>,
+    local_names: &BTreeMap<String, String>,
+    func_names: &BTreeMap<String, String>,
 ) -> String {
     match wast_pattern_analyzer::deserialize_body(body) {
         Ok(instructions) => {
@@ -172,8 +172,8 @@ fn is_value_expr(i: &Instruction) -> bool {
 fn render_instructions(
     instructions: &[Instruction],
     indent: &str,
-    local_names: &HashMap<String, String>,
-    func_names: &HashMap<String, String>,
+    local_names: &BTreeMap<String, String>,
+    func_names: &BTreeMap<String, String>,
 ) -> String {
     let mut lines = Vec::new();
     for instr in instructions {
@@ -185,14 +185,14 @@ fn render_instructions(
     lines.join("\n")
 }
 
-fn resolve_local_name(uid: &str, local_names: &HashMap<String, String>) -> String {
+fn resolve_local_name(uid: &str, local_names: &BTreeMap<String, String>) -> String {
     local_names
         .get(uid)
         .cloned()
         .unwrap_or_else(|| uid.to_string())
 }
 
-fn resolve_func_name_body(uid: &str, func_names: &HashMap<String, String>) -> String {
+fn resolve_func_name_body(uid: &str, func_names: &BTreeMap<String, String>) -> String {
     func_names
         .get(uid)
         .cloned()
@@ -202,8 +202,8 @@ fn resolve_func_name_body(uid: &str, func_names: &HashMap<String, String>) -> St
 fn render_instruction(
     instr: &Instruction,
     indent: &str,
-    local_names: &HashMap<String, String>,
-    func_names: &HashMap<String, String>,
+    local_names: &BTreeMap<String, String>,
+    func_names: &BTreeMap<String, String>,
 ) -> String {
     let inner = format!("{}  ", indent);
     match instr {
@@ -430,8 +430,8 @@ fn render_instruction(
 
 fn render_expr(
     instr: &Instruction,
-    local_names: &HashMap<String, String>,
-    func_names: &HashMap<String, String>,
+    local_names: &BTreeMap<String, String>,
+    func_names: &BTreeMap<String, String>,
 ) -> String {
     match instr {
         Instruction::Nop => String::new(),
@@ -501,7 +501,7 @@ fn render_expr(
 // Body parsing (from_text support)
 // ---------------------------------------------------------------------------
 
-fn resolve_to_uid(name: &str, rev_map: &HashMap<String, String>) -> String {
+fn resolve_to_uid(name: &str, rev_map: &BTreeMap<String, String>) -> String {
     rev_map
         .get(name)
         .cloned()
@@ -598,8 +598,8 @@ fn skip_block(lines: &[&str], i: &mut usize) {
 fn parse_stmts(
     lines: &[&str],
     i: &mut usize,
-    rev_local: &HashMap<String, String>,
-    rev_func: &HashMap<String, String>,
+    rev_local: &BTreeMap<String, String>,
+    rev_func: &BTreeMap<String, String>,
 ) -> Vec<Instruction> {
     let mut instrs = Vec::new();
     while *i < lines.len() {
@@ -632,8 +632,8 @@ fn parse_stmts(
 fn parse_stmt(
     lines: &[&str],
     i: &mut usize,
-    rev_local: &HashMap<String, String>,
-    rev_func: &HashMap<String, String>,
+    rev_local: &BTreeMap<String, String>,
+    rev_func: &BTreeMap<String, String>,
 ) -> Result<Instruction, String> {
     let trimmed = lines[*i].trim();
 
@@ -791,8 +791,8 @@ fn parse_stmt(
 
 fn parse_expr_str(
     s: &str,
-    rev_local: &HashMap<String, String>,
-    rev_func: &HashMap<String, String>,
+    rev_local: &BTreeMap<String, String>,
+    rev_func: &BTreeMap<String, String>,
 ) -> Result<Instruction, String> {
     let s = s.trim();
     if s.is_empty() {
@@ -889,8 +889,8 @@ fn parse_expr_str(
 
 fn parse_atom(
     s: &str,
-    rev_local: &HashMap<String, String>,
-    rev_func: &HashMap<String, String>,
+    rev_local: &BTreeMap<String, String>,
+    rev_func: &BTreeMap<String, String>,
 ) -> Result<Instruction, String> {
     let s = s.trim();
 
@@ -976,7 +976,7 @@ fn parse_atom(
 fn build_match_instruction(
     value: Instruction,
     cases: Vec<(String, Vec<Instruction>)>,
-    rev_local: &HashMap<String, String>,
+    rev_local: &BTreeMap<String, String>,
 ) -> Result<Instruction, String> {
     let mut some_case: Option<(String, Vec<Instruction>)> = None;
     let mut none_case: Option<Vec<Instruction>> = None;
@@ -1034,8 +1034,8 @@ fn build_match_instruction(
 fn parse_func_body(
     lines: &[&str],
     i: &mut usize,
-    rev_local: &HashMap<String, String>,
-    rev_func: &HashMap<String, String>,
+    rev_local: &BTreeMap<String, String>,
+    rev_func: &BTreeMap<String, String>,
     existing_body: Option<Vec<u8>>,
 ) -> Option<Vec<u8>> {
     let instructions = parse_stmts(lines, i, rev_local, rev_func);
@@ -1247,26 +1247,26 @@ impl bindings::exports::wast::core::syntax_plugin::Guest for Component {
         let ctx = RenderContext::new(&native_syms, &native_types);
 
         // Reverse maps: display_name -> uid
-        let rev_func: HashMap<String, String> = ctx
+        let rev_func: BTreeMap<String, String> = ctx
             .func_names
             .iter()
             .map(|(k, v)| (v.clone(), k.clone()))
             .collect();
-        let rev_local: HashMap<String, String> = ctx
+        let rev_local: BTreeMap<String, String> = ctx
             .local_names
             .iter()
             .map(|(k, v)| (v.clone(), k.clone()))
             .collect();
 
         // Existing funcs by uid for body preservation
-        let existing_funcs: HashMap<String, &WastFunc> = existing
+        let existing_funcs: BTreeMap<String, &WastFunc> = existing
             .funcs
             .iter()
             .map(|(uid, f)| (uid.clone(), f))
             .collect();
 
         // Also build a map from source uid -> (func_uid, func)
-        let existing_by_source: HashMap<String, (&str, &WastFunc)> = existing
+        let existing_by_source: BTreeMap<String, (&str, &WastFunc)> = existing
             .funcs
             .iter()
             .map(|(uid, f)| {
@@ -1486,7 +1486,7 @@ impl bindings::exports::wast::core::syntax_plugin::Guest for Component {
         // them empty. Recover them from each call target's signature so
         // the IR round-trips structurally — the IR's Call args carry
         // (param_name, value) pairs to keep the wast layer keyword-style.
-        let params_by_func: HashMap<String, Vec<String>> = funcs
+        let params_by_func: BTreeMap<String, Vec<String>> = funcs
             .iter()
             .map(|(uid, f)| {
                 (
@@ -1526,7 +1526,7 @@ impl bindings::exports::wast::core::syntax_plugin::Guest for Component {
 /// Recursively walk an instruction, filling in missing `Call` arg
 /// parameter names from the target func's signature. Returns true if any
 /// edit was made (so the caller knows to re-serialize the body).
-fn fixup_call_args(instr: &mut Instruction, params_by_func: &HashMap<String, Vec<String>>) -> bool {
+fn fixup_call_args(instr: &mut Instruction, params_by_func: &BTreeMap<String, Vec<String>>) -> bool {
     let mut changed = false;
     match instr {
         Instruction::Call { func_uid, args } => {
@@ -1648,9 +1648,9 @@ fn fixup_call_args(instr: &mut Instruction, params_by_func: &HashMap<String, Vec
 /// Resolve a function name to (func_uid, source_uid).
 fn resolve_func_uid(
     name: &str,
-    rev_func: &HashMap<String, String>,
-    existing_by_source: &HashMap<String, (&str, &WastFunc)>,
-    existing_funcs: &HashMap<String, &WastFunc>,
+    rev_func: &BTreeMap<String, String>,
+    existing_by_source: &BTreeMap<String, (&str, &WastFunc)>,
+    existing_funcs: &BTreeMap<String, &WastFunc>,
     _is_import: bool,
 ) -> (String, String) {
     if let Some(source_uid) = rev_func.get(name) {
@@ -1681,7 +1681,7 @@ fn resolve_func_uid(
 /// Resolve parameter names and types from parsed strings.
 fn resolve_params(
     parsed: &[(String, String)],
-    rev_local: &HashMap<String, String>,
+    rev_local: &BTreeMap<String, String>,
     types: &[(TypeUid, WastTypeDef)],
     ctx: &RenderContext,
     _new_syms_local: &mut Vec<SymEntry>,

@@ -5,7 +5,7 @@ mod bindings;
 mod convert;
 
 use bindings::wast::core::types::*;
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use wast_pattern_analyzer::{ArithOp, CompareOp, Instruction};
 use wast_syntax_core::{RenderContext, TypePrinter};
 
@@ -113,8 +113,8 @@ fn parse_primitive(s: &str) -> Option<PrimitiveType> {
 fn render_body(
     body: &[u8],
     indent: &str,
-    local_names: &HashMap<String, String>,
-    func_names: &HashMap<String, String>,
+    local_names: &BTreeMap<String, String>,
+    func_names: &BTreeMap<String, String>,
 ) -> String {
     match wast_pattern_analyzer::deserialize_body(body) {
         Ok(instructions) => render_instructions(&instructions, indent, local_names, func_names),
@@ -125,8 +125,8 @@ fn render_body(
 fn render_instructions(
     instructions: &[Instruction],
     indent: &str,
-    local_names: &HashMap<String, String>,
-    func_names: &HashMap<String, String>,
+    local_names: &BTreeMap<String, String>,
+    func_names: &BTreeMap<String, String>,
 ) -> String {
     let mut lines = Vec::new();
     for instr in instructions {
@@ -138,14 +138,14 @@ fn render_instructions(
     lines.join("\n")
 }
 
-fn resolve_local_name(uid: &str, local_names: &HashMap<String, String>) -> String {
+fn resolve_local_name(uid: &str, local_names: &BTreeMap<String, String>) -> String {
     local_names
         .get(uid)
         .cloned()
         .unwrap_or_else(|| uid.to_string())
 }
 
-fn resolve_func_name_body(uid: &str, func_names: &HashMap<String, String>) -> String {
+fn resolve_func_name_body(uid: &str, func_names: &BTreeMap<String, String>) -> String {
     func_names
         .get(uid)
         .cloned()
@@ -155,8 +155,8 @@ fn resolve_func_name_body(uid: &str, func_names: &HashMap<String, String>) -> St
 fn render_instruction(
     instr: &Instruction,
     indent: &str,
-    local_names: &HashMap<String, String>,
-    func_names: &HashMap<String, String>,
+    local_names: &BTreeMap<String, String>,
+    func_names: &BTreeMap<String, String>,
 ) -> String {
     let inner = format!("{}  ", indent);
     match instr {
@@ -394,8 +394,8 @@ fn render_instruction(
 /// Render an instruction as an inline expression (no leading indent).
 fn render_expr(
     instr: &Instruction,
-    local_names: &HashMap<String, String>,
-    func_names: &HashMap<String, String>,
+    local_names: &BTreeMap<String, String>,
+    func_names: &BTreeMap<String, String>,
 ) -> String {
     match instr {
         Instruction::Nop => String::new(),
@@ -650,9 +650,9 @@ fn generate_uid() -> String {
 
 fn resolve_func_uid(
     name: &str,
-    rev_func: &HashMap<String, String>,
-    existing_by_source: &HashMap<String, (&str, &WastFunc)>,
-    existing_funcs: &HashMap<String, &WastFunc>,
+    rev_func: &BTreeMap<String, String>,
+    existing_by_source: &BTreeMap<String, (&str, &WastFunc)>,
+    existing_funcs: &BTreeMap<String, &WastFunc>,
 ) -> (String, String) {
     if let Some(source_uid) = rev_func.get(name) {
         if let Some((func_uid, _)) = existing_by_source.get(source_uid.as_str()) {
@@ -677,7 +677,7 @@ fn resolve_func_uid(
 
 fn resolve_params(
     parsed: &[(String, String)],
-    rev_local: &HashMap<String, String>,
+    rev_local: &BTreeMap<String, String>,
     types: &[(TypeUid, WastTypeDef)],
     ctx: &RenderContext,
     _new_syms_local: &mut Vec<SymEntry>,
@@ -729,24 +729,24 @@ impl bindings::exports::wast::core::syntax_plugin::Guest for Component {
         let native_types = convert::type_list(&existing.types);
         let ctx = RenderContext::new(&native_syms, &native_types);
 
-        let rev_func: HashMap<String, String> = ctx
+        let rev_func: BTreeMap<String, String> = ctx
             .func_names
             .iter()
             .map(|(k, v)| (v.clone(), k.clone()))
             .collect();
-        let rev_local: HashMap<String, String> = ctx
+        let rev_local: BTreeMap<String, String> = ctx
             .local_names
             .iter()
             .map(|(k, v)| (v.clone(), k.clone()))
             .collect();
 
-        let existing_funcs: HashMap<String, &WastFunc> = existing
+        let existing_funcs: BTreeMap<String, &WastFunc> = existing
             .funcs
             .iter()
             .map(|(uid, f)| (uid.clone(), f))
             .collect();
 
-        let existing_by_source: HashMap<String, (&str, &WastFunc)> = existing
+        let existing_by_source: BTreeMap<String, (&str, &WastFunc)> = existing
             .funcs
             .iter()
             .map(|(uid, f)| {

@@ -779,10 +779,14 @@ fn parse_primitive_atom(s: &str) -> Option<PrimitiveType> {
 /// Map from each existing type's *rendered inline form* to its uid. The
 /// renderer expands inline whenever it can, so any type ref in the round-
 /// tripped text matches one of these keys (or is an explicit `$uid` atom).
-type TypeLookup = std::collections::HashMap<String, TypeUid>;
+//
+// BTreeMap rather than HashMap: HashMap's default RandomState pulls from
+// getrandom, which on wasip1 traps inside jco's preview1→preview2 adapter
+// (`assertion failed at adapter line 376` in `cabi_import_realloc`).
+type TypeLookup = std::collections::BTreeMap<String, TypeUid>;
 
 fn build_type_lookup(types: &[(TypeUid, WastTypeDef)]) -> TypeLookup {
-    let mut map: TypeLookup = std::collections::HashMap::new();
+    let mut map: TypeLookup = std::collections::BTreeMap::new();
     for (uid, td) in types {
         let key = render_wit_type(&td.definition, types);
         map.entry(key).or_insert_with(|| uid.clone());
