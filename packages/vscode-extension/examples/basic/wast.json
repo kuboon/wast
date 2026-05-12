@@ -1,0 +1,47 @@
+{
+  "funcs": [
+    {
+      "uid": "square",
+      "source": {
+        "Exported": "square"
+      },
+      "params": [
+        [
+          "x",
+          "u32"
+        ]
+      ],
+      "result": "u32",
+      "body": null
+    },
+    {
+      "uid": "sum-of-squares",
+      "source": {
+        "Exported": "sum-of-squares"
+      },
+      "params": [
+        [
+          "a",
+          "u32"
+        ],
+        [
+          "b",
+          "u32"
+        ]
+      ],
+      "result": "u32",
+      "body": null
+    }
+  ],
+  "types": [
+    {
+      "uid": "u32",
+      "source": {
+        "Imported": "u32"
+      },
+      "definition": {
+        "Primitive": "U32"
+      }
+    }
+  ]
+}
