@@ -8,7 +8,7 @@
     "lint": "pnpm -r lint"
   },
   "dependencies": {
-    "@bytecodealliance/preview2-shim": "^0.17.8"
+    "@bytecodealliance/preview2-shim": "^0.17.9"
   },
   "devDependencies": {
     "@bytecodealliance/jco": "^1.19.0"

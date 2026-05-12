@@ -75,16 +75,17 @@
   "scripts": {
     "bundle-components": "node scripts/bundle-components.mjs",
     "build": "pnpm bundle-components && tsc",
-    "test": "echo \"no tests yet\"",
+    "seed-example": "node scripts/seed-example.mjs",
+    "test": "node --test 'test/*.test.mjs'",
     "lint": "echo \"no linter configured yet\""
   },
   "dependencies": {
-    "@bytecodealliance/preview2-shim": "^0.17.0"
+    "@bytecodealliance/preview2-shim": "^0.17.9"
   },
   "devDependencies": {
     "@bytecodealliance/jco": "^1.19.0",
-    "@types/node": "^22",
-    "@types/vscode": "^1.100.0",
-    "typescript": "^5.8.0"
+    "@types/node": "^22.19.19",
+    "@types/vscode": "^1.118.0",
+    "typescript": "^5.9.3"
   }
 }

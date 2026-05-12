@@ -28,7 +28,7 @@
 //! own `render_instruction` for now. If a useful pattern emerges across
 //! plugins we can revisit.
 
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use wast_types::{PrimitiveType, Syms, WastTypeDef, WitType};
 
 /// Pre-built lookups a plugin needs to render text from a `WastComponent`.
@@ -36,9 +36,9 @@ use wast_types::{PrimitiveType, Syms, WastTypeDef, WitType};
 /// Plugins build one of these once at the start of `to_text` and pass it
 /// (immutably) through every recursive call.
 pub struct RenderContext<'a> {
-    pub func_names: HashMap<String, String>,
-    pub local_names: HashMap<String, String>,
-    pub type_names: HashMap<String, String>,
+    pub func_names: BTreeMap<String, String>,
+    pub local_names: BTreeMap<String, String>,
+    pub type_names: BTreeMap<String, String>,
     pub types: &'a [(String, WastTypeDef)],
 }
 
@@ -48,9 +48,9 @@ impl<'a> RenderContext<'a> {
     /// `Syms` / type list to `wast-types` first (mechanical match-arm
     /// boilerplate, ~40 lines per plugin).
     pub fn new(syms: &Syms, types: &'a [(String, WastTypeDef)]) -> Self {
-        let mut func_names = HashMap::new();
-        let mut local_names = HashMap::new();
-        let mut type_names = HashMap::new();
+        let mut func_names = BTreeMap::new();
+        let mut local_names = BTreeMap::new();
+        let mut type_names = BTreeMap::new();
 
         // wit_syms: `(uid, display)` pairs — same map seeds both funcs and
         // types (a wit_path can refer to either).

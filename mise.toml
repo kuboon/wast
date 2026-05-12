@@ -1,6 +1,9 @@
 [tasks.build]
 run = "cargo component build --workspace && pnpm install && pnpm build"
 
+[tasks.bundle-components]
+run = "cd packages/vscode-extension && pnpm bundle-components"
+
 [tasks.test-component]
 depends = ['build']
 run = "cargo test --workspace"

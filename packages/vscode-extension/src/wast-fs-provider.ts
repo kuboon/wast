@@ -1,7 +1,11 @@
 /**
  * `FileSystemProvider` for the `wast://` scheme.
  *
- * URI format: `wast://<base64url(dir-uri)>/component[?func=uid1&func=uid2]`
+ * URI format: `wast:/<base64url(dir-uri)>/component[?func=uid1&func=uid2]`
+ *
+ * The encoded dir lives in the URI path (not the authority) because
+ * RFC 3986 authorities are case-insensitive and VS Code lowercases them,
+ * which corrupts base64url payloads.
  *
  *  - `readFile` runs the configured syntax plugin's `to_text` on the
  *    component (narrowed via `partial-manager.extract` if `?func=` is
@@ -261,8 +265,11 @@ export function encodeDir(dirUri: vscode.Uri): string {
 
 export function decodeDirUri(uri: vscode.Uri): vscode.Uri | null {
   try {
+    // path is "/<encoded>/component" — split and grab the first segment.
+    const segments = uri.path.split("/").filter((s) => s.length > 0);
+    if (segments.length === 0) return null;
     return vscode.Uri.parse(
-      Buffer.from(uri.authority, "base64url").toString("utf-8"),
+      Buffer.from(segments[0], "base64url").toString("utf-8"),
     );
   } catch {
     return null;
@@ -285,7 +292,7 @@ export function buildUri(
     for (const uid of funcUids) params.append("func", uid);
     query = params.toString();
   }
-  return vscode.Uri.parse(`wast://${encoded}/component${query ? "?" + query : ""}`);
+  return vscode.Uri.parse(`wast:/${encoded}/component${query ? "?" + query : ""}`);
 }
 
 /** Build a tab title for a virtual document. */

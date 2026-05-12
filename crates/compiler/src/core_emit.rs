@@ -9,7 +9,7 @@
 //! `MatchResult` for destructuring compound params.
 //! Later stages will add strings, lists, records, variants.
 
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 
 use wast_pattern_analyzer::{ArithOp, CompareOp, Instruction};
 use wast_types::{WastFunc, WitType};
@@ -19,11 +19,11 @@ use crate::error::CompileError;
 
 /// Map from a callable func's uid to its definition. Used by `emit_body` to
 /// resolve `Instruction::Call` targets (param order + return type).
-pub type FuncMap<'a> = HashMap<String, &'a WastFunc>;
+pub type FuncMap<'a> = BTreeMap<String, &'a WastFunc>;
 
 /// Map from a type uid to its structural definition (for resolving
 /// `option<…>`, `result<…,…>`, etc. that appear as param or result refs).
-pub type TypeMap<'a> = HashMap<String, &'a WitType>;
+pub type TypeMap<'a> = BTreeMap<String, &'a WitType>;
 
 /// Structural view of a WIT type reference (resolved through a `TypeMap`).
 /// Scope: primitives (numeric + bool/char), string (ptr+len pair),
@@ -513,7 +513,7 @@ pub fn collect_locals(
     type_map: &TypeMap,
 ) -> Vec<(String, String)> {
     let mut locals: Vec<(String, String)> = Vec::new();
-    let mut seen: std::collections::HashSet<String> =
+    let mut seen: std::collections::BTreeSet<String> =
         params.iter().map(|(n, _)| n.clone()).collect();
     collect_locals_rec(body, params, func_map, type_map, &mut locals, &mut seen);
     locals
@@ -525,7 +525,7 @@ fn collect_locals_rec(
     func_map: &FuncMap,
     type_map: &TypeMap,
     locals: &mut Vec<(String, String)>,
-    seen: &mut std::collections::HashSet<String>,
+    seen: &mut std::collections::BTreeSet<String>,
 ) {
     for instr in body {
         match instr {

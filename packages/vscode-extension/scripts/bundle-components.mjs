@@ -4,7 +4,7 @@
 // dist/components/<id>/. The extension imports these at activation time
 // via Node's bare-specifier resolution (preview2-shim is a runtime dep).
 
-import { mkdir, rm, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
@@ -76,6 +76,28 @@ for (const p of targets) {
     join(dest, "package.json"),
     JSON.stringify({ type: "module" }, null, 2) + "\n",
   );
+
+  // Patch `wasi_snapshot_preview1.random_get` to fill guest memory
+  // directly from node:crypto. The default jco wiring routes through
+  // the preview1→preview2 adapter, whose `cabi_import_realloc` traps
+  // (assertion failed at adapter line 376) the first time std's
+  // HashMap lazy-seeds itself. Bypassing the adapter avoids the trap.
+  const jsPath = join(dest, `${p.id.replace(/-/g, "_")}.js`);
+  let js = await readFile(jsPath, "utf-8");
+  if (/random_get:\s*exports0\['?\d+'?\],/.test(js)) {
+    js = js.replace(
+      /^import { random } from '@bytecodealliance\/preview2-shim\/random';$/m,
+      `$&\nimport { randomFillSync as _wastRandomFillSync } from 'node:crypto';`,
+    );
+    js = js.replace(
+      /random_get:\s*exports0\['?\d+'?\],/,
+      `random_get: (buf, buf_len) => {
+          _wastRandomFillSync(new Uint8Array(exports1.memory.buffer, buf, buf_len));
+          return 0;
+        },`,
+    );
+    await writeFile(jsPath, js);
+  }
 }
 
 console.log(`\nBuilt ${targets.length} components into ${out}`);

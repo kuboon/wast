@@ -6,7 +6,7 @@ use bindings::wast::core::types::{
     ExtractTarget, FuncSource, SymEntry, Syms, TypeSource, WastComponent, WastError, WastFunc,
     WastTypeDef, WitType,
 };
-use std::collections::BTreeSet as HashSet;
+use std::collections::BTreeSet;
 use wast_pattern_analyzer::Instruction;
 
 struct Component;
@@ -54,8 +54,8 @@ fn type_refs_from_wit_type(wt: &WitType) -> Vec<String> {
 fn collect_types_transitively(
     seeds: &[String],
     all_types: &[(String, WastTypeDef)],
-) -> HashSet<String> {
-    let mut needed: HashSet<String> = HashSet::new();
+) -> BTreeSet<String> {
+    let mut needed: BTreeSet<String> = BTreeSet::new();
     let mut stack: Vec<String> = seeds.to_vec();
     while let Some(uid) = stack.pop() {
         if !needed.insert(uid.clone()) {
@@ -179,8 +179,8 @@ fn collect_calls(instr: &Instruction, out: &mut Vec<String>) {
 // ---------------------------------------------------------------------------
 
 fn extract_impl(full: WastComponent, targets: Vec<ExtractTarget>) -> WastComponent {
-    let target_uids: HashSet<&str> = targets.iter().map(|t| t.sym.as_str()).collect();
-    let include_caller_targets: HashSet<&str> = targets
+    let target_uids: BTreeSet<&str> = targets.iter().map(|t| t.sym.as_str()).collect();
+    let include_caller_targets: BTreeSet<&str> = targets
         .iter()
         .filter(|t| t.include_caller)
         .map(|t| t.sym.as_str())
@@ -189,7 +189,7 @@ fn extract_impl(full: WastComponent, targets: Vec<ExtractTarget>) -> WastCompone
     // Step 1: collect the *owned* set — funcs that appear in the partial
     // with their bodies. That is the targets, plus the direct callers of any
     // include_caller target.
-    let mut owned: HashSet<String> = HashSet::new();
+    let mut owned: BTreeSet<String> = BTreeSet::new();
     for uid in &target_uids {
         if full.funcs.iter().any(|(id, _)| id == uid) {
             owned.insert(uid.to_string());
@@ -215,7 +215,7 @@ fn extract_impl(full: WastComponent, targets: Vec<ExtractTarget>) -> WastCompone
     // Step 2: collect the *imported* set — callees of any owned func that
     // aren't themselves owned. Their signatures appear in the partial; their
     // bodies live in full.
-    let mut imported: HashSet<String> = HashSet::new();
+    let mut imported: BTreeSet<String> = BTreeSet::new();
     for (uid, func) in &full.funcs {
         if !owned.contains(uid.as_str()) {
             continue;
@@ -231,7 +231,7 @@ fn extract_impl(full: WastComponent, targets: Vec<ExtractTarget>) -> WastCompone
         }
     }
 
-    let included_func_uids: HashSet<String> = owned.union(&imported).cloned().collect();
+    let included_func_uids: BTreeSet<String> = owned.union(&imported).cloned().collect();
 
     // Step 3: collect type refs from all included funcs, then transitively.
     let mut type_seeds: Vec<String> = Vec::new();
@@ -290,7 +290,7 @@ fn extract_impl(full: WastComponent, targets: Vec<ExtractTarget>) -> WastCompone
         .collect();
 
     // Step 5: Build output syms — include syms whose UID matches an included func or type
-    let all_included: HashSet<&str> = included_func_uids
+    let all_included: BTreeSet<&str> = included_func_uids
         .iter()
         .map(|s| s.as_str())
         .chain(needed_types.iter().map(|s| s.as_str()))
@@ -458,7 +458,7 @@ fn merge_impl(
 
     // Check that all func references in partial's internal funcs exist
     // in either partial or full (missing_dependency check).
-    let all_func_uids: HashSet<&str> = full
+    let all_func_uids: BTreeSet<&str> = full
         .funcs
         .iter()
         .map(|(uid, _)| uid.as_str())
@@ -655,7 +655,7 @@ mod tests {
                 include_caller: false,
             }],
         );
-        let type_uids: HashSet<String> = result.types.iter().map(|(u, _)| u.clone()).collect();
+        let type_uids: BTreeSet<String> = result.types.iter().map(|(u, _)| u.clone()).collect();
         assert!(type_uids.contains("my_type"));
         assert!(type_uids.contains("other_type"));
         assert!(!type_uids.contains("unused"));
@@ -696,7 +696,7 @@ mod tests {
                 include_caller: false,
             }],
         );
-        let type_uids: HashSet<String> = result.types.iter().map(|(u, _)| u.clone()).collect();
+        let type_uids: BTreeSet<String> = result.types.iter().map(|(u, _)| u.clone()).collect();
         assert!(type_uids.contains("list_t"));
         assert!(type_uids.contains("rec_t"));
         assert!(type_uids.contains("inner_t"));
@@ -862,7 +862,7 @@ mod tests {
                 },
             ],
         );
-        let uids: HashSet<String> = result.funcs.iter().map(|(u, _)| u.clone()).collect();
+        let uids: BTreeSet<String> = result.funcs.iter().map(|(u, _)| u.clone()).collect();
         assert_eq!(uids.len(), 2);
         assert!(uids.contains("f1"));
         assert!(uids.contains("f3"));
@@ -889,7 +889,7 @@ mod tests {
             syms: empty_syms(),
         };
         let result = merge_impl(partial, full).unwrap();
-        let uids: HashSet<String> = result.funcs.iter().map(|(u, _)| u.clone()).collect();
+        let uids: BTreeSet<String> = result.funcs.iter().map(|(u, _)| u.clone()).collect();
         assert!(uids.contains("f1"));
         assert!(uids.contains("f_new"));
     }
@@ -1219,7 +1219,7 @@ mod tests {
                 include_caller: false,
             }],
         );
-        let uids: HashSet<String> = result.funcs.iter().map(|(u, _)| u.clone()).collect();
+        let uids: BTreeSet<String> = result.funcs.iter().map(|(u, _)| u.clone()).collect();
         assert!(uids.contains("f1"), "target func should be included");
         assert!(uids.contains("f2"), "called func should be included");
         assert!(
@@ -1259,7 +1259,7 @@ mod tests {
                 include_caller: true,
             }],
         );
-        let uids: HashSet<String> = result.funcs.iter().map(|(u, _)| u.clone()).collect();
+        let uids: BTreeSet<String> = result.funcs.iter().map(|(u, _)| u.clone()).collect();
         assert!(uids.contains("f1"), "target should be included");
         assert!(uids.contains("f2"), "caller of target should be included");
         assert!(!uids.contains("f3"), "non-caller should NOT be included");
