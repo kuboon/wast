@@ -8,7 +8,7 @@
     "build-plugins": "node scripts/build-plugins.mjs",
     "build": "pnpm generate && pnpm build-plugins && node scripts/copy-site.mjs",
     "dev": "pnpm build && python3 -m http.server --directory dist 8123",
-    "clean": "rm -rf dist public/components public/plugins ../../tmp/demos"
+    "clean": "rm -rf dist public/components public/plugins public/tools ../../tmp/demos"
   },
   "devDependencies": {
     "@bytecodealliance/jco": "^1.19.0"

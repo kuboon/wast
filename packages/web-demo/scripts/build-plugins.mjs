@@ -23,6 +23,7 @@ const targets = [
   { crate: "wast-syntax-ts-like", artifact: "wast_syntax_ts_like.wasm", id: "ts-like", outDir: pluginsRoot },
   { crate: "wast-syntax-rust-like", artifact: "wast_syntax_rust_like.wasm", id: "rust-like", outDir: pluginsRoot },
   { crate: "wast-partial-manager", artifact: "wast_partial_manager.wasm", id: "partial-manager", outDir: toolsRoot },
+  { crate: "wast-codec", artifact: "wast_codec.wasm", id: "codec", outDir: toolsRoot },
 ];
 
 await rm(pluginsRoot, { recursive: true, force: true });

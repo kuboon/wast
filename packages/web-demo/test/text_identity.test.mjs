@@ -10,10 +10,15 @@ import { strict as assert } from "node:assert";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const root = resolve(here, "..");
+const sampleDir = resolve(root, "..", "sample-wast");
 
-const showcase = JSON.parse(
-  await readFile(`${root}/public/components/plugin_showcase.json`, "utf8"),
-);
+const codec = (await import(`${root}/public/tools/codec/codec.js`)).codec;
+const wastJsonBytes = new Uint8Array(await readFile(`${sampleDir}/wast.json`));
+let symsBytes = null;
+try {
+  symsBytes = new Uint8Array(await readFile(`${sampleDir}/syms.en.yaml`));
+} catch {}
+const wastComponent = codec.read(wastJsonBytes, symsBytes);
 
 const PLUGINS = [
   { id: "raw", path: "raw/raw.js" },
@@ -26,8 +31,8 @@ let failures = 0;
 for (const p of PLUGINS) {
   const m = await import(`${root}/public/plugins/${p.path}`);
   const plugin = m.syntaxPlugin;
-  const t1 = plugin.toText(showcase.wastComponent);
-  const parsed = plugin.fromText(t1, showcase.wastComponent);
+  const t1 = plugin.toText(wastComponent);
+  const parsed = plugin.fromText(t1, wastComponent);
   const t2 = plugin.toText(parsed);
   try {
     assert.equal(t1, t2, `${p.id}: text differs after no-op sync`);

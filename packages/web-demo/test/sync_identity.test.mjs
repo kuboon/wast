@@ -12,10 +12,15 @@ import { strict as assert } from "node:assert";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const root = resolve(here, "..");
+const sampleDir = resolve(root, "..", "sample-wast");
 
-const showcase = JSON.parse(
-  await readFile(`${root}/public/components/plugin_showcase.json`, "utf8"),
-);
+const codec = (await import(`${root}/public/tools/codec/codec.js`)).codec;
+const wastJsonBytes = new Uint8Array(await readFile(`${sampleDir}/wast.json`));
+let symsBytes = null;
+try {
+  symsBytes = new Uint8Array(await readFile(`${sampleDir}/syms.en.yaml`));
+} catch {}
+const wastComponent = codec.read(wastJsonBytes, symsBytes);
 
 /** Stable summary of a wast-component for structural comparison.
  *  Sorted by uid so the order doesn't matter, and serialised so we get a
@@ -51,12 +56,12 @@ for (const p of PLUGINS) {
   const m = await import(`${root}/public/plugins/${p.path}`);
   const plugin = m.syntaxPlugin;
 
-  const before = summarize(showcase.wastComponent);
-  const text = plugin.toText(showcase.wastComponent);
+  const before = summarize(wastComponent);
+  const text = plugin.toText(wastComponent);
 
   let after;
   try {
-    const parsed = plugin.fromText(text, showcase.wastComponent);
+    const parsed = plugin.fromText(text, wastComponent);
     after = summarize(parsed);
   } catch (err) {
     console.error(`✗ ${p.id}: from_text threw`, err);

@@ -116,7 +116,6 @@
   "scripts": {
     "bundle-components": "node scripts/bundle-components.mjs",
     "build": "pnpm bundle-components && tsc",
-    "seed-example": "node scripts/seed-example.mjs",
     "test": "node --test 'test/*.test.mjs'",
     "lint": "echo \"no linter configured yet\""
   },

@@ -1,8 +1,8 @@
 // Test harness: dynamically loads the bundled wasm components and reads
-// the examples/basic fixture from disk. Returns the exact same surface
-// the VS Code extension consumes at runtime, so tests can exercise the
-// real plugin/codec/partial-manager/compiler code paths without
-// launching an Extension Development Host.
+// the shared packages/sample-wast fixture from disk. Returns the exact
+// same surface the VS Code extension consumes at runtime, so tests can
+// exercise the real plugin/codec/partial-manager/compiler code paths
+// without launching an Extension Development Host.
 //
 // Usage:
 //
@@ -17,6 +17,7 @@ import { fileURLToPath } from "node:url";
 const here = dirname(fileURLToPath(import.meta.url));
 const pkgRoot = join(here, "..");
 const componentsRoot = join(pkgRoot, "dist", "components");
+const sampleWastDir = join(pkgRoot, "..", "sample-wast");
 
 const PLUGIN_IDS = ["raw", "ruby-like", "ts-like", "rust-like"];
 
@@ -37,8 +38,8 @@ export async function loadRuntime() {
   return { plugins, partialManager: pm, codec, compiler };
 }
 
-export async function loadFixture(name = "basic") {
-  const dir = join(pkgRoot, "examples", name);
+export async function loadFixture() {
+  const dir = sampleWastDir;
   const worldWit = new Uint8Array(await readFile(join(dir, "world.wit")));
   const wastJson = new Uint8Array(await readFile(join(dir, "wast.json")));
   let symsEnYaml = null;
@@ -50,9 +51,9 @@ export async function loadFixture(name = "basic") {
   return { dir, worldWit, wastJson, symsEnYaml };
 }
 
-export async function loadHarness(fixtureName = "basic") {
+export async function loadHarness() {
   const runtime = await loadRuntime();
-  const fixture = await loadFixture(fixtureName);
+  const fixture = await loadFixture();
   // Pre-decode the on-disk fixture into the WastComponent shape the
   // plugin / partial-manager / compiler all consume.
   fixture.component = runtime.codec.read(fixture.wastJson, fixture.symsEnYaml);
