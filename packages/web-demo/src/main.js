@@ -237,17 +237,6 @@ async function initPluginShowcase() {
   const host = document.getElementById("plugin-showcase");
   if (!host) return;
 
-  let showcase;
-  try {
-    const res = await fetch(
-      new URL("../public/components/plugin_showcase.json", import.meta.url),
-    );
-    showcase = await res.json();
-  } catch (err) {
-    host.append(h("p", { class: "err" }, `showcase load failed: ${err}`));
-    return;
-  }
-
   const pluginMods = {};
   for (const p of PLUGINS) {
     try {
@@ -265,44 +254,51 @@ async function initPluginShowcase() {
 
   // partial-manager.extract builds the partial each pane renders;
   // partial-manager.merge rejoins parsed text back into full on Sync.
-  // Without it the showcase can't run, so bail loudly if it didn't load.
-  let partialManager;
+  // codec.read turns the on-disk wast.json + syms.en.yaml into the
+  // wasm-side WastComponent the plugins consume — same component the VS
+  // Code extension uses, so the showcase exercises a real path.
+  let partialManager, codec;
   try {
-    const m = await import(
+    const pmMod = await import(
       /* @vite-ignore */ new URL(
         "../public/tools/partial-manager/partial_manager.js",
         import.meta.url,
       ).href
     );
-    partialManager = m.partialManager;
+    partialManager = pmMod.partialManager;
+    const codecMod = await import(
+      /* @vite-ignore */ new URL(
+        "../public/tools/codec/codec.js",
+        import.meta.url,
+      ).href
+    );
+    codec = codecMod.codec;
   } catch (err) {
     host.append(
-      h("p", { class: "err" }, `partial-manager load failed: ${err.message ?? err}`),
+      h("p", { class: "err" }, `tool load failed: ${err.message ?? err}`),
     );
     return;
   }
 
-  const wc = showcase.wastComponent;
-
-  // callGraph is keyed by source-inner name; normalize both ways so we can
-  // map UIDs <-> names and find callers.
-  const uidBySourceName = Object.fromEntries(
-    wc.funcs.map(([uid, row]) => [row.source.val, uid]),
-  );
-  const sourceNameByUid = Object.fromEntries(
-    wc.funcs.map(([uid, row]) => [uid, row.source.val]),
-  );
-  const callersBySourceName = {};
-  for (const [caller, callees] of Object.entries(showcase.callGraph)) {
-    for (const callee of callees) {
-      (callersBySourceName[callee] ||= []).push(caller);
-    }
-  }
-  function callersOf(uid) {
-    const name = sourceNameByUid[uid];
-    return (callersBySourceName[name] ?? [])
-      .map((cn) => uidBySourceName[cn])
-      .filter(Boolean);
+  // packages/sample-wast is the shared on-disk source. Fetch the row-oriented
+  // wast.json + optional syms, decode via codec.read into the wasm-side
+  // shape the plugins consume.
+  let wc;
+  try {
+    const base = new URL("../public/sample-wast/", import.meta.url);
+    const [wastJsonBytes, symsYamlBytes] = await Promise.all([
+      fetch(new URL("wast.json", base)).then((r) => r.arrayBuffer()),
+      fetch(new URL("syms.en.yaml", base)).then((r) =>
+        r.ok ? r.arrayBuffer() : null,
+      ),
+    ]);
+    wc = codec.read(
+      new Uint8Array(wastJsonBytes),
+      symsYamlBytes ? new Uint8Array(symsYamlBytes) : null,
+    );
+  } catch (err) {
+    host.append(h("p", { class: "err" }, `sample-wast load failed: ${err.message ?? err}`));
+    return;
   }
 
   // Per-func UI state: { uid -> { show, withCallers } }. Default: show
@@ -505,12 +501,7 @@ async function initPluginShowcase() {
 
       const callerBox = h("input", { type: "checkbox" });
       callerBox.checked = toggles[uid]?.withCallers ?? false;
-      const nCallers = callersOf(uid).length;
-      callerBox.disabled = nCallers === 0;
-      callerBox.title =
-        nCallers === 0
-          ? "no callers"
-          : `pull in ${nCallers} caller(s): ${callersOf(uid).join(", ")}`;
+      callerBox.title = "also pull in any funcs that call this one";
       callerBox.addEventListener("change", () => {
         toggles[uid].withCallers = callerBox.checked;
         renderGrid();

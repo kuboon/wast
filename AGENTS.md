@@ -164,6 +164,11 @@ cargo component build --workspace && \
 - **Minimize identifier change cost** — UIDs are stable, display names are in syms
 - **WastComponent is the central type** — partial and full share the same type definition
 - **Syntax plugins are stateless** — called fresh each time
+- **`world.wit` + `wast.json` + `syms.en.yaml` are SOURCE CODE** — hand-authored, or edited via the VS Code extension's text-pane round-trip (`from_text` → `merge` → `codec.write`). Never design build-time generators that emit them. The canonical shared sample lives at `packages/sample-wast/`.
+
+## Tech debt / scheduled cleanup
+
+- **`crates/demo-gen`** — legacy build-time generator that emits the v0.x milestone `.wasm` + `manifest.json` for the web-demo playground. Conceptually obsolete under the source-code rule above, but kept for now because the eventual replacement (a handful of consolidated hand-authored demos covering all implemented features) isn't designed yet. Treat as legacy: don't extend with new milestone entries on its Rust DSL side. Removal path: hand-author 2-3 rich `packages/<demo>/` folders, switch `transpile-all.mjs` to read from those, delete the crate.
 
 ## Agent Instructions
 

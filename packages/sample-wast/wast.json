@@ -1,0 +1,100 @@
+{
+  "funcs": [
+    {
+      "uid": "square",
+      "source": { "Internal": "square" },
+      "params": [["x", "u32"]],
+      "result": "u32",
+      "body": [1, 11, 2, 7, 1, 120, 7, 1, 120]
+    },
+    {
+      "uid": "cube",
+      "source": { "Internal": "cube" },
+      "params": [["x", "u32"]],
+      "result": "u32",
+      "body": [1, 11, 2, 6, 6, 115, 113, 117, 97, 114, 101, 1, 1, 120, 7, 1, 120, 7, 1, 120]
+    },
+    {
+      "uid": "sum2",
+      "source": { "Internal": "sum2" },
+      "params": [["a", "u32"], ["b", "u32"]],
+      "result": "u32",
+      "body": [1, 11, 0, 7, 1, 97, 7, 1, 98]
+    },
+    {
+      "uid": "max2",
+      "source": { "Internal": "max2" },
+      "params": [["a", "u32"], ["b", "u32"]],
+      "result": "u32",
+      "body": [1, 2, 10, 4, 7, 1, 97, 7, 1, 98, 1, 7, 1, 97, 1, 7, 1, 98]
+    },
+    {
+      "uid": "poly",
+      "source": { "Internal": "poly" },
+      "params": [["x", "u32"]],
+      "result": "u32",
+      "body": [1, 6, 4, 115, 117, 109, 50, 2, 1, 97, 6, 6, 115, 113, 117, 97, 114, 101, 1, 1, 120, 7, 1, 120, 1, 98, 6, 4, 99, 117, 98, 101, 1, 1, 120, 7, 1, 120]
+    },
+    {
+      "uid": "sum_of_squares",
+      "source": { "Exported": "sum-of-squares" },
+      "params": [["a", "u32"], ["b", "u32"]],
+      "result": "u32",
+      "body": [1, 6, 4, 115, 117, 109, 50, 2, 1, 97, 6, 6, 115, 113, 117, 97, 114, 101, 1, 1, 120, 7, 1, 97, 1, 98, 6, 6, 115, 113, 117, 97, 114, 101, 1, 1, 120, 7, 1, 98]
+    },
+    {
+      "uid": "max3",
+      "source": { "Exported": "max3" },
+      "params": [["a", "u32"], ["b", "u32"], ["c", "u32"]],
+      "result": "u32",
+      "body": [1, 6, 4, 109, 97, 120, 50, 2, 1, 97, 6, 4, 109, 97, 120, 50, 2, 1, 97, 7, 1, 97, 1, 98, 7, 1, 98, 1, 98, 7, 1, 99]
+    },
+    {
+      "uid": "evaluate",
+      "source": { "Exported": "evaluate" },
+      "params": [["x", "u32"]],
+      "result": "u32",
+      "body": [1, 6, 4, 112, 111, 108, 121, 1, 1, 120, 7, 1, 120]
+    },
+    {
+      "uid": "make_point",
+      "source": { "Exported": "make-point" },
+      "params": [["x", "u32"], ["y", "u32"]],
+      "result": "point",
+      "body": [1, 24, 2, 1, 120, 7, 1, 120, 1, 121, 7, 1, 121]
+    },
+    {
+      "uid": "get_x",
+      "source": { "Exported": "get-x" },
+      "params": [["p", "point"]],
+      "result": "u32",
+      "body": [1, 23, 7, 1, 112, 1, 120]
+    },
+    {
+      "uid": "unwrap_or",
+      "source": { "Exported": "unwrap-or" },
+      "params": [["o", "opt_u32"], ["default", "u32"]],
+      "result": "u32",
+      "body": [1, 16, 7, 1, 111, 1, 118, 1, 7, 1, 118, 1, 7, 7, 100, 101, 102, 97, 117, 108, 116]
+    },
+    {
+      "uid": "greeting",
+      "source": { "Exported": "greeting" },
+      "params": [],
+      "result": "string",
+      "body": [1, 19, 12, 104, 101, 108, 108, 111, 44, 32, 119, 97, 115, 116, 33]
+    }
+  ],
+  "types": [
+    {
+      "uid": "point",
+      "source": { "Internal": "point" },
+      "definition": { "Record": [["x", "u32"], ["y", "u32"]] }
+    },
+    {
+      "uid": "opt_u32",
+      "source": { "Internal": "opt_u32" },
+      "definition": { "Option": "u32" }
+    }
+  ]
+}

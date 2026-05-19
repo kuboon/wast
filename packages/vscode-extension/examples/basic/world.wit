@@ -1,6 +1,0 @@
-package demo:basic;
-
-world component {
-  export square: func(x: u32) -> u32;
-  export sum-of-squares: func(a: u32, b: u32) -> u32;
-}

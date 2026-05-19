@@ -4,6 +4,7 @@ import {
   WastFileSystemProvider,
   buildUri,
   buildTitle,
+  type FuncSelection,
 } from "./wast-fs-provider.js";
 import { extractErrors, loadRuntime, type LoadedRuntime } from "./wasm-loader.js";
 import {
@@ -31,8 +32,32 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   const treeView = vscode.window.createTreeView("wastComponents", {
     treeDataProvider: treeProvider,
     showCollapseAll: true,
+    // Enable multi-select so users can shift-click a range and then hit
+    // `WAST: Open selected` from the view title. Without this only one
+    // row's checkbox can be flipped at a time via keyboard navigation.
+    canSelectMany: true,
   });
   context.subscriptions.push(treeView);
+
+  // VS Code reports checkbox flips here. Funnel them into SelectionState
+  // so the tree row's description and view-title button reflect the new
+  // state on the very next render.
+  context.subscriptions.push(
+    treeView.onDidChangeCheckboxState((e) => {
+      for (const [item, newState] of e.items) {
+        const fi = item as unknown as {
+          component?: LoadedComponent;
+          func?: { uid: string };
+        };
+        if (!fi.component || !fi.func) continue;
+        treeProvider.selection.setShow(
+          fi.component,
+          fi.func.uid,
+          newState === vscode.TreeItemCheckboxState.Checked,
+        );
+      }
+    }),
+  );
 
   // ── wast:// FileSystemProvider (read = to_text, write = from_text → merge → codec) ──
   const fsProvider = new WastFileSystemProvider(runtime);
@@ -44,19 +69,12 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     }),
   );
 
-  // ── Command: open virtual document for a component / func ──
+  // ── Command: open virtual document for a component's current selection ──
   context.subscriptions.push(
     vscode.commands.registerCommand(
       "wast.openVirtualDoc",
-      async (component: LoadedComponent, funcUid?: string) => {
-        const funcUids = funcUid ? [funcUid] : undefined;
-        const uri = buildUri(component, funcUids);
-        const _title = buildTitle(component, funcUids);
-        const doc = await vscode.workspace.openTextDocument(uri);
-        await vscode.window.showTextDocument(doc, {
-          preview: false,
-          viewColumn: vscode.ViewColumn.One,
-        });
+      async (component: LoadedComponent, selection?: FuncSelection[]) => {
+        await openVirtualDoc(component, selection);
       },
     ),
   );
@@ -65,6 +83,43 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   context.subscriptions.push(
     vscode.commands.registerCommand("wast.refreshTree", async () => {
       await treeProvider.refresh();
+    }),
+  );
+
+  // ── Command: toggle +callers on a func row (inline action) ──
+  context.subscriptions.push(
+    vscode.commands.registerCommand("wast.toggleCallers", (item: unknown) => {
+      const fi = item as { component?: LoadedComponent; func?: { uid: string } };
+      if (!fi.component || !fi.func) return;
+      treeProvider.selection.toggleCallers(fi.component, fi.func.uid);
+    }),
+  );
+
+  // ── Command: open selected (view-title button) ──
+  context.subscriptions.push(
+    vscode.commands.registerCommand("wast.openSelected", async () => {
+      const components = treeProvider.getComponents();
+      const opened: string[] = [];
+      for (const c of components) {
+        const sel = treeProvider.selection.selectionFor(c);
+        if (sel.length === 0) continue;
+        await openVirtualDoc(c, sel);
+        opened.push(c.name);
+      }
+      if (opened.length === 0) {
+        void vscode.window.showInformationMessage(
+          "WAST: no funcs checked — tick the checkboxes on the funcs you want first.",
+        );
+      }
+    }),
+  );
+
+  // ── Command: clear selection (view-title button) ──
+  context.subscriptions.push(
+    vscode.commands.registerCommand("wast.clearSelection", () => {
+      for (const c of treeProvider.getComponents()) {
+        treeProvider.selection.clear(c);
+      }
     }),
   );
 
@@ -101,6 +156,23 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   watcher.onDidCreate(() => void treeProvider.refresh());
   watcher.onDidDelete(() => void treeProvider.refresh());
   context.subscriptions.push(watcher);
+}
+
+// ---------------------------------------------------------------------------
+// Open virtual doc helper
+// ---------------------------------------------------------------------------
+
+async function openVirtualDoc(
+  component: LoadedComponent,
+  selection?: FuncSelection[],
+): Promise<void> {
+  const uri = buildUri(component, selection);
+  const _title = buildTitle(component, selection);
+  const doc = await vscode.workspace.openTextDocument(uri);
+  await vscode.window.showTextDocument(doc, {
+    preview: false,
+    viewColumn: vscode.ViewColumn.One,
+  });
 }
 
 // ---------------------------------------------------------------------------

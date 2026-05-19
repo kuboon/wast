@@ -21,15 +21,56 @@
       {
         "command": "wast.refreshTree",
         "title": "WAST: Refresh tree",
-        "category": "WAST"
+        "category": "WAST",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "wast.openSelected",
+        "title": "WAST: Open selected",
+        "category": "WAST",
+        "icon": "$(go-to-file)"
+      },
+      {
+        "command": "wast.clearSelection",
+        "title": "WAST: Clear selection",
+        "category": "WAST",
+        "icon": "$(clear-all)"
+      },
+      {
+        "command": "wast.toggleCallers",
+        "title": "WAST: Toggle +callers",
+        "category": "WAST",
+        "icon": "$(call-incoming)"
       }
     ],
     "menus": {
+      "view/title": [
+        {
+          "command": "wast.openSelected",
+          "when": "view == wastComponents",
+          "group": "navigation@1"
+        },
+        {
+          "command": "wast.clearSelection",
+          "when": "view == wastComponents",
+          "group": "navigation@2"
+        },
+        {
+          "command": "wast.refreshTree",
+          "when": "view == wastComponents",
+          "group": "navigation@3"
+        }
+      ],
       "view/item/context": [
         {
           "command": "wast.compileComponent",
           "when": "view == wastComponents && viewItem == wastComponent",
           "group": "wast"
+        },
+        {
+          "command": "wast.toggleCallers",
+          "when": "view == wastComponents && viewItem =~ /^wastFunc/",
+          "group": "inline"
         }
       ]
     },
@@ -75,7 +116,6 @@
   "scripts": {
     "bundle-components": "node scripts/bundle-components.mjs",
     "build": "pnpm bundle-components && tsc",
-    "seed-example": "node scripts/seed-example.mjs",
     "test": "node --test 'test/*.test.mjs'",
     "lint": "echo \"no linter configured yet\""
   },
