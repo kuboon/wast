@@ -13,6 +13,8 @@ jobs:
     runs-on: ubuntu-latest
     env:
       HOME: /root
+      # mise hits unauthenticated GitHub API rate limits without a token
+      GITHUB_TOKEN: ${{ github.token }}
     defaults:
       run:
         shell: bash
