@@ -85,31 +85,35 @@ fn type_defs_match(a: &WastTypeDef, b: &WastTypeDef) -> bool {
 }
 
 /// Deserialize a function body and collect all directly-called func UIDs.
-fn extract_call_refs(body: &[u8]) -> Vec<String> {
-    match wast_pattern_analyzer::deserialize_body(body) {
-        Ok(instructions) => {
-            let mut refs = Vec::new();
-            for instr in &instructions {
-                collect_calls(instr, &mut refs);
-            }
-            refs
-        }
-        Err(_) => vec![],
+/// A body that fails to deserialize is an error — silently treating it as
+/// "no calls" would let corrupt data slip through extract/merge validation.
+fn extract_call_refs(body: &[u8]) -> Result<Vec<String>, String> {
+    let instructions = wast_pattern_analyzer::deserialize_body(body)?;
+    let mut refs = Vec::new();
+    for instr in &instructions {
+        collect_calls(instr, &mut refs);
     }
+    Ok(refs)
 }
 
-/// Recursively walk an instruction tree and collect Call func_uid values.
-fn collect_calls(instr: &Instruction, out: &mut Vec<String>) {
+/// Like [`extract_call_refs`], but wraps deserialization failures in a
+/// `WastError` that names the offending func uid.
+fn call_refs_for(uid: &str, body: &[u8]) -> Result<Vec<String>, WastError> {
+    extract_call_refs(body)
+        .map_err(|e| err(format!("invalid body for func '{uid}': {e}"), Some(uid.to_string())))
+}
+
+/// Visit every *direct* child instruction of `instr`.
+///
+/// The match is EXHAUSTIVE on purpose (no wildcard arm): adding a new
+/// `Instruction` variant to the pattern-analyzer IR must fail compilation
+/// here so this walk is updated alongside the IR — a `_ => {}` arm was how
+/// nested calls inside newer nodes were silently missed before.
+fn for_each_child<'a>(instr: &'a Instruction, visit: &mut dyn FnMut(&'a Instruction)) {
     match instr {
-        Instruction::Call { func_uid, args } => {
-            out.push(func_uid.clone());
-            for (_, arg) in args {
-                collect_calls(arg, out);
-            }
-        }
         Instruction::Block { body, .. } | Instruction::Loop { body, .. } => {
             for child in body {
-                collect_calls(child, out);
+                visit(child);
             }
         }
         Instruction::If {
@@ -117,42 +121,48 @@ fn collect_calls(instr: &Instruction, out: &mut Vec<String>) {
             then_body,
             else_body,
         } => {
-            collect_calls(condition, out);
+            visit(condition);
             for child in then_body {
-                collect_calls(child, out);
+                visit(child);
             }
             for child in else_body {
-                collect_calls(child, out);
+                visit(child);
             }
         }
-        Instruction::BrIf { condition, .. } => {
-            collect_calls(condition, out);
+        Instruction::BrIf { condition, .. } => visit(condition),
+        Instruction::Br { .. } => {}
+        Instruction::Return => {}
+        Instruction::Call { args, .. } => {
+            for (_, arg) in args {
+                visit(arg);
+            }
         }
-        Instruction::LocalSet { value, .. } => {
-            collect_calls(value, out);
-        }
+        Instruction::LocalGet { .. } => {}
+        Instruction::LocalSet { value, .. } => visit(value),
+        Instruction::Const { .. } => {}
         Instruction::Compare { lhs, rhs, .. } | Instruction::Arithmetic { lhs, rhs, .. } => {
-            collect_calls(lhs, out);
-            collect_calls(rhs, out);
+            visit(lhs);
+            visit(rhs);
         }
         Instruction::Some { value }
         | Instruction::Ok { value }
         | Instruction::Err { value }
-        | Instruction::IsErr { value } => {
-            collect_calls(value, out);
-        }
+        | Instruction::IsErr { value }
+        | Instruction::StringLen { value }
+        | Instruction::ListLen { value } => visit(value),
+        Instruction::None => {}
         Instruction::MatchOption {
             value,
             some_body,
             none_body,
             ..
         } => {
-            collect_calls(value, out);
+            visit(value);
             for child in some_body {
-                collect_calls(child, out);
+                visit(child);
             }
             for child in none_body {
-                collect_calls(child, out);
+                visit(child);
             }
         }
         Instruction::MatchResult {
@@ -161,24 +171,113 @@ fn collect_calls(instr: &Instruction, out: &mut Vec<String>) {
             err_body,
             ..
         } => {
-            collect_calls(value, out);
+            visit(value);
             for child in ok_body {
-                collect_calls(child, out);
+                visit(child);
             }
             for child in err_body {
-                collect_calls(child, out);
+                visit(child);
             }
         }
-        // Leaf nodes: Br, Return, LocalGet, Const, None, Nop
-        _ => {}
+        Instruction::StringLiteral { .. } => {}
+        Instruction::ListLiteral { values } | Instruction::TupleLiteral { values } => {
+            for child in values {
+                visit(child);
+            }
+        }
+        Instruction::RecordGet { value, .. } | Instruction::TupleGet { value, .. } => visit(value),
+        Instruction::RecordLiteral { fields } => {
+            for (_, value) in fields {
+                visit(value);
+            }
+        }
+        Instruction::VariantCtor { value, .. } => {
+            if let Some(value) = value {
+                visit(value);
+            }
+        }
+        Instruction::MatchVariant { value, arms } => {
+            visit(value);
+            for arm in arms {
+                for child in &arm.body {
+                    visit(child);
+                }
+            }
+        }
+        Instruction::FlagsCtor { .. } => {}
+        Instruction::ResourceNew { rep, .. } => visit(rep),
+        Instruction::ResourceRep { handle, .. } | Instruction::ResourceDrop { handle, .. } => {
+            visit(handle)
+        }
+        Instruction::Nop => {}
     }
+}
+
+/// Depth-first walk over an instruction tree (the node itself, then all
+/// descendants via [`for_each_child`]).
+fn walk_instruction<'a>(instr: &'a Instruction, f: &mut dyn FnMut(&'a Instruction)) {
+    f(instr);
+    for_each_child(instr, &mut |child| walk_instruction(child, f));
+}
+
+/// Recursively walk an instruction tree and collect Call func_uid values.
+fn collect_calls(instr: &Instruction, out: &mut Vec<String>) {
+    walk_instruction(instr, &mut |node| {
+        if let Instruction::Call { func_uid, .. } = node {
+            out.push(func_uid.clone());
+        }
+    });
+}
+
+/// Collect every local-variable uid a function defines: its param uids plus
+/// body-local uids (LocalSet targets and match bindings).
+fn collect_local_uids(uid: &str, func: &WastFunc) -> Result<BTreeSet<String>, WastError> {
+    let mut locals: BTreeSet<String> = func.params.iter().map(|(name, _)| name.clone()).collect();
+    if let Some(ref body) = func.body {
+        let instructions = wast_pattern_analyzer::deserialize_body(body).map_err(|e| {
+            err(
+                format!("invalid body for func '{uid}': {e}"),
+                Some(uid.to_string()),
+            )
+        })?;
+        for instr in &instructions {
+            walk_instruction(instr, &mut |node| match node {
+                Instruction::LocalSet { uid, .. } => {
+                    locals.insert(uid.clone());
+                }
+                Instruction::MatchOption { some_binding, .. } => {
+                    locals.insert(some_binding.clone());
+                }
+                Instruction::MatchResult {
+                    ok_binding,
+                    err_binding,
+                    ..
+                } => {
+                    locals.insert(ok_binding.clone());
+                    locals.insert(err_binding.clone());
+                }
+                Instruction::MatchVariant { arms, .. } => {
+                    for arm in arms {
+                        if let Some(binding) = &arm.binding {
+                            locals.insert(binding.clone());
+                        }
+                    }
+                }
+                _ => {}
+            });
+        }
+    }
+    Ok(locals)
 }
 
 // ---------------------------------------------------------------------------
 // Extract
 // ---------------------------------------------------------------------------
 
-fn extract_impl(full: WastComponent, targets: Vec<ExtractTarget>) -> WastComponent {
+fn extract_impl(
+    full: WastComponent,
+    targets: Vec<ExtractTarget>,
+) -> Result<WastComponent, WastError> {
     let target_uids: BTreeSet<&str> = targets.iter().map(|t| t.sym.as_str()).collect();
     let include_caller_targets: BTreeSet<&str> = targets
         .iter()
@@ -201,7 +300,7 @@ fn extract_impl(full: WastComponent, targets: Vec<ExtractTarget>) -> WastCompone
                 continue;
             }
             if let Some(ref body) = func.body {
-                let calls = extract_call_refs(body);
+                let calls = call_refs_for(uid, body)?;
                 if calls
                     .iter()
                     .any(|c| include_caller_targets.contains(c.as_str()))
@@ -221,7 +320,7 @@ fn extract_impl(full: WastComponent, targets: Vec<ExtractTarget>) -> WastCompone
             continue;
         }
         if let Some(ref body) = func.body {
-            for called in extract_call_refs(body) {
+            for called in call_refs_for(uid, body)? {
                 if !owned.contains(called.as_str())
                     && full.funcs.iter().any(|(id, _)| *id == called)
                 {
@@ -258,6 +357,9 @@ fn extract_impl(full: WastComponent, targets: Vec<ExtractTarget>) -> WastCompone
     //    syntax plugin's type check.
     //  - pulled-in callee (signature-only stub) → `Imported(uid)`,
     //    `body = None`.
+    //  - exception: a target that is already `Imported` in `full` keeps its
+    //    `Imported` source — it has no body to edit and retagging it as
+    //    `Exported` would misrepresent its origin.
     let out_funcs: Vec<(String, WastFunc)> = full
         .funcs
         .iter()
@@ -268,7 +370,7 @@ fn extract_impl(full: WastComponent, targets: Vec<ExtractTarget>) -> WastCompone
                     .iter()
                     .any(|t| t.sym.as_str() == uid && !t.include_caller);
                 let mut out_func = func.clone();
-                if is_target_no_callers {
+                if is_target_no_callers && !matches!(func.source, FuncSource::Imported(_)) {
                     out_func.source = FuncSource::Exported(uid.clone());
                 }
                 (uid.clone(), out_func)
@@ -289,11 +391,19 @@ fn extract_impl(full: WastComponent, targets: Vec<ExtractTarget>) -> WastCompone
         .map(|(uid, td)| (uid.clone(), td.clone()))
         .collect();
 
-    // Step 5: Build output syms — include syms whose UID matches an included func or type
+    // Step 5: Build output syms — include syms whose UID matches an included
+    // func or type, plus local syms for the included funcs' params and
+    // body-locals (LocalSet targets, match bindings). Without the local-uid
+    // seeding, `syms.local` entries were silently dropped on extract.
+    let mut local_uids: BTreeSet<String> = BTreeSet::new();
+    for (uid, func) in &out_funcs {
+        local_uids.extend(collect_local_uids(uid, func)?);
+    }
     let all_included: BTreeSet<&str> = included_func_uids
         .iter()
         .map(|s| s.as_str())
         .chain(needed_types.iter().map(|s| s.as_str()))
+        .chain(local_uids.iter().map(|s| s.as_str()))
         .collect();
 
     let out_wit_syms: Vec<(String, String)> = full
@@ -320,7 +430,7 @@ fn extract_impl(full: WastComponent, targets: Vec<ExtractTarget>) -> WastCompone
         .cloned()
         .collect();
 
-    WastComponent {
+    Ok(WastComponent {
         funcs: out_funcs,
         types: out_types,
         syms: Syms {
@@ -328,7 +438,7 @@ fn extract_impl(full: WastComponent, targets: Vec<ExtractTarget>) -> WastCompone
             internal: out_internal,
             local: out_local,
         },
-    }
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -340,6 +450,55 @@ fn merge_impl(
     mut full: WastComponent,
 ) -> Result<WastComponent, Vec<WastError>> {
     let mut errors: Vec<WastError> = Vec::new();
+
+    // ── Caller revalidation (signature-change safety) ────────────────────
+    // When the partial changes an *Internal* func's signature, every caller
+    // of that func must be visible inside the partial (where the syntax
+    // plugin re-validated the call sites). A caller that only lives in
+    // `full` would silently keep passing arguments for the old signature, so
+    // scan the bodies of full's funcs that are NOT included in the partial
+    // and reject the merge if any of them call a sig-changed func.
+    let partial_uids: BTreeSet<&str> = partial.funcs.iter().map(|(uid, _)| uid.as_str()).collect();
+    let sig_changed: BTreeSet<&str> = partial
+        .funcs
+        .iter()
+        .filter(|(uid, pfunc)| {
+            matches!(&pfunc.source, FuncSource::Internal(_))
+                && full.funcs.iter().any(|(fid, ffunc)| {
+                    fid == uid
+                        && matches!(&ffunc.source, FuncSource::Internal(_))
+                        && !signatures_match(pfunc, ffunc)
+                })
+        })
+        .map(|(uid, _)| uid.as_str())
+        .collect();
+    if !sig_changed.is_empty() {
+        for (uid, ffunc) in &full.funcs {
+            if partial_uids.contains(uid.as_str()) {
+                continue;
+            }
+            if let Some(ref body) = ffunc.body {
+                match call_refs_for(uid, body) {
+                    Err(e) => errors.push(e),
+                    Ok(calls) => {
+                        for called in calls {
+                            if sig_changed.contains(called.as_str()) {
+                                errors.push(err(
+                                    format!(
+                                        "conflict: func '{uid}' calls '{called}', whose signature \
+                                         is changed by this partial, but '{uid}' is not included \
+                                         in the partial — re-extract with include-caller so all \
+                                         call sites are revalidated"
+                                    ),
+                                    Some(uid.clone()),
+                                ));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
 
     // Merge funcs.
     //
@@ -469,15 +628,20 @@ fn merge_impl(
             continue;
         }
         if let Some(ref body) = pfunc.body {
-            for called in extract_call_refs(body) {
-                if !all_func_uids.contains(called.as_str()) {
-                    errors.push(err(
-                        format!(
-                            "missing_dependency: func '{}' calls '{}' which is not found",
-                            uid, called
-                        ),
-                        Some(uid.clone()),
-                    ));
+            match call_refs_for(uid, body) {
+                Err(e) => errors.push(e),
+                Ok(calls) => {
+                    for called in calls {
+                        if !all_func_uids.contains(called.as_str()) {
+                            errors.push(err(
+                                format!(
+                                    "missing_dependency: func '{}' calls '{}' which is not found",
+                                    uid, called
+                                ),
+                                Some(uid.clone()),
+                            ));
+                        }
+                    }
                 }
             }
         }
@@ -521,7 +685,13 @@ fn merge_impl(
 
 impl bindings::exports::wast::core::partial_manager::Guest for Component {
     fn extract(full: WastComponent, targets: Vec<ExtractTarget>) -> WastComponent {
-        extract_impl(full, targets)
+        // The WIT contract for `extract` has no error channel; an undecodable
+        // body means `full` itself is corrupt, so trap with a clear message
+        // rather than silently producing a partial built from broken data.
+        match extract_impl(full, targets) {
+            Ok(component) => component,
+            Err(e) => panic!("extract failed: {}", e.message),
+        }
     }
 
     fn merge(partial: WastComponent, full: WastComponent) -> Result<WastComponent, Vec<WastError>> {
@@ -545,6 +715,11 @@ mod tests {
             internal: vec![],
             local: vec![],
         }
+    }
+
+    /// Test helper: extract that must succeed.
+    fn extract_ok(full: WastComponent, targets: Vec<ExtractTarget>) -> WastComponent {
+        extract_impl(full, targets).expect("extract should succeed")
     }
 
     fn mk_func(
@@ -607,7 +782,7 @@ mod tests {
                 local: vec![],
             },
         };
-        let result = extract_impl(
+        let result = extract_ok(
             full,
             vec![ExtractTarget {
                 sym: "f1".into(),
@@ -648,7 +823,7 @@ mod tests {
             ],
             syms: empty_syms(),
         };
-        let result = extract_impl(
+        let result = extract_ok(
             full,
             vec![ExtractTarget {
                 sym: "f1".into(),
@@ -689,7 +864,7 @@ mod tests {
             ],
             syms: empty_syms(),
         };
-        let result = extract_impl(
+        let result = extract_ok(
             full,
             vec![ExtractTarget {
                 sym: "f1".into(),
@@ -709,7 +884,7 @@ mod tests {
             types: vec![],
             syms: empty_syms(),
         };
-        let result = extract_impl(
+        let result = extract_ok(
             full,
             vec![ExtractTarget {
                 sym: "nope".into(),
@@ -727,7 +902,7 @@ mod tests {
             types: vec![],
             syms: empty_syms(),
         };
-        let result = extract_impl(
+        let result = extract_ok(
             full,
             vec![ExtractTarget {
                 sym: "f1".into(),
@@ -747,7 +922,7 @@ mod tests {
             types: vec![],
             syms: empty_syms(),
         };
-        let result = extract_impl(
+        let result = extract_ok(
             full,
             vec![ExtractTarget {
                 sym: "f1".into(),
@@ -776,7 +951,7 @@ mod tests {
             types: vec![],
             syms: empty_syms(),
         };
-        let result = extract_impl(
+        let result = extract_ok(
             full,
             vec![ExtractTarget {
                 sym: "f1".into(),
@@ -816,7 +991,7 @@ mod tests {
             types: vec![],
             syms: empty_syms(),
         };
-        let result = extract_impl(
+        let result = extract_ok(
             full,
             vec![
                 ExtractTarget {
@@ -849,7 +1024,7 @@ mod tests {
             types: vec![],
             syms: empty_syms(),
         };
-        let result = extract_impl(
+        let result = extract_ok(
             full,
             vec![
                 ExtractTarget {
@@ -1212,7 +1387,7 @@ mod tests {
             types: vec![],
             syms: empty_syms(),
         };
-        let result = extract_impl(
+        let result = extract_ok(
             full,
             vec![ExtractTarget {
                 sym: "f1".into(),
@@ -1252,7 +1427,7 @@ mod tests {
             types: vec![],
             syms: empty_syms(),
         };
-        let result = extract_impl(
+        let result = extract_ok(
             full,
             vec![ExtractTarget {
                 sym: "f1".into(),
@@ -1318,6 +1493,301 @@ mod tests {
         assert!(
             result.is_ok(),
             "should not error when called func exists in full"
+        );
+    }
+
+    // ── exhaustive body walk (nested calls) ──
+
+    #[test]
+    fn extract_finds_call_nested_in_record_literal() {
+        // A Call buried inside a RecordLiteral field must be discovered so
+        // the callee is pulled in as an Imported stub.
+        let body = wast_pattern_analyzer::serialize_body(&[Instruction::RecordLiteral {
+            fields: vec![(
+                "f".into(),
+                Instruction::Call {
+                    func_uid: "f2".into(),
+                    args: vec![],
+                },
+            )],
+        }]);
+        let mut f1 = mk_func("f1", FuncSource::Internal("f1".into()), &[], None);
+        f1.1.body = Some(body);
+        let full = WastComponent {
+            funcs: vec![
+                f1,
+                mk_func("f2", FuncSource::Internal("f2".into()), &[], None),
+            ],
+            types: vec![],
+            syms: empty_syms(),
+        };
+        let result = extract_ok(
+            full,
+            vec![ExtractTarget {
+                sym: "f1".into(),
+                include_caller: false,
+            }],
+        );
+        let f2 = result.funcs.iter().find(|(u, _)| u == "f2");
+        assert!(
+            f2.is_some(),
+            "callee nested in RecordLiteral must be included"
+        );
+        assert!(matches!(
+            &f2.unwrap().1.source,
+            FuncSource::Imported(_)
+        ));
+    }
+
+    #[test]
+    fn merge_missing_dependency_in_match_variant_arm() {
+        // A Call inside a MatchVariant arm body must be seen by the
+        // missing_dependency check.
+        let body = wast_pattern_analyzer::serialize_body(&[Instruction::MatchVariant {
+            value: Box::new(Instruction::LocalGet { uid: "v".into() }),
+            arms: vec![wast_pattern_analyzer::MatchArm {
+                case: "c".into(),
+                binding: Option::None,
+                body: vec![Instruction::Call {
+                    func_uid: "f_missing".into(),
+                    args: vec![],
+                }],
+            }],
+        }]);
+        let mut f1 = mk_func("f1", FuncSource::Internal("f1".into()), &[], None);
+        f1.1.body = Some(body);
+        let partial = WastComponent {
+            funcs: vec![f1],
+            types: vec![],
+            syms: empty_syms(),
+        };
+        let full = WastComponent {
+            funcs: vec![],
+            types: vec![],
+            syms: empty_syms(),
+        };
+        let errs = merge_impl(partial, full).unwrap_err();
+        assert!(
+            errs.iter()
+                .any(|e| e.message.contains("missing_dependency") && e.message.contains("f_missing")),
+            "call inside MatchVariant arm must be validated: {errs:?}"
+        );
+    }
+
+    // ── extract: syms.local preservation ──
+
+    #[test]
+    fn extract_preserves_local_syms_for_params_and_body_locals() {
+        let body = wast_pattern_analyzer::serialize_body(&[
+            Instruction::LocalSet {
+                uid: "loc_y".into(),
+                value: Box::new(Instruction::Const { value: 1 }),
+            },
+            Instruction::MatchOption {
+                value: Box::new(Instruction::LocalGet { uid: "p_x".into() }),
+                some_binding: "bind_z".into(),
+                some_body: vec![],
+                none_body: vec![],
+            },
+        ]);
+        let mut f1 = mk_func(
+            "f1",
+            FuncSource::Internal("f1".into()),
+            &[("p_x", "u32")],
+            None,
+        );
+        f1.1.body = Some(body);
+        let full = WastComponent {
+            funcs: vec![f1],
+            types: vec![],
+            syms: Syms {
+                wit_syms: vec![],
+                internal: vec![],
+                local: vec![
+                    SymEntry {
+                        uid: "p_x".into(),
+                        display_name: "x".into(),
+                    },
+                    SymEntry {
+                        uid: "loc_y".into(),
+                        display_name: "y".into(),
+                    },
+                    SymEntry {
+                        uid: "bind_z".into(),
+                        display_name: "z".into(),
+                    },
+                    SymEntry {
+                        uid: "unrelated".into(),
+                        display_name: "nope".into(),
+                    },
+                ],
+            },
+        };
+        let result = extract_ok(
+            full,
+            vec![ExtractTarget {
+                sym: "f1".into(),
+                include_caller: false,
+            }],
+        );
+        let local_uids: BTreeSet<&str> =
+            result.syms.local.iter().map(|e| e.uid.as_str()).collect();
+        assert!(local_uids.contains("p_x"), "param sym must survive");
+        assert!(local_uids.contains("loc_y"), "LocalSet sym must survive");
+        assert!(local_uids.contains("bind_z"), "match binding sym must survive");
+        assert!(
+            !local_uids.contains("unrelated"),
+            "unrelated local sym must be filtered"
+        );
+    }
+
+    // ── extract: Imported target keeps its source ──
+
+    #[test]
+    fn extract_imported_target_keeps_imported_source() {
+        let full = WastComponent {
+            funcs: vec![mk_func("f1", FuncSource::Imported("f1".into()), &[], None)],
+            types: vec![],
+            syms: empty_syms(),
+        };
+        let result = extract_ok(
+            full,
+            vec![ExtractTarget {
+                sym: "f1".into(),
+                include_caller: false,
+            }],
+        );
+        assert!(
+            matches!(&result.funcs[0].1.source, FuncSource::Imported(_)),
+            "Imported target must NOT be retagged as Exported"
+        );
+    }
+
+    // ── merge: caller revalidation on Internal signature change ──
+
+    #[test]
+    fn merge_internal_sig_change_with_hidden_caller_errors() {
+        let caller_body = mk_body_calling(&["f1"]);
+        let mut f2 = mk_func("f2", FuncSource::Internal("f2".into()), &[], None);
+        f2.1.body = Some(caller_body);
+        let full = WastComponent {
+            funcs: vec![
+                mk_func(
+                    "f1",
+                    FuncSource::Internal("f1".into()),
+                    &[("x", "i32")],
+                    None,
+                ),
+                f2,
+            ],
+            types: vec![],
+            syms: empty_syms(),
+        };
+        // Partial changes f1's signature but does NOT include caller f2.
+        let partial = WastComponent {
+            funcs: vec![mk_func(
+                "f1",
+                FuncSource::Internal("f1".into()),
+                &[("x", "bool")],
+                None,
+            )],
+            types: vec![],
+            syms: empty_syms(),
+        };
+        let errs = merge_impl(partial, full).unwrap_err();
+        assert!(
+            errs.iter()
+                .any(|e| e.message.contains("conflict") && e.message.contains("f2")),
+            "hidden caller must be reported: {errs:?}"
+        );
+    }
+
+    #[test]
+    fn merge_internal_sig_change_with_included_caller_ok() {
+        let caller_body = mk_body_calling(&["f1"]);
+        let mut full_f2 = mk_func("f2", FuncSource::Internal("f2".into()), &[], None);
+        full_f2.1.body = Some(caller_body.clone());
+        let full = WastComponent {
+            funcs: vec![
+                mk_func(
+                    "f1",
+                    FuncSource::Internal("f1".into()),
+                    &[("x", "i32")],
+                    None,
+                ),
+                full_f2,
+            ],
+            types: vec![],
+            syms: empty_syms(),
+        };
+        // Partial changes f1's signature AND includes the (revalidated)
+        // caller f2 — no conflict.
+        let mut partial_f2 = mk_func("f2", FuncSource::Internal("f2".into()), &[], None);
+        partial_f2.1.body = Some(caller_body);
+        let partial = WastComponent {
+            funcs: vec![
+                mk_func(
+                    "f1",
+                    FuncSource::Internal("f1".into()),
+                    &[("x", "bool")],
+                    None,
+                ),
+                partial_f2,
+            ],
+            types: vec![],
+            syms: empty_syms(),
+        };
+        assert!(merge_impl(partial, full).is_ok());
+    }
+
+    // ── corrupt body handling ──
+
+    #[test]
+    fn merge_corrupt_body_errors_with_func_uid() {
+        // 0xFF is an unsupported body-format version → deserialization fails
+        // and merge must surface an error naming the func, not silently
+        // treat the body as "no calls".
+        let mut f1 = mk_func("f1", FuncSource::Internal("f1".into()), &[], None);
+        f1.1.body = Some(vec![0xFF, 1, 2, 3]);
+        let partial = WastComponent {
+            funcs: vec![f1],
+            types: vec![],
+            syms: empty_syms(),
+        };
+        let full = WastComponent {
+            funcs: vec![],
+            types: vec![],
+            syms: empty_syms(),
+        };
+        let errs = merge_impl(partial, full).unwrap_err();
+        assert!(
+            errs.iter()
+                .any(|e| e.message.contains("f1") && e.message.contains("body")),
+            "corrupt body must produce an error naming the func: {errs:?}"
+        );
+    }
+
+    #[test]
+    fn extract_corrupt_body_errors() {
+        let mut f1 = mk_func("f1", FuncSource::Internal("f1".into()), &[], None);
+        f1.1.body = Some(vec![0xFF, 1, 2, 3]);
+        let full = WastComponent {
+            funcs: vec![f1],
+            types: vec![],
+            syms: empty_syms(),
+        };
+        let err = extract_impl(
+            full,
+            vec![ExtractTarget {
+                sym: "f1".into(),
+                include_caller: false,
+            }],
+        )
+        .unwrap_err();
+        assert!(
+            err.message.contains("f1"),
+            "extract error must name the func: {}",
+            err.message
         );
     }
 

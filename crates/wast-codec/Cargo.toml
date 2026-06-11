@@ -13,6 +13,13 @@ wit-bindgen-rt = { workspace = true }
 wast-types = { path = "../wast-types" }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
+# Same major version as crates/compiler. default-features = false: we only
+# need the text parser (`Resolve::push_str`), not wasm decoding, and the
+# codec is built for wasm32-wasip1 via cargo-component.
+wit-parser = { version = "0.219", default-features = false }
+
+[dev-dependencies]
+wast-pattern-analyzer = { path = "../syntax-plugin/internal/pattern-analyzer" }
 
 [package.metadata.component]
 package = "wast:codec"

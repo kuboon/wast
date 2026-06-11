@@ -127,6 +127,7 @@ fn identity() -> Demo {
         result_js: "u32",
         presets: &["[42]", "[0]", "[4294967295]"],
         db: WastDb {
+            version: 1,
             funcs: vec![WastFuncRow {
                 uid: "identity".into(),
                 func: WastFunc {
@@ -154,6 +155,7 @@ fn add() -> Demo {
         result_js: "u32",
         presets: &["[7, 35]", "[1, 1]", "[1000000, 2000000]"],
         db: WastDb {
+            version: 1,
             funcs: vec![WastFuncRow {
                 uid: "add".into(),
                 func: WastFunc {
@@ -183,6 +185,7 @@ fn is_zero() -> Demo {
         result_js: "bool",
         presets: &["[0]", "[1]", "[-5]"],
         db: WastDb {
+            version: 1,
             funcs: vec![WastFuncRow {
                 uid: "is_zero".into(),
                 func: WastFunc {
@@ -214,6 +217,7 @@ fn max_demo() -> Demo {
         result_js: "u32",
         presets: &["[3, 9]", "[42, 17]", "[5, 5]"],
         db: WastDb {
+            version: 1,
             funcs: vec![WastFuncRow {
                 uid: "max".into(),
                 func: WastFunc {
@@ -247,6 +251,7 @@ fn sum_loop() -> Demo {
         result_js: "u32",
         presets: &["[10]", "[0]", "[100]"],
         db: WastDb {
+            version: 1,
             funcs: vec![WastFuncRow {
                 uid: "sum".into(),
                 func: WastFunc {
@@ -320,6 +325,7 @@ fn unwrap_or() -> Demo {
         // jco lifts option<T> as `T | null` — no {tag,val} wrapper.
         presets: &["[42, 99]", "[null, 99]", "[0, 7]"],
         db: WastDb {
+            version: 1,
             funcs: vec![WastFuncRow {
                 uid: "unwrap_or".into(),
                 func: WastFunc {
@@ -361,6 +367,7 @@ fn mk_some() -> Demo {
         result_js: "option<u32>",
         presets: &["[42]", "[0]"],
         db: WastDb {
+            version: 1,
             funcs: vec![WastFuncRow {
                 uid: "mk_some".into(),
                 func: WastFunc {
@@ -396,6 +403,7 @@ fn strlen_demo() -> Demo {
         result_js: "u32",
         presets: &["[\"hello\"]", "[\"\"]", "[\"あいう\"]"],
         db: WastDb {
+            version: 1,
             funcs: vec![WastFuncRow {
                 uid: "strlen".into(),
                 func: WastFunc {
@@ -423,6 +431,7 @@ fn hello_literal() -> Demo {
         result_js: "u32",
         presets: &["[]"],
         db: WastDb {
+            version: 1,
             funcs: vec![WastFuncRow {
                 uid: "hello_len".into(),
                 func: WastFunc {
@@ -452,6 +461,7 @@ fn echo_string_demo() -> Demo {
         result_js: "string",
         presets: &["[\"hello\"]", "[\"日本語\"]", "[\"\"]"],
         db: WastDb {
+            version: 1,
             funcs: vec![WastFuncRow {
                 uid: "echo".into(),
                 func: WastFunc {
@@ -477,6 +487,7 @@ fn greeting() -> Demo {
         result_js: "string",
         presets: &["[]"],
         db: WastDb {
+            version: 1,
             funcs: vec![WastFuncRow {
                 uid: "greeting".into(),
                 func: WastFunc {
@@ -506,6 +517,7 @@ fn len_of_list() -> Demo {
         result_js: "u32",
         presets: &["[[]]", "[[1,2,3,4,5]]", "[[10,20,30]]"],
         db: WastDb {
+            version: 1,
             funcs: vec![WastFuncRow {
                 uid: "len_of".into(),
                 func: WastFunc {
@@ -539,6 +551,7 @@ fn echo_list_demo() -> Demo {
         result_js: "list<u32>",
         presets: &["[[1,2,3]]", "[[42, 999]]", "[[]]"],
         db: WastDb {
+            version: 1,
             funcs: vec![WastFuncRow {
                 uid: "echo_list".into(),
                 func: WastFunc {
@@ -572,6 +585,7 @@ fn get_x_demo() -> Demo {
         result_js: "u32",
         presets: &["[{\"x\":42,\"y\":7}]", "[{\"x\":100,\"y\":200}]"],
         db: WastDb {
+            version: 1,
             funcs: vec![WastFuncRow {
                 uid: "get_x".into(),
                 func: WastFunc {
@@ -600,6 +614,7 @@ fn make_point_demo() -> Demo {
         result_js: "record<point>",
         presets: &["[11, 22]", "[0, 0]"],
         db: WastDb {
+            version: 1,
             funcs: vec![WastFuncRow {
                 uid: "make_point".into(),
                 func: WastFunc {
@@ -646,6 +661,7 @@ fn sum_of_squares() -> Demo {
         result_js: "u32",
         presets: &["[3, 4]", "[5, 12]", "[0, 7]"],
         db: WastDb {
+            version: 1,
             funcs: vec![
                 WastFuncRow {
                     uid: "square".into(),
@@ -702,6 +718,7 @@ fn mk_shape() -> Demo {
         result_js: "variant<shape>",
         presets: &["[5]", "[0]", "[42]"],
         db: WastDb {
+            version: 1,
             funcs: vec![WastFuncRow {
                 uid: "mk_shape".into(),
                 func: WastFunc {
@@ -742,6 +759,7 @@ fn make_pair_demo() -> Demo {
         result_js: "tuple<u32, u32>",
         presets: &["[11, 22]", "[0, 0]"],
         db: WastDb {
+            version: 1,
             funcs: vec![WastFuncRow {
                 uid: "make_pair".into(),
                 func: WastFunc {
@@ -777,6 +795,7 @@ fn color_kind() -> Demo {
         result_js: "enum<color>",
         presets: &["[]"],
         db: WastDb {
+            version: 1,
             funcs: vec![WastFuncRow {
                 uid: "favorite".into(),
                 func: WastFunc {
@@ -811,6 +830,7 @@ fn perms_mask() -> Demo {
         result_js: "flags<perms>",
         presets: &["[]"],
         db: WastDb {
+            version: 1,
             funcs: vec![WastFuncRow {
                 uid: "perms".into(),
                 func: WastFunc {
@@ -850,6 +870,7 @@ fn wrap_greeting() -> Demo {
         result_js: "record<greeting>",
         presets: &["[\"hello\", 3]", "[\"\", 0]", "[\"日本語\", 42]"],
         db: WastDb {
+            version: 1,
             funcs: vec![WastFuncRow {
                 uid: "wrap".into(),
                 func: WastFunc {
@@ -891,6 +912,7 @@ fn numbers_literal() -> Demo {
         result_js: "list<u32>",
         presets: &["[]"],
         db: WastDb {
+            version: 1,
             funcs: vec![WastFuncRow {
                 uid: "numbers".into(),
                 func: WastFunc {
@@ -934,6 +956,7 @@ fn make_pair_from_points() -> Demo {
         result_js: "record<pair>",
         presets: &["[{\"x\":1,\"y\":2}, {\"x\":3,\"y\":4}]"],
         db: WastDb {
+            version: 1,
             funcs: vec![WastFuncRow {
                 uid: "make_pair".into(),
                 func: WastFunc {
