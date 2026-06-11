@@ -24,13 +24,13 @@ WastComponent <──wast-codec──> bytes(wast.json, world.wit, syms.en.yaml)
 
 | Module | Path | Status | Remaining |
 |---|---|---|---|
-| WIT contract | `wit/wast-core.wit` | **Done** | — |
+| WIT contract | `wit/wast-core.wit`, shared types in `wit-types/types.wit` | **Done** (`to-text` returns `result<string, list<wast-error>>`; `types` consolidated into `wast:types` used by core/codec/compiler) | — |
 | partial-manager | `crates/partial-manager/` | **Done** | — |
 | wast-codec | `crates/wast-codec/` | **Done** (JSON, row-oriented) | SQLite migration |
 | wast-types (shared serde types) | `crates/wast-types/` | **Done** | — |
 | compiler | `crates/compiler/` | **v0.35 done** (mixed-width disc-branch copy + f/i reinterpret + imported resource extras) | nested-compound case payload → kebab-case auto-norm |
 | pattern-analyzer | `crates/syntax-plugin/internal/pattern-analyzer/` | **Done** | — |
-| syntax-core (Rust scaffolding for plugins) | `crates/syntax-plugin/internal/syntax-core/` | **Done** (RenderContext + TypePrinter visitor) | optional: BodyPrinter visitor for Instruction rendering |
+| syntax-core (Rust scaffolding for plugins) | `crates/syntax-plugin/internal/syntax-core/` | **Done** (RenderContext + TypePrinter visitor; shared `wit_types` bindings + `convert` + `scaffold` from_text helpers) | optional: BodyPrinter visitor for Instruction rendering |
 | raw syntax | `crates/syntax-plugin/raw/` | **Done** | — |
 | ruby-like syntax | `crates/syntax-plugin/ruby-like/` | **Done** (preservation roundtrip) | recursive-descent body parser (currently bodies preserve via existing-body fallback rather than parse) |
 | ts-like syntax | `crates/syntax-plugin/ts-like/` | **Done** | — |

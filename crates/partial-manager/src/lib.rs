@@ -2,9 +2,10 @@
 #[rustfmt::skip]
 mod bindings;
 
-use bindings::wast::core::types::{
-    ExtractTarget, FuncSource, SymEntry, Syms, TypeSource, WastComponent, WastError, WastFunc,
-    WastTypeDef, WitType,
+use bindings::exports::wast::core::partial_manager::ExtractTarget;
+use bindings::wast::types::types::{
+    FuncSource, SymEntry, Syms, TypeSource, WastComponent, WastError, WastFunc, WastTypeDef,
+    WitType,
 };
 use std::collections::BTreeSet;
 use wast_pattern_analyzer::Instruction;
@@ -711,7 +712,8 @@ bindings::export!(Component with_types_in bindings);
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bindings::wast::core::types::*;
+    use bindings::exports::wast::core::partial_manager::ExtractTarget;
+    use bindings::wast::types::types::*;
 
     fn empty_syms() -> Syms {
         Syms {

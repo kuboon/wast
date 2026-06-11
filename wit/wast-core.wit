@@ -1,98 +1,19 @@
 package wast:core@0.1.0;
 
-interface types {
-  type type-uid = string;
-  type func-uid = string;
-  type wit-type-ref = type-uid;
+interface syntax-plugin {
+  use wast:types/types@0.1.0.{wast-component, wast-error};
 
-  variant wit-type {
-    primitive(primitive-type),
-    %option(wit-type-ref),
-    %result(tuple<wit-type-ref, wit-type-ref>),
-    %list(wit-type-ref),
-    %record(list<tuple<type-uid, wit-type-ref>>),
-    %variant(list<tuple<type-uid, option<wit-type-ref>>>),
-    %tuple(list<wit-type-ref>),
-    %enum(list<string>),
-    %flags(list<string>),
-    %resource,
-    %own(wit-type-ref),
-    %borrow(wit-type-ref),
-  }
+  to-text: func(component: wast-component) -> result<string, list<wast-error>>;
+  from-text: func(text: string, existing: wast-component) -> result<wast-component, list<wast-error>>;
+}
 
-  enum primitive-type {
-    %u32,
-    %u64,
-    %i32,
-    %i64,
-    %f32,
-    %f64,
-    %bool,
-    %char,
-    %string,
-  }
-
-  variant func-source {
-    internal(func-uid),
-    imported(func-uid),
-    exported(func-uid),
-  }
-
-  variant type-source {
-    internal(type-uid),
-    imported(type-uid),
-    exported(type-uid),
-  }
-
-  record wast-func {
-    source: func-source,
-    params: list<tuple<func-uid, wit-type-ref>>,
-    %result: option<wit-type-ref>,
-    body: option<list<u8>>,
-  }
-
-  record wast-type-def {
-    source: type-source,
-    definition: wit-type,
-  }
-
-  record sym-entry {
-    uid: string,
-    display-name: string,
-  }
-
-  record syms {
-    wit-syms: list<tuple<string, string>>,
-    internal: list<sym-entry>,
-    local: list<sym-entry>,
-  }
-
-  record wast-component {
-    funcs: list<tuple<func-uid, wast-func>>,
-    types: list<tuple<type-uid, wast-type-def>>,
-    syms: syms,
-  }
-
-  record wast-error {
-    message: string,
-    location: option<string>,
-  }
+interface partial-manager {
+  use wast:types/types@0.1.0.{func-uid, wast-component, wast-error};
 
   record extract-target {
     sym: func-uid,
     include-caller: bool,
   }
-}
-
-interface syntax-plugin {
-  use types.{wast-component, wast-error};
-
-  to-text: func(component: wast-component) -> string;
-  from-text: func(text: string, existing: wast-component) -> result<wast-component, list<wast-error>>;
-}
-
-interface partial-manager {
-  use types.{wast-component, wast-error, extract-target};
 
   extract: func(full: wast-component, targets: list<extract-target>) -> wast-component;
   merge: func(partial: wast-component, full: wast-component) -> result<wast-component, list<wast-error>>;

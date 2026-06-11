@@ -27,3 +27,6 @@ package = "wast:codec"
 [package.metadata.component.target]
 path = "../../wit-codec"
 world = "codec-world"
+
+[package.metadata.component.target.dependencies]
+"wast:types" = { path = "../../wit-types" }

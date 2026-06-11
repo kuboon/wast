@@ -2286,7 +2286,9 @@ dependencies = [
 name = "wast-syntax-core"
 version = "0.1.0"
 dependencies = [
+ "wast-pattern-analyzer",
  "wast-types",
+ "wit-bindgen 0.55.0",
 ]
 
 [[package]]
@@ -2294,6 +2296,7 @@ name = "wast-syntax-raw"
 version = "0.1.0"
 dependencies = [
  "wast-pattern-analyzer",
+ "wast-syntax-core",
  "wit-bindgen 0.55.0",
  "wit-bindgen-rt",
 ]

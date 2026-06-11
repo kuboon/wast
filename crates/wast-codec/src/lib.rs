@@ -1,13 +1,15 @@
 wit_bindgen::generate!({
-    path: "../../wit-codec",
-    world: "codec-world",
+    path: ["../../wit-types", "../../wit-codec"],
+    world: "wast:codec/codec-world",
+    generate_all,
 });
 
 mod syms_yaml;
 mod wit_parser;
 
-use crate::wast::codec::types::{
-    ComponentFiles, FuncSource as BindingFuncSource, PrimitiveType as BindingPrimitiveType,
+use crate::exports::wast::codec::codec::ComponentFiles;
+use crate::wast::types::types::{
+    FuncSource as BindingFuncSource, PrimitiveType as BindingPrimitiveType,
     SymEntry as BindingSymEntry, Syms as BindingSyms, TypeSource as BindingTypeSource,
     WastComponent, WastError, WastFunc as BindingWastFunc, WastTypeDef as BindingWastTypeDef,
     WitType as BindingWitType,
