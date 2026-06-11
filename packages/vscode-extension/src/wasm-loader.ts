@@ -7,6 +7,7 @@
  * path — out of scope for Phase 1.
  */
 
+import { pathToFileURL } from "node:url";
 import * as vscode from "vscode";
 import type {
   WastComponent,
@@ -84,6 +85,16 @@ export function loadRuntime(context: vscode.ExtensionContext): Promise<LoadedRun
   return cached;
 }
 
+/** Dynamic-import a module addressed by a filesystem URI.
+ *
+ *  `import()` specifiers must be URLs, not raw paths: a Windows fsPath like
+ *  `c:\ext\dist\codec.js` would be mis-parsed (drive letter as scheme,
+ *  backslashes unescaped). `pathToFileURL` produces a proper `file://` URL
+ *  on every platform. */
+function importModule<T>(uri: vscode.Uri): Promise<T> {
+  return import(pathToFileURL(uri.fsPath).href) as Promise<T>;
+}
+
 async function doLoad(context: vscode.ExtensionContext): Promise<LoadedRuntime> {
   const componentsRoot = vscode.Uri.joinPath(
     context.extensionUri,
@@ -94,7 +105,7 @@ async function doLoad(context: vscode.ExtensionContext): Promise<LoadedRuntime> 
   const syntaxPlugins = {} as Record<SyntaxPluginId, SyntaxPlugin>;
   for (const id of PLUGIN_IDS) {
     const modUri = vscode.Uri.joinPath(componentsRoot, id, pluginModuleName(id));
-    const m: { syntaxPlugin: SyntaxPlugin } = await import(modUri.fsPath);
+    const m = await importModule<{ syntaxPlugin: SyntaxPlugin }>(modUri);
     syntaxPlugins[id] = m.syntaxPlugin;
   }
 
@@ -103,13 +114,13 @@ async function doLoad(context: vscode.ExtensionContext): Promise<LoadedRuntime> 
     "partial-manager",
     "partial_manager.js",
   );
-  const pm: { partialManager: PartialManager } = await import(pmUri.fsPath);
+  const pm = await importModule<{ partialManager: PartialManager }>(pmUri);
 
   const codecUri = vscode.Uri.joinPath(componentsRoot, "codec", "codec.js");
-  const cdc: { codec: Codec } = await import(codecUri.fsPath);
+  const cdc = await importModule<{ codec: Codec }>(codecUri);
 
   const compilerUri = vscode.Uri.joinPath(componentsRoot, "compiler", "compiler.js");
-  const cmp: { compiler: Compiler } = await import(compilerUri.fsPath);
+  const cmp = await importModule<{ compiler: Compiler }>(compilerUri);
 
   return {
     syntaxPlugins,

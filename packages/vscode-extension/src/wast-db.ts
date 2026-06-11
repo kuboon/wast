@@ -9,6 +9,7 @@
  */
 
 import * as vscode from "vscode";
+import { validateWastDb } from "./wast-schema.js";
 
 const DECODER = new TextDecoder("utf-8");
 
@@ -63,6 +64,8 @@ export type WastFuncRow = { uid: string } & WastFunc;
 export type WastTypeRow = { uid: string } & WastTypeDef;
 
 export interface WastDb {
+  /** Schema version — required, must equal `WAST_DB_CURRENT_VERSION`. */
+  version: number;
   funcs: WastFuncRow[];
   types: WastTypeRow[];
 }
@@ -175,9 +178,22 @@ export async function readWorldWit(dirUri: vscode.Uri): Promise<Uint8Array | nul
   }
 }
 
+/** Last validation error shown per wast.json path — avoids re-toasting the
+ *  same message every time the tree re-scans or the fs provider re-reads. */
+const reportedSchemaErrors = new Map<string, string>();
+
+function reportSchemaError(dbUri: vscode.Uri, error: string): void {
+  const key = dbUri.toString();
+  if (reportedSchemaErrors.get(key) === error) return;
+  reportedSchemaErrors.set(key, error);
+  void vscode.window.showErrorMessage(`WAST: ${dbUri.fsPath}: ${error}`);
+}
+
 /**
  * Read a component directory's wast.json + syms.<lang>.yaml.
- * Returns null if wast.json is missing or unparseable.
+ * Returns null if wast.json is missing, unparseable, or fails schema
+ * validation (including an unsupported `version`) — validation failures
+ * are surfaced to the user via an error toast (deduplicated per file).
  */
 export async function readComponent(
   dirUri: vscode.Uri,
@@ -187,12 +203,21 @@ export async function readComponent(
   const dbText = await readUtf8(dbUri);
   if (dbText === null) return null;
 
-  let db: WastDb;
+  let parsed: unknown;
   try {
-    db = JSON.parse(dbText) as WastDb;
-  } catch {
+    parsed = JSON.parse(dbText);
+  } catch (err) {
+    reportSchemaError(dbUri, `invalid JSON — ${err instanceof Error ? err.message : err}`);
     return null;
   }
+
+  const validation = validateWastDb(parsed);
+  if (!validation.ok) {
+    reportSchemaError(dbUri, validation.error);
+    return null;
+  }
+  reportedSchemaErrors.delete(dbUri.toString());
+  const db = parsed as WastDb;
 
   let syms: SymsData = { wit: new Map(), internal: new Map(), local: new Map() };
   const symsUri = vscode.Uri.joinPath(dirUri, `syms.${lang}.yaml`);

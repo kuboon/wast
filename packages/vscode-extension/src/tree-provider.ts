@@ -142,8 +142,11 @@ export class WastTreeProvider implements vscode.TreeDataProvider<WastTreeItem> {
   readonly onDidChangeTreeData = this._onDidChangeTreeData.event;
 
   private components: LoadedComponent[] = [];
-  /** Initial scan promise so consumers can await readiness if needed. */
-  private scanPromise: Promise<void> = Promise.resolve();
+  /** Tail of the scan chain. Scans are serialized: each new scan waits for
+   *  the previous one to settle, so two concurrent `refresh()` calls (e.g.
+   *  watcher change + create events firing together) can't interleave their
+   *  directory walks and produce a duplicated / partial component list. */
+  private scanPromise: Promise<void>;
 
   constructor(public readonly selection: SelectionState = new SelectionState()) {
     this.scanPromise = this.scanWorkspace();
@@ -152,10 +155,16 @@ export class WastTreeProvider implements vscode.TreeDataProvider<WastTreeItem> {
     this.selection.onChange(() => this._onDidChangeTreeData.fire());
   }
 
-  /** Re-scan the workspace; resolves once components have been re-loaded. */
+  /** Re-scan the workspace; resolves once components have been re-loaded.
+   *  Queued behind any scan already in flight (see `scanPromise`). */
   async refresh(): Promise<void> {
-    this.scanPromise = this.scanWorkspace();
-    await this.scanPromise;
+    const queued = this.scanPromise
+      .catch(() => {
+        // A failed earlier scan must not poison the chain.
+      })
+      .then(() => this.scanWorkspace());
+    this.scanPromise = queued;
+    await queued;
     this._onDidChangeTreeData.fire();
   }
 
@@ -197,20 +206,29 @@ export class WastTreeProvider implements vscode.TreeDataProvider<WastTreeItem> {
   // ---------------------------------------------------------------------------
 
   private async scanWorkspace(): Promise<void> {
-    this.components = [];
+    // Collect into a local array and swap it in atomically at the end —
+    // mutating `this.components` mid-walk would let getChildren observe a
+    // half-built list (and a racing scan append duplicates).
+    const found: LoadedComponent[] = [];
     const lang = vscode.workspace.getConfiguration("wast").get<string>("symsLanguage", "en");
     const folders = vscode.workspace.workspaceFolders;
-    if (!folders) return;
-
-    for (const folder of folders) {
-      await this.scanDir(folder.uri, lang, 0);
+    if (folders) {
+      for (const folder of folders) {
+        await this.scanDir(folder.uri, lang, 0, found);
+      }
     }
+    this.components = found;
   }
 
   /** Recursively walk subtree until either a `wast.json` is found (component
    * leaf, no further descent) or the depth limit is hit. Skips `.git` and
    * `node_modules` for sanity. */
-  private async scanDir(dirUri: vscode.Uri, lang: string, depth: number): Promise<void> {
+  private async scanDir(
+    dirUri: vscode.Uri,
+    lang: string,
+    depth: number,
+    found: LoadedComponent[],
+  ): Promise<void> {
     if (depth > 5) return;
 
     const dbUri = vscode.Uri.joinPath(dirUri, "wast.json");
@@ -224,7 +242,7 @@ export class WastTreeProvider implements vscode.TreeDataProvider<WastTreeItem> {
 
     if (dbExists) {
       const component = await readComponent(dirUri, lang);
-      if (component) this.components.push(component);
+      if (component) found.push(component);
       return;
     }
 
@@ -238,7 +256,7 @@ export class WastTreeProvider implements vscode.TreeDataProvider<WastTreeItem> {
     for (const [name, kind] of entries) {
       if (kind !== vscode.FileType.Directory) continue;
       if (name.startsWith(".") || name === "node_modules") continue;
-      await this.scanDir(vscode.Uri.joinPath(dirUri, name), lang, depth + 1);
+      await this.scanDir(vscode.Uri.joinPath(dirUri, name), lang, depth + 1, found);
     }
   }
 }
