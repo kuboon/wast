@@ -1,5 +1,5 @@
 [toolchain]
 # Pinned for reproducible builds (CI and devcontainer); bump deliberately.
 channel = "1.96.0"
-components = ["rust-std-wasm32-wasip1", "cargo", "rustfmt"]
+components = ["rustfmt"]
 targets = ["wasm32-wasip1"]
