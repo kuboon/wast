@@ -228,17 +228,12 @@ fn concise_with_detail(context: &str, err: &str, what: &str, generated: &str) ->
     let first = err.lines().next().unwrap_or("");
     let truncated: String = if generated.len() > MAX_DETAIL {
         let cut: String = generated.chars().take(MAX_DETAIL).collect();
-        format!(
-            "{cut}\n…[truncated; {} bytes total]",
-            generated.len()
-        )
+        format!("{cut}\n…[truncated; {} bytes total]", generated.len())
     } else {
         generated.to_string()
     };
     let rest: String = if err.lines().count() > 1 {
-        format!(
-            "--- full error ---\n{err}\n--- generated {what} ---\n{truncated}"
-        )
+        format!("--- full error ---\n{err}\n--- generated {what} ---\n{truncated}")
     } else {
         format!("--- generated {what} ---\n{truncated}")
     };
@@ -809,7 +804,9 @@ fn format_resource_member(
                 .func
                 .params
                 .iter()
-                .map(|(n, ty)| format_wit_type(ty, type_map).map(|t| format!("{}: {t}", wit_name(n))))
+                .map(|(n, ty)| {
+                    format_wit_type(ty, type_map).map(|t| format!("{}: {t}", wit_name(n)))
+                })
                 .collect::<Result<Vec<_>, _>>()?
                 .join(", ");
             Ok(format!("    constructor({params_wit});\n"))
@@ -822,7 +819,9 @@ fn format_resource_member(
             })?;
             let params_wit = rest_params
                 .iter()
-                .map(|(n, ty)| format_wit_type(ty, type_map).map(|t| format!("{}: {t}", wit_name(n))))
+                .map(|(n, ty)| {
+                    format_wit_type(ty, type_map).map(|t| format!("{}: {t}", wit_name(n)))
+                })
                 .collect::<Result<Vec<_>, _>>()?
                 .join(", ");
             let result_wit = match row.func.result.as_deref() {
@@ -840,7 +839,9 @@ fn format_resource_member(
                 .func
                 .params
                 .iter()
-                .map(|(n, ty)| format_wit_type(ty, type_map).map(|t| format!("{}: {t}", wit_name(n))))
+                .map(|(n, ty)| {
+                    format_wit_type(ty, type_map).map(|t| format!("{}: {t}", wit_name(n)))
+                })
                 .collect::<Result<Vec<_>, _>>()?
                 .join(", ");
             let result_wit = match row.func.result.as_deref() {

@@ -559,9 +559,7 @@ fn validate_const_range(value: i64, ty: &str) -> Result<(), CompileError> {
         "u32" => (0..=u32::MAX as i64).contains(&value),
         "i32" => (i32::MIN as i64..=i32::MAX as i64).contains(&value),
         "bool" => (0..=1).contains(&value),
-        "char" => {
-            (0..=0x10FFFF).contains(&value) && !(0xD800..=0xDFFF).contains(&value)
-        }
+        "char" => (0..=0x10FFFF).contains(&value) && !(0xD800..=0xDFFF).contains(&value),
         // i64/u64 (and anything that reached an i64 slot) take the literal
         // as-is.
         _ => true,

@@ -99,8 +99,12 @@ fn extract_call_refs(body: &[u8]) -> Result<Vec<String>, String> {
 /// Like [`extract_call_refs`], but wraps deserialization failures in a
 /// `WastError` that names the offending func uid.
 fn call_refs_for(uid: &str, body: &[u8]) -> Result<Vec<String>, WastError> {
-    extract_call_refs(body)
-        .map_err(|e| err(format!("invalid body for func '{uid}': {e}"), Some(uid.to_string())))
+    extract_call_refs(body).map_err(|e| {
+        err(
+            format!("invalid body for func '{uid}': {e}"),
+            Some(uid.to_string()),
+        )
+    })
 }
 
 /// Visit every *direct* child instruction of `instr`.
@@ -1533,10 +1537,7 @@ mod tests {
             f2.is_some(),
             "callee nested in RecordLiteral must be included"
         );
-        assert!(matches!(
-            &f2.unwrap().1.source,
-            FuncSource::Imported(_)
-        ));
+        assert!(matches!(&f2.unwrap().1.source, FuncSource::Imported(_)));
     }
 
     #[test]
@@ -1568,8 +1569,9 @@ mod tests {
         };
         let errs = merge_impl(partial, full).unwrap_err();
         assert!(
-            errs.iter()
-                .any(|e| e.message.contains("missing_dependency") && e.message.contains("f_missing")),
+            errs.iter().any(
+                |e| e.message.contains("missing_dependency") && e.message.contains("f_missing")
+            ),
             "call inside MatchVariant arm must be validated: {errs:?}"
         );
     }
@@ -1630,11 +1632,13 @@ mod tests {
                 include_caller: false,
             }],
         );
-        let local_uids: BTreeSet<&str> =
-            result.syms.local.iter().map(|e| e.uid.as_str()).collect();
+        let local_uids: BTreeSet<&str> = result.syms.local.iter().map(|e| e.uid.as_str()).collect();
         assert!(local_uids.contains("p_x"), "param sym must survive");
         assert!(local_uids.contains("loc_y"), "LocalSet sym must survive");
-        assert!(local_uids.contains("bind_z"), "match binding sym must survive");
+        assert!(
+            local_uids.contains("bind_z"),
+            "match binding sym must survive"
+        );
         assert!(
             !local_uids.contains("unrelated"),
             "unrelated local sym must be filtered"

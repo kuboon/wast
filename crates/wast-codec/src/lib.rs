@@ -419,9 +419,7 @@ fn expand_ref<'a>(type_ref: &str, table: &TypeTable<'a>) -> Option<std::borrow::
     if let Some(p) = prim {
         return Some(std::borrow::Cow::Owned(WitType::Primitive(p)));
     }
-    table
-        .get(type_ref)
-        .map(|t| std::borrow::Cow::Borrowed(*t))
+    table.get(type_ref).map(|t| std::borrow::Cow::Borrowed(*t))
 }
 
 /// Recursion guard for [`type_refs_equiv`]. WIT types cannot be recursive,
@@ -613,11 +611,8 @@ impl exports::wast::codec::codec::Guest for Component {
         // (`import f: func(); export f: func();`). Row uids must be unique,
         // so imported funcs that collide with an export get a `#import`
         // suffix on their uid; the `source` keeps the true wit path.
-        let export_paths: std::collections::BTreeSet<&str> = parsed
-            .exports
-            .iter()
-            .map(|f| f.wit_path.as_str())
-            .collect();
+        let export_paths: std::collections::BTreeSet<&str> =
+            parsed.exports.iter().map(|f| f.wit_path.as_str()).collect();
 
         for f in &parsed.imports {
             let uid = if export_paths.contains(f.wit_path.as_str()) {
@@ -850,7 +845,9 @@ world bot {
     fn read_rejects_wrong_version() {
         let error = <Component as Guest>::read(db_json(Some("2")), None).expect_err("version 2");
         assert!(
-            error.message.contains("unsupported wast.json schema version 2"),
+            error
+                .message
+                .contains("unsupported wast.json schema version 2"),
             "{}",
             error.message
         );
@@ -1020,7 +1017,11 @@ world w {
         };
         let error = validate_against_parsed_world(&sample_parsed_world(), &db)
             .expect_err("expected validation error");
-        assert!(error.message.contains("param name mismatch"), "{}", error.message);
+        assert!(
+            error.message.contains("param name mismatch"),
+            "{}",
+            error.message
+        );
     }
 
     #[test]

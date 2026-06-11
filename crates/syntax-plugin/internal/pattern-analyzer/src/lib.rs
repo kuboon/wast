@@ -466,8 +466,9 @@ pub fn serialize_body(instructions: &[Instruction]) -> Vec<u8> {
 /// than [`BODY_FORMAT_VERSION`] is rejected with a clear error.
 pub fn deserialize_body(data: &[u8]) -> Result<Vec<Instruction>, String> {
     match data.split_first() {
-        Option::None => Err("body deserialization failed: empty body (missing format-version byte)"
-            .to_string()),
+        Option::None => {
+            Err("body deserialization failed: empty body (missing format-version byte)".to_string())
+        }
         Some((&BODY_FORMAT_VERSION, payload)) => {
             postcard::from_bytes(payload).map_err(|e| format!("body deserialization failed: {e}"))
         }
@@ -964,7 +965,7 @@ mod tests {
             24, 1, 1, 102, 19, 2, 104, 105, // RecordLiteral { f: "hi" }
             26, 7, 1, 118, 1, 1, 99, 1, 1, 98, 1, 5, // MatchVariant v { c(b) => return }
             32, 1, 114, 7, 1, 104, // ResourceDrop r, handle = h
-            33, // Nop
+            33,  // Nop
         ];
         assert_eq!(bytes, expected);
         assert_eq!(deserialize_body(&bytes).unwrap(), body);

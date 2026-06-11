@@ -415,7 +415,10 @@ world file-manager-world {
         assert_eq!(parsed.world_name, "file-manager-world");
         assert_eq!(parsed.exports.len(), 1);
         assert_eq!(parsed.exports[0].wit_path, "file-manager/read");
-        assert_eq!(parsed.exports[0].result.as_deref(), Some("result<string,string>"));
+        assert_eq!(
+            parsed.exports[0].result.as_deref(),
+            Some("result<string,string>")
+        );
         // The anonymous result row must be materialized.
         assert!(
             parsed
