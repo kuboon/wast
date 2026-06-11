@@ -147,7 +147,7 @@ logic in their language. The pieces to port are small:
 | Build uid → name maps from `syms` | iterate three lists, fold into hash maps | ~25 |
 | Resolve a type uid to text | look up in `types`, recurse via `format_wit_type`, fallback to display name then uid | ~10 |
 | Walk a `wit-type` and format it | `match` on the variant, recurse into refs, defer lexical choices to a printer | ~30 |
-| Decode a body to an `Instruction` tree | `wast-pattern-analyzer` uses `postcard` (a serde-compatible binary format) — implementations exist in every major language | varies |
+| Decode a body to an `Instruction` tree | body bytes are a single format-version byte (currently `1`) followed by the `postcard` encoding of the instruction list (`wast-pattern-analyzer`'s `serialize_body` / `deserialize_body`); `postcard` is a serde-compatible binary format with implementations in every major language | varies |
 
 A Go or TinyGo plugin would lift the `wast-syntax-core` patterns into
 Go interfaces; a JS plugin into class methods; etc. None of this changes
@@ -166,8 +166,9 @@ are first-class in the language.
 ## Checklist for shipping a Rust plugin
 
 1. New crate at `crates/syntax-plugin/<name>/` with the standard
-   `Cargo.toml` (cdylib, depends on `wit-bindgen`, `wast-types`,
-   `wast-syntax-core`, `wast-pattern-analyzer`, with
+   `Cargo.toml` (cdylib, depends on `wit-bindgen`, `wit-bindgen-rt`,
+   `wast-syntax-core`, `wast-pattern-analyzer` — plus `wast-types` if you
+   use the serde-native shapes directly — with
    `package.metadata.component.target` pointing at `wit/` plus the
    `wast:types` target dependency and the `bindings.with` remap shown
    above, and world `syntax-plugin-world`).
@@ -176,8 +177,8 @@ are first-class in the language.
    - `to_text` / `from_text` Guest impl wiring `RenderContext` to
      `func_to_text` and `parse_func` helpers.
    - Body rendering and parsing — surface-specific.
-4. Tests under `#[cfg(test)] mod tests` — at minimum: signature
+3. Tests under `#[cfg(test)] mod tests` — at minimum: signature
    round-trip, body-preservation round-trip, sym-rename round-trip.
-5. If you want the demo to render your plugin, add an entry to
-   `packages/web-demo/scripts/build-plugins.mjs` and the `PLUGINS`
-   array in `packages/web-demo/src/main.js`.
+4. If you want the demo to render your plugin, add an entry to the
+   `targets` array in `packages/web-demo/scripts/build-plugins.mjs` and
+   the `PLUGINS` array in `packages/web-demo/src/main.js`.

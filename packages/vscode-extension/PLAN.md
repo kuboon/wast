@@ -1,38 +1,15 @@
-# VS Code Extension — WAST Editor Integration
+# VS Code Extension — Future Work
 
-## Purpose
+Current state (TreeView, editable `wast://` virtual docs with the
+`from_text` → `merge` → `codec.write` save flow, fs.watch refresh, compile
+command) is described in AGENTS.md ("VS Code extension status").
 
-VS Code extension providing TreeView navigation, virtual document editing, LSP diagnostics, and save-merge workflow for wast components.
-Should be work on vscode.dev web.
+## Remaining
 
-## Key Features
-
-- TreeView panel listing wast.json components and their functions
-- Virtual documents (`wast://` scheme) for editing partial components
-- Real-time LSP diagnostics via syntax-plugin from-text
-- Save flow: from-text → merge → write to wast.json
-- fs.watch for external wast.json change detection
-- Session conflict handling
-
-## User Settings
-
-- `wast.symsLanguage` — syms language suffix (e.g., "ja")
-- `wast.syntaxPlugin` — syntax plugin variant (e.g., "ruby-like")
-
-## Dependencies
-
-- Wasm component runtime
-- All wasm components (syntax-plugin, partial-manager, wast-codec)
-
-## Status
-
-Core features implemented (direct file access, no wasm runtime):
-- TreeView panel listing wast.json components and their functions
-- Virtual documents (`wast://` scheme) for viewing component functions
-- fs.watch for external wast.json change detection with TreeView refresh
-- Settings for symsLanguage and syntaxPlugin
-
-Not yet implemented (requires wasm component runtime):
-- Real-time LSP diagnostics via syntax-plugin from-text
-- Save flow: from-text -> merge -> write to wast.json
-- Session conflict handling
+- **Phase 4: vscode-web compatibility** — resolve jco's bare-specifier imports
+  (`@bytecodealliance/preview2-shim/*`) under the web extension host
+  (currently relies on Node's `node_modules` resolution), so the extension
+  works on vscode.dev.
+- **LSP diagnostics** — real-time `from_text` validation while editing.
+- **Session conflict handling** — detect/resolve concurrent edits to the same
+  `wast.json` (e.g. external change while a virtual doc is dirty).
