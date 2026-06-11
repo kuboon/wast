@@ -28,6 +28,7 @@ fn load(db: &WastDb) -> (Engine, Component) {
 fn ok_u32_in_result_u32_u64() {
     // mk-ok(x: u32) -> result<u32, u64>  { Ok(x) }
     let db = WastDb {
+        version: WastDb::CURRENT_VERSION,
         funcs: vec![WastFuncRow {
             uid: "mk_ok".into(),
             func: WastFunc {
@@ -66,6 +67,7 @@ fn ok_u32_in_result_u32_u64() {
 fn err_u64_in_result_u32_u64() {
     // mk-err(e: u64) -> result<u32, u64>  { Err(e) }
     let db = WastDb {
+        version: WastDb::CURRENT_VERSION,
         funcs: vec![WastFuncRow {
             uid: "mk_err".into(),
             func: WastFunc {
@@ -129,6 +131,7 @@ fn variant_hetero_construct_all_cases() {
     // be a literal VariantCtor, no branching. Run three distinct funcs:
     // mk-small(x: u32) → small(x); mk-big(x: u64) → big(x); mk-unit() → unit.
     let db = WastDb {
+        version: WastDb::CURRENT_VERSION,
         funcs: vec![
             WastFuncRow {
                 uid: "mk_small".into(),

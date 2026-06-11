@@ -70,6 +70,7 @@ fn build_db() -> WastDb {
     //   ResourceDrop(counter, h)
     //   v
     WastDb {
+        version: WastDb::CURRENT_VERSION,
         funcs: vec![
             WastFuncRow {
                 uid: "ctr_ctor".into(),

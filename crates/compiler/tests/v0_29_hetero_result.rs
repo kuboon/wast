@@ -29,6 +29,7 @@ fn load(db: &WastDb) -> (Engine, Component) {
 ///     }
 fn db_classify() -> WastDb {
     WastDb {
+        version: WastDb::CURRENT_VERSION,
         funcs: vec![WastFuncRow {
             uid: "classify".into(),
             func: WastFunc {

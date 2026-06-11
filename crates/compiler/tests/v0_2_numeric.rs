@@ -24,6 +24,7 @@ fn single_export(
     body: Vec<Instruction>,
 ) -> WastDb {
     WastDb {
+        version: WastDb::CURRENT_VERSION,
         funcs: vec![WastFuncRow {
             uid: name.into(),
             func: WastFunc {

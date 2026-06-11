@@ -21,6 +21,7 @@ fn load(db: &WastDb) -> (Engine, Component) {
 fn list_u32_len() {
     // len-of(xs: list<u32>) -> u32  { ListLen(xs) }
     let db = WastDb {
+        version: WastDb::CURRENT_VERSION,
         funcs: vec![WastFuncRow {
             uid: "len_of".into(),
             func: WastFunc {
@@ -67,6 +68,7 @@ fn echo_list_passthrough() {
     // Host writes element bytes into our memory via cabi_realloc before
     // the call; we just copy (ptr, len) to the return area.
     let db = WastDb {
+        version: WastDb::CURRENT_VERSION,
         funcs: vec![WastFuncRow {
             uid: "echo_list".into(),
             func: WastFunc {
@@ -110,6 +112,7 @@ fn echo_list_passthrough() {
 fn list_i64_roundtrip() {
     // Wider element type — verify 8-byte-aligned list<i64> round-trips.
     let db = WastDb {
+        version: WastDb::CURRENT_VERSION,
         funcs: vec![WastFuncRow {
             uid: "echo_i64".into(),
             func: WastFunc {

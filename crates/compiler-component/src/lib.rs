@@ -113,7 +113,7 @@ fn component_to_db(c: WastComponent) -> WastDb {
             def: type_def(td),
         })
         .collect();
-    WastDb { funcs, types }
+    WastDb::new(funcs, types)
 }
 
 // ---------------------------------------------------------------------------

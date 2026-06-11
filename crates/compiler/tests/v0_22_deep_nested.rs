@@ -44,6 +44,7 @@ fn record_of_record() {
     // make-outer(a: u32, b: u32, c: u32) -> outer
     //   { inner: { x: a, y: b }, count: c }
     let db = WastDb {
+        version: WastDb::CURRENT_VERSION,
         funcs: vec![WastFuncRow {
             uid: "make_outer".into(),
             func: WastFunc {
@@ -129,6 +130,7 @@ fn record_with_option_field() {
     // some-case(n: u32) -> maybe  { { flag: Some(n), count: 1 } }
     // none-case()         -> maybe  { { flag: None, count: 2 } }
     let db = WastDb {
+        version: WastDb::CURRENT_VERSION,
         funcs: vec![
             WastFuncRow {
                 uid: "some_case".into(),
@@ -223,6 +225,7 @@ fn record_with_option_field() {
 fn tuple_with_record_and_string() {
     // pair() -> tuple<point, string>  { ({x:1, y:2}, "hello") }
     let db = WastDb {
+        version: WastDb::CURRENT_VERSION,
         funcs: vec![WastFuncRow {
             uid: "pair".into(),
             func: WastFunc {
@@ -287,6 +290,7 @@ fn tuple_with_record_and_string() {
 fn list_of_records() {
     // points() -> list<point>  { [{x:1,y:2}, {x:3,y:4}, {x:5,y:6}] }
     let db = WastDb {
+        version: WastDb::CURRENT_VERSION,
         funcs: vec![WastFuncRow {
             uid: "points".into(),
             func: WastFunc {

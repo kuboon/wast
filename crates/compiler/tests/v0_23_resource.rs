@@ -41,6 +41,7 @@ fn counter_db() -> WastDb {
     //   export generated-iface;  // resource counter { ctor; get; zero; } + [dtor]
     // }
     WastDb {
+        version: WastDb::CURRENT_VERSION,
         funcs: vec![
             WastFuncRow {
                 uid: "record_drop".into(),

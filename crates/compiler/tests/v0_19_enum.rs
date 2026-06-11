@@ -42,6 +42,7 @@ fn color_type_row() -> WastTypeRow {
 fn enum_constructor() {
     // mk-green() -> color  { green }
     let db = WastDb {
+        version: WastDb::CURRENT_VERSION,
         funcs: vec![WastFuncRow {
             uid: "mk_green".into(),
             func: WastFunc {
@@ -73,6 +74,7 @@ fn enum_match_dispatch() {
     // brightness(c: color) -> u32
     //   match c { red => 1, green => 2, blue => 4 }
     let db = WastDb {
+        version: WastDb::CURRENT_VERSION,
         funcs: vec![WastFuncRow {
             uid: "brightness".into(),
             func: WastFunc {

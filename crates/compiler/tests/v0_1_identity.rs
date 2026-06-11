@@ -19,6 +19,7 @@ fn identity_db() -> WastDb {
         Instruction::Return,
     ]);
     WastDb {
+        version: WastDb::CURRENT_VERSION,
         funcs: vec![WastFuncRow {
             uid: "identity".into(),
             func: WastFunc {

@@ -20,6 +20,7 @@ fn load(db: &WastDb) -> (Engine, Component) {
 fn return_some_u32() {
     // mk-some(x: u32) -> option<u32>  { Some(x) }
     let db = WastDb {
+        version: WastDb::CURRENT_VERSION,
         funcs: vec![WastFuncRow {
             uid: "mk_some".into(),
             func: WastFunc {
@@ -55,6 +56,7 @@ fn return_some_u32() {
 fn return_none() {
     // mk-none() -> option<u32>  { None }
     let db = WastDb {
+        version: WastDb::CURRENT_VERSION,
         funcs: vec![WastFuncRow {
             uid: "mk_none".into(),
             func: WastFunc {
@@ -88,6 +90,7 @@ fn return_none() {
 fn return_ok_u32() {
     // mk-ok(x: u32) -> result<u32, u32>  { Ok(x) }
     let db = WastDb {
+        version: WastDb::CURRENT_VERSION,
         funcs: vec![WastFuncRow {
             uid: "mk_ok".into(),
             func: WastFunc {
@@ -123,6 +126,7 @@ fn return_ok_u32() {
 fn return_err_u32() {
     // mk-err(x: u32) -> result<u32, u32>  { Err(x) }
     let db = WastDb {
+        version: WastDb::CURRENT_VERSION,
         funcs: vec![WastFuncRow {
             uid: "mk_err".into(),
             func: WastFunc {

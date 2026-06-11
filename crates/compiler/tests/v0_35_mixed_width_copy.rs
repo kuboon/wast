@@ -40,6 +40,7 @@ fn record_with_result_u64_string_field_from_param() {
     //     ok=u64:    u64@8 (8 bytes)
     //     err=string: ptr@8, len@12 (each 4 bytes)
     let db = WastDb {
+        version: WastDb::CURRENT_VERSION,
         funcs: vec![WastFuncRow {
             uid: "wrap".into(),
             func: WastFunc {

@@ -34,6 +34,7 @@ struct OptStrRec {
 fn record_with_option_string_field_from_param() {
     // wrap(o: option<string>, c: u32) -> r  { { msg: o, count: c } }
     let db = WastDb {
+        version: WastDb::CURRENT_VERSION,
         funcs: vec![WastFuncRow {
             uid: "wrap".into(),
             func: WastFunc {
@@ -122,6 +123,7 @@ struct OptListRec {
 #[test]
 fn record_with_option_list_field_from_param() {
     let db = WastDb {
+        version: WastDb::CURRENT_VERSION,
         funcs: vec![WastFuncRow {
             uid: "wrap_list".into(),
             func: WastFunc {

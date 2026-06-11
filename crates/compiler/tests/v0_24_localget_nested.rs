@@ -45,6 +45,7 @@ struct Pair {
 fn record_field_from_record_param() {
     // make-pair(p1: point, p2: point) -> pair  { { a: p1, b: p2 } }
     let db = WastDb {
+        version: WastDb::CURRENT_VERSION,
         funcs: vec![WastFuncRow {
             uid: "make_pair".into(),
             func: WastFunc {
@@ -111,6 +112,7 @@ fn record_field_from_record_param() {
 fn tuple_element_from_record_param() {
     // with-weight(p: point, w: u32) -> tuple<point, u32>  { (p, w) }
     let db = WastDb {
+        version: WastDb::CURRENT_VERSION,
         funcs: vec![WastFuncRow {
             uid: "with_weight".into(),
             func: WastFunc {
@@ -184,6 +186,7 @@ struct Outer {
 fn record_field_with_string_and_list_from_param() {
     // wrap(inner: inner, count: u32) -> outer  { { inner: inner, count: count } }
     let db = WastDb {
+        version: WastDb::CURRENT_VERSION,
         funcs: vec![WastFuncRow {
             uid: "wrap".into(),
             func: WastFunc {

@@ -63,8 +63,11 @@ fn parse_resource_member(name: &str) -> Option<(&str, &str)> {
 }
 
 /// Memory + `cabi_realloc` infrastructure injected into every non-empty core
-/// module. Bump allocator over a single memory page; `memory.copy` handles
-/// realloc-grow. `heap_end` initial value is set past any string literals.
+/// module. Bump allocator starting at one memory page; allocations past the
+/// current memory size grow the memory by however many 64KiB pages are
+/// needed (trapping with `unreachable` only if `memory.grow` fails).
+/// `memory.copy` handles realloc-grow. `heap_end` initial value is set past
+/// any string literals.
 fn cabi_realloc_wat(heap_end_init: usize) -> String {
     format!(
         r#"  (memory (export "memory") 1)
@@ -72,7 +75,7 @@ fn cabi_realloc_wat(heap_end_init: usize) -> String {
   (func $cabi_realloc (export "cabi_realloc")
     (param $orig_ptr i32) (param $orig_size i32) (param $align i32) (param $new_size i32)
     (result i32)
-    (local $aligned i32)
+    (local $aligned i32) (local $end i32)
     global.get $heap_end
     local.get $align
     i32.const 1
@@ -87,7 +90,33 @@ fn cabi_realloc_wat(heap_end_init: usize) -> String {
     local.tee $aligned
     local.get $new_size
     i32.add
+    local.tee $end
     global.set $heap_end
+    ;; Grow memory when the new heap end passes the current memory size.
+    block $fits
+      local.get $end
+      memory.size
+      i32.const 16
+      i32.shl
+      i32.le_u
+      br_if $fits
+      ;; pages needed = ceil((end - cur_size_bytes) / 64KiB)
+      local.get $end
+      memory.size
+      i32.const 16
+      i32.shl
+      i32.sub
+      i32.const 65535
+      i32.add
+      i32.const 16
+      i32.shr_u
+      memory.grow
+      i32.const -1
+      i32.eq
+      if
+        unreachable
+      end
+    end
     local.get $orig_size
     if
       local.get $aligned
@@ -136,6 +165,8 @@ pub fn compile_component(db: &WastDb, _world_wit: &str) -> Result<Vec<u8>, Compi
             .map_err(|e| CompileError::WatParse(e.to_string()));
     }
 
+    validate_db(db)?;
+
     let func_map: FuncMap = db
         .funcs
         .iter()
@@ -149,17 +180,31 @@ pub fn compile_component(db: &WastDb, _world_wit: &str) -> Result<Vec<u8>, Compi
 
     let literal_table = collect_literal_table(db)?;
     let core_wat = emit_core_module(db, &func_map, &type_map, &literal_table)?;
-    let mut core_bytes = wat::parse_str(&core_wat)
-        .map_err(|e| CompileError::WatParse(format!("{e}\n--- WAT ---\n{core_wat}")))?;
+    let mut core_bytes = wat::parse_str(&core_wat).map_err(|e| {
+        CompileError::WatParse(concise_with_detail(
+            "generated core module",
+            &e.to_string(),
+            "WAT",
+            &core_wat,
+        ))
+    })?;
 
     let wit_src = synthesize_world(db, &type_map)?;
     let mut resolve = Resolve::default();
     let pkg = resolve.push_str("generated.wit", &wit_src).map_err(|e| {
-        CompileError::InvalidInput(format!("wit parse failed: {e}\n--- WIT ---\n{wit_src}"))
+        CompileError::InvalidInput(concise_with_detail(
+            "synthesized WIT world parse",
+            &format!("{e:#}"),
+            "WIT",
+            &wit_src,
+        ))
     })?;
     let world = resolve.select_world(pkg, None).map_err(|e| {
-        CompileError::InvalidInput(format!(
-            "wit select_world failed: {e}\n--- WIT ---\n{wit_src}"
+        CompileError::InvalidInput(concise_with_detail(
+            "wit select_world",
+            &format!("{e:#}"),
+            "WIT",
+            &wit_src,
         ))
     })?;
 
@@ -172,6 +217,128 @@ pub fn compile_component(db: &WastDb, _world_wit: &str) -> Result<Vec<u8>, Compi
         .map_err(|e| CompileError::InvalidInput(format!("ComponentEncoder::module failed: {e}")))?
         .encode()
         .map_err(|e| CompileError::InvalidInput(format!("ComponentEncoder::encode failed: {e}")))
+}
+
+/// Build an error message whose **first line** (the part `CompileError`'s
+/// `Display` shows) is concise — a short context tag plus the first line of
+/// the underlying error — while the generated WAT/WIT text follows truncated
+/// on subsequent lines (visible via `Debug` / `CompileError::detail()`).
+fn concise_with_detail(context: &str, err: &str, what: &str, generated: &str) -> String {
+    const MAX_DETAIL: usize = 2000;
+    let first = err.lines().next().unwrap_or("");
+    let truncated: String = if generated.len() > MAX_DETAIL {
+        let cut: String = generated.chars().take(MAX_DETAIL).collect();
+        format!(
+            "{cut}\n…[truncated; {} bytes total]",
+            generated.len()
+        )
+    } else {
+        generated.to_string()
+    };
+    let rest: String = if err.lines().count() > 1 {
+        format!(
+            "--- full error ---\n{err}\n--- generated {what} ---\n{truncated}"
+        )
+    } else {
+        format!("--- generated {what} ---\n{truncated}")
+    };
+    format!("{first} [{context}]\n{rest}")
+}
+
+/// Reject identifiers containing characters outside the safe set up front,
+/// so user-controlled names can never inject WAT or WIT syntax (quotes,
+/// backslashes, newlines, …) into the generated text. Validation-and-reject
+/// is deliberately preferred over escaping.
+fn validate_db(db: &WastDb) -> Result<(), CompileError> {
+    for row in &db.funcs {
+        let name = source_key(&row.func.source);
+        check_func_name(name)?;
+        for (pname, pty) in &row.func.params {
+            check_ident(pname, "param name")?;
+            check_ident(pty, "type reference")?;
+        }
+        if let Some(r) = &row.func.result {
+            check_ident(r, "type reference")?;
+        }
+    }
+    for row in &db.types {
+        check_ident(&row.uid, "type uid")?;
+        match &row.def.definition {
+            wast_types::WitType::Record(fields) => {
+                for (fname, ftype) in fields {
+                    check_ident(fname, "record field name")?;
+                    check_ident(ftype, "type reference")?;
+                }
+            }
+            wast_types::WitType::Variant(cases) => {
+                for (cname, payload) in cases {
+                    check_ident(cname, "variant case name")?;
+                    if let Some(p) = payload {
+                        check_ident(p, "type reference")?;
+                    }
+                }
+            }
+            wast_types::WitType::Enum(cases) => {
+                for cname in cases {
+                    check_ident(cname, "enum case name")?;
+                }
+            }
+            wast_types::WitType::Flags(names) => {
+                for fname in names {
+                    check_ident(fname, "flag name")?;
+                }
+            }
+            wast_types::WitType::List(t)
+            | wast_types::WitType::Option(t)
+            | wast_types::WitType::Own(t)
+            | wast_types::WitType::Borrow(t) => check_ident(t, "type reference")?,
+            wast_types::WitType::Result(ok, err) => {
+                check_ident(ok, "type reference")?;
+                check_ident(err, "type reference")?;
+            }
+            wast_types::WitType::Tuple(elems) => {
+                for t in elems {
+                    check_ident(t, "type reference")?;
+                }
+            }
+            wast_types::WitType::Primitive(_) | wast_types::WitType::Resource => {}
+        }
+    }
+    Ok(())
+}
+
+/// Plain identifiers (type uids, field/case/flag names, param names): ASCII
+/// alphanumerics plus `-` and `_`.
+fn check_ident(name: &str, what: &str) -> Result<(), CompileError> {
+    let ok = !name.is_empty()
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_');
+    if ok {
+        Ok(())
+    } else {
+        Err(CompileError::InvalidInput(format!(
+            "{what} {name:?} contains characters outside the allowed set \
+             (ASCII alphanumerics, '-', '_')"
+        )))
+    }
+}
+
+/// Func names additionally allow `[`, `]`, `.` for the resource-member
+/// conventions (`[constructor]R`, `[method]R.op`, `[static]R.op`, `[dtor]R`).
+fn check_func_name(name: &str) -> Result<(), CompileError> {
+    let ok = !name.is_empty()
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '[' | ']' | '.'));
+    if ok {
+        Ok(())
+    } else {
+        Err(CompileError::InvalidInput(format!(
+            "func name {name:?} contains characters outside the allowed set \
+             (ASCII alphanumerics, '-', '_', '[', ']', '.')"
+        )))
+    }
 }
 
 /// Emit a single `(module …)` containing memory + realloc + imports +
@@ -207,13 +374,15 @@ fn emit_core_module(
 
         // Resource-member imports ([constructor]R, [method]R.op, [static]R.op)
         // come from the imported interface's module, not "$root". Regular
-        // top-level imports still use "$root".
+        // top-level imports still use "$root". The import *field* name must
+        // match the (kebab-normalized) WIT name.
         let module = match parse_resource_member(name) {
             Some((r, _)) if is_imported_resource(r) => IMPORTED_RESOURCE_IFACE_PATH.to_string(),
             _ => "$root".to_string(),
         };
+        let field = wit_name(name);
         imports.push_str(&format!(
-            "  (import \"{module}\" \"{name}\" (func ${mangled} {core_params} {core_result}))\n"
+            "  (import \"{module}\" \"{field}\" (func ${mangled} {core_params} {core_result}))\n"
         ));
     }
 
@@ -230,8 +399,8 @@ fn emit_core_module(
         if !matches!(row.def.definition, wast_types::WitType::Resource) {
             continue;
         }
-        let r = &row.uid;
-        let m = mangle(r);
+        let r = wit_name(&row.uid);
+        let m = mangle(&row.uid);
         if matches!(row.def.source, wast_types::TypeSource::Imported(_)) {
             let module = IMPORTED_RESOURCE_IFACE_PATH;
             imports.push_str(&format!(
@@ -363,11 +532,12 @@ fn emit_core_func(
         FuncSource::Exported(n) => {
             // Resource member exports (`[constructor]R`, `[method]R.op`,
             // `[static]R.op`) must be qualified with the interface path for
-            // wit-component to match them to the WIT world.
+            // wit-component to match them to the WIT world. Export names use
+            // the kebab-normalized form so they match the synthesized WIT.
             let n = if is_resource_member_export(n) {
-                format!("{EXPORTED_RESOURCE_IFACE_PATH}#{n}")
+                format!("{EXPORTED_RESOURCE_IFACE_PATH}#{}", wit_name(n))
             } else {
-                n.clone()
+                wit_name(n)
             };
             format!(" (export \"{n}\")")
         }
@@ -463,8 +633,11 @@ fn synthesize_world(db: &WastDb, type_map: &TypeMap) -> Result<String, CompileEr
     out.push_str("package wast:generated;\n\n");
 
     // Split resources by source: imported resources live in a separate
-    // interface from the rest. Named primitives (record/variant/enum/flags)
-    // + any exported resource stay in `generated-iface`.
+    // interface from the rest. Named structural types (record/variant/enum/
+    // flags) are collected separately so they can be placed wherever the
+    // resource situation requires (see below).
+    let mut named_type_decls = String::new();
+    let mut named_type_names: Vec<String> = Vec::new();
     let mut exported_iface_body = String::new();
     let mut imported_iface_body = String::new();
     let mut has_exported_resources = false;
@@ -476,42 +649,56 @@ fn synthesize_world(db: &WastDb, type_map: &TypeMap) -> Result<String, CompileEr
                 let fields_wit = fields
                     .iter()
                     .map(|(fname, ftype)| {
-                        format_wit_type(ftype, type_map).map(|t| format!("{fname}: {t}"))
+                        format_wit_type(ftype, type_map)
+                            .map(|t| format!("{}: {t}", wit_name(fname)))
                     })
                     .collect::<Result<Vec<_>, _>>()?
                     .join(", ");
-                exported_iface_body.push_str(&format!(
+                named_type_decls.push_str(&format!(
                     "    record {name} {{ {fields_wit} }}\n",
                     name = wit_name(&row.uid)
                 ));
+                named_type_names.push(wit_name(&row.uid));
             }
             wast_types::WitType::Variant(cases) => {
                 let cases_wit = cases
                     .iter()
                     .map(|(cname, payload)| match payload {
-                        Some(ty) => format_wit_type(ty, type_map).map(|t| format!("{cname}({t})")),
-                        None => Ok(cname.clone()),
+                        Some(ty) => format_wit_type(ty, type_map)
+                            .map(|t| format!("{}({t})", wit_name(cname))),
+                        None => Ok(wit_name(cname)),
                     })
                     .collect::<Result<Vec<_>, _>>()?
                     .join(", ");
-                exported_iface_body.push_str(&format!(
+                named_type_decls.push_str(&format!(
                     "    variant {name} {{ {cases_wit} }}\n",
                     name = wit_name(&row.uid)
                 ));
+                named_type_names.push(wit_name(&row.uid));
             }
             wast_types::WitType::Enum(cases) => {
-                let cases_wit = cases.join(", ");
-                exported_iface_body.push_str(&format!(
+                let cases_wit = cases
+                    .iter()
+                    .map(|c| wit_name(c))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                named_type_decls.push_str(&format!(
                     "    enum {name} {{ {cases_wit} }}\n",
                     name = wit_name(&row.uid)
                 ));
+                named_type_names.push(wit_name(&row.uid));
             }
             wast_types::WitType::Flags(names) => {
-                let names_wit = names.join(", ");
-                exported_iface_body.push_str(&format!(
+                let names_wit = names
+                    .iter()
+                    .map(|n| wit_name(n))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                named_type_decls.push_str(&format!(
                     "    flags {name} {{ {names_wit} }}\n",
                     name = wit_name(&row.uid)
                 ));
+                named_type_names.push(wit_name(&row.uid));
             }
             wast_types::WitType::Resource => {
                 let imported = matches!(row.def.source, wast_types::TypeSource::Imported(_));
@@ -538,18 +725,18 @@ fn synthesize_world(db: &WastDb, type_map: &TypeMap) -> Result<String, CompileEr
         }
     }
 
-    // Interfaces must be declared at the package (outside the world) in WIT.
-    if has_exported_resources || !exported_iface_body.is_empty() && has_imported_resources {
-        // When there are imported resources, put all named types inside
-        // generated-iface so the world stays consistent. Exported-resource
-        // case also uses this path.
-    }
-
     let use_exported_iface = has_exported_resources;
     let use_imported_iface = has_imported_resources;
 
+    // Interfaces must be declared at the package level (outside the world)
+    // in WIT. When an exported resource forces a `generated-iface`, named
+    // structural types are declared inside it too, and the world pulls them
+    // in via `use generated-iface.{…};` so world-level func signatures can
+    // still reference them by name. Without exported resources the legacy
+    // world-level declarations are kept (re-indented below).
     if use_exported_iface {
         out.push_str("interface generated-iface {\n");
+        out.push_str(&named_type_decls);
         out.push_str(&exported_iface_body);
         out.push_str("}\n\n");
     }
@@ -561,10 +748,17 @@ fn synthesize_world(db: &WastDb, type_map: &TypeMap) -> Result<String, CompileEr
 
     out.push_str("world generated {\n");
     if use_exported_iface {
+        if !named_type_names.is_empty() {
+            out.push_str(&format!(
+                "  use generated-iface.{{{}}};\n",
+                named_type_names.join(", ")
+            ));
+        }
         out.push_str("  export generated-iface;\n");
     } else {
-        // Legacy world-level type decls (no resources) — re-indent 4→2.
-        for line in exported_iface_body.lines() {
+        // Legacy world-level type decls (no exported resources) — re-indent
+        // 4→2.
+        for line in named_type_decls.lines() {
             if line.is_empty() {
                 out.push('\n');
             } else if let Some(stripped) = line.strip_prefix("    ") {
@@ -582,11 +776,11 @@ fn synthesize_world(db: &WastDb, type_map: &TypeMap) -> Result<String, CompileEr
         match &row.func.source {
             FuncSource::Exported(name) => {
                 let sig = format_wit_sig(&row.func.params, row.func.result.as_deref(), type_map)?;
-                out.push_str(&format!("  export {name}: {sig};\n"));
+                out.push_str(&format!("  export {}: {sig};\n", wit_name(name)));
             }
             FuncSource::Imported(name) => {
                 let sig = format_wit_sig(&row.func.params, row.func.result.as_deref(), type_map)?;
-                out.push_str(&format!("  import {name}: {sig};\n"));
+                out.push_str(&format!("  import {}: {sig};\n", wit_name(name)));
             }
             FuncSource::Internal(_) => {}
         }
@@ -615,7 +809,7 @@ fn format_resource_member(
                 .func
                 .params
                 .iter()
-                .map(|(n, ty)| format_wit_type(ty, type_map).map(|t| format!("{n}: {t}")))
+                .map(|(n, ty)| format_wit_type(ty, type_map).map(|t| format!("{}: {t}", wit_name(n))))
                 .collect::<Result<Vec<_>, _>>()?
                 .join(", ");
             Ok(format!("    constructor({params_wit});\n"))
@@ -628,22 +822,7 @@ fn format_resource_member(
             })?;
             let params_wit = rest_params
                 .iter()
-                .map(|(n, ty)| format_wit_type(ty, type_map).map(|t| format!("{n}: {t}")))
-                .collect::<Result<Vec<_>, _>>()?
-                .join(", ");
-            let result_wit = match row.func.result.as_deref() {
-                Some(ty) => format!(" -> {}", format_wit_type(ty, type_map)?),
-                None => String::new(),
-            };
-            Ok(format!("    {op}: func({params_wit}){result_wit};\n"))
-        }
-        ResourceMember::Static { op, row } => {
-            // `op: static func(params) -> result;` — no implicit self.
-            let params_wit = row
-                .func
-                .params
-                .iter()
-                .map(|(n, ty)| format_wit_type(ty, type_map).map(|t| format!("{n}: {t}")))
+                .map(|(n, ty)| format_wit_type(ty, type_map).map(|t| format!("{}: {t}", wit_name(n))))
                 .collect::<Result<Vec<_>, _>>()?
                 .join(", ");
             let result_wit = match row.func.result.as_deref() {
@@ -651,7 +830,26 @@ fn format_resource_member(
                 None => String::new(),
             };
             Ok(format!(
-                "    {op}: static func({params_wit}){result_wit};\n"
+                "    {}: func({params_wit}){result_wit};\n",
+                wit_name(op)
+            ))
+        }
+        ResourceMember::Static { op, row } => {
+            // `op: static func(params) -> result;` — no implicit self.
+            let params_wit = row
+                .func
+                .params
+                .iter()
+                .map(|(n, ty)| format_wit_type(ty, type_map).map(|t| format!("{}: {t}", wit_name(n))))
+                .collect::<Result<Vec<_>, _>>()?
+                .join(", ");
+            let result_wit = match row.func.result.as_deref() {
+                Some(ty) => format!(" -> {}", format_wit_type(ty, type_map)?),
+                None => String::new(),
+            };
+            Ok(format!(
+                "    {}: static func({params_wit}){result_wit};\n",
+                wit_name(op)
             ))
         }
     }
@@ -669,7 +867,7 @@ fn format_wit_sig(
 ) -> Result<String, CompileError> {
     let params_wit = params
         .iter()
-        .map(|(n, ty)| format_wit_type(ty, type_map).map(|t| format!("{n}: {t}")))
+        .map(|(n, ty)| format_wit_type(ty, type_map).map(|t| format!("{}: {t}", wit_name(n))))
         .collect::<Result<Vec<_>, _>>()?
         .join(", ");
     let result_wit = match result {
@@ -730,10 +928,22 @@ fn source_key(s: &FuncSource) -> &str {
 /// Turn an arbitrary WIT name (which may contain `-` or other chars WAT
 /// identifiers disallow) into a WAT-safe identifier for internal references.
 /// Export *strings* keep the original kebab form so WIT matching works.
+///
+/// The mapping is **injective**: ASCII alphanumerics pass through, every
+/// other byte (including `_` itself) becomes `_XX` (lowercase hex). This
+/// guarantees distinct names like `a-b` (`a_2db`) and `a_b` (`a_5fb`) never
+/// collide as WAT identifiers — and since `_` is always escaped, compiler-
+/// generated suffixes such as `__new` / `__drop` cannot clash with mangled
+/// user names either.
 pub(crate) fn mangle(name: &str) -> String {
-    name.chars()
-        .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
-        .collect()
+    let mut out = String::with_capacity(name.len());
+    for b in name.bytes() {
+        match b {
+            b'0'..=b'9' | b'A'..=b'Z' | b'a'..=b'z' => out.push(b as char),
+            other => out.push_str(&format!("_{other:02x}")),
+        }
+    }
+    out
 }
 
 // ---------------------------------------------------------------------------
