@@ -23,6 +23,7 @@ fn echo_string_passthrough() {
     // cabi_realloc before the call). We just copy (ptr, len) into the
     // return area — no memcpy needed.
     let db = WastDb {
+        version: WastDb::CURRENT_VERSION,
         funcs: vec![WastFuncRow {
             uid: "echo".into(),
             func: WastFunc {
@@ -64,6 +65,7 @@ fn greeting_from_literal() {
     // into the return area and return the buffer pointer. Host reads the
     // 12 bytes from our memory and decodes as UTF-8.
     let db = WastDb {
+        version: WastDb::CURRENT_VERSION,
         funcs: vec![WastFuncRow {
             uid: "greeting".into(),
             func: WastFunc {
@@ -96,6 +98,7 @@ fn greeting_from_literal() {
 fn literal_return_multibyte() {
     // jp_greeting() -> string  { "こんにちは" }
     let db = WastDb {
+        version: WastDb::CURRENT_VERSION,
         funcs: vec![WastFuncRow {
             uid: "jp_greeting".into(),
             func: WastFunc {

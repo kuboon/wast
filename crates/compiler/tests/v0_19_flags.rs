@@ -40,6 +40,7 @@ fn perms_type_row() -> WastTypeRow {
 #[test]
 fn flags_passthrough() {
     let db = WastDb {
+        version: WastDb::CURRENT_VERSION,
         funcs: vec![WastFuncRow {
             uid: "echo".into(),
             func: WastFunc {
@@ -69,6 +70,7 @@ fn flags_ctor_literal() {
     // read-write() -> perms  { { read, write } }
     // FlagsCtor folds at compile time to `i32.const 0b011` (bits 0|1).
     let db = WastDb {
+        version: WastDb::CURRENT_VERSION,
         funcs: vec![WastFuncRow {
             uid: "read_write".into(),
             func: WastFunc {

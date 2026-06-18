@@ -1,8 +1,14 @@
 # WAST Project — Agent Guide
 
+This file describes the repository **as it is now**. Future work lives in the
+per-crate/per-package `PLAN.md` files (those contain *only* plans, never
+current-state docs).
+
 ## Architecture Overview
 
-WAST provides an intermediate layer between human-readable text files and WASM Components. On-disk storage is `wast.json` (current) with future migration to `wast.db` (SQLite).
+WAST provides an intermediate layer between human-readable text files and WASM
+Components. On-disk storage is `wast.json` (current) with a future migration to
+`wast.db` (SQLite).
 
 ```
 text <──syntax plugin──> partial/full WastComponent
@@ -11,113 +17,71 @@ WastComponent <──wast-codec──> bytes(wast.json, world.wit, syms.en.yaml)
 [wast.json, world.wit] --compiler--> wasm component
 ```
 
-**Top priority**: `compiler` (wast → wasm Component). See [crates/compiler/PLAN.md](crates/compiler/PLAN.md) for the v0 plan. Design decisions for IR / body format / storage schema must be driven by compiler requirements, not storage convenience.
+The Rust crates are compiled to wasm components (`cargo component`), transpiled
+with jco where a JS host needs them, and consumed by two hosts: the VS Code
+extension (`packages/vscode-extension/`) and the web demo
+(`packages/web-demo/`).
 
-## Storage format
+## Workspace layout
 
-- **`wast.json`** — current format, row-oriented JSON designed for mechanical migration to SQLite rows
-- **`wast.db`** — future SQLite format (same logical schema, indexed for caller/callee traversal)
-- Both hold identical `WastComponent` content; format choice is pure serialization
-- The codec is byte-oriented: hosts pass full file contents in/out. Partial r/w on workspace files isn't available in vscode-web, so the SQLite migration must either load the whole DB into memory or have the host implement a page-level VFS via WIT imports.
+| Path | What |
+|---|---|
+| `wit/wast-core.wit` | `wast:core` package — `syntax-plugin` and `partial-manager` interfaces |
+| `wit-types/types.wit` | `wast:types` package — shared type vocabulary (`wast-component`, `wast-error`, …) `use`d by every other WIT package |
+| `wit-codec/codec.wit` | `wast:codec` package — `compile-wit` / `read` / `write` / `merge` |
+| `wit-compiler/compiler.wit` | `wast:compiler` package — `compile(component, world-wit) -> result<list<u8>, wast-error>` |
+| `crates/wast-types/` | Shared serde types (rlib). Defines the `wast.json` schema (`WastDb`) |
+| `crates/wast-codec/` | Codec component: `WastComponent` ↔ `wast.json` / `syms.en.yaml` bytes, `world.wit` validation |
+| `crates/partial-manager/` | Extract/merge component (see semantics below) |
+| `crates/compiler/` | wast → wasm Component compiler (rlib) |
+| `crates/compiler-component/` | WIT wrapper component around the `wast-compiler` rlib |
+| `crates/syntax-plugin/{raw,ruby-like,ts-like,rust-like}/` | The 4 reference syntax-plugin components |
+| `crates/syntax-plugin/internal/pattern-analyzer/` | Rlib: `Instruction` IR, body (de)serialization, control-flow pattern detection (while/for/for-in/try) |
+| `crates/syntax-plugin/internal/syntax-core/` | Rlib: Rust scaffolding for plugins — shared `wit_types` bindings, `convert`, `RenderContext`, `TypePrinter`, `scaffold` from_text helpers |
+| `crates/demo-gen/` | Legacy generator for web-demo milestone demos (see Tech debt) |
+| `packages/vscode-extension/` | VS Code extension: TreeView, editable `wast://` virtual docs, compile command |
+| `packages/web-demo/` | Browser playground (jco-transpiled components), deployed to GitHub Pages |
+| `packages/sample-wast/` | Canonical hand-authored sample (`wast.json` + `world.wit` + `syms.en.yaml`) |
+| `docs/PLUGIN-AUTHORING.md` | How to write a new syntax plugin |
 
-## Module Status
+## WIT contract
 
-| Module | Path | Status | Remaining |
-|---|---|---|---|
-| WIT contract | `wit/wast-core.wit` | **Done** | — |
-| partial-manager | `crates/partial-manager/` | **Done** | — |
-| wast-codec | `crates/wast-codec/` | **Done** (JSON, row-oriented) | SQLite migration |
-| wast-types (shared serde types) | `crates/wast-types/` | **Done** | — |
-| compiler | `crates/compiler/` | **v0.35 done** (mixed-width disc-branch copy + f/i reinterpret + imported resource extras) | nested-compound case payload → kebab-case auto-norm |
-| pattern-analyzer | `crates/syntax-plugin/internal/pattern-analyzer/` | **Done** | — |
-| syntax-core (Rust scaffolding for plugins) | `crates/syntax-plugin/internal/syntax-core/` | **Done** (RenderContext + TypePrinter visitor) | optional: BodyPrinter visitor for Instruction rendering |
-| raw syntax | `crates/syntax-plugin/raw/` | **Done** | — |
-| ruby-like syntax | `crates/syntax-plugin/ruby-like/` | **Done** (preservation roundtrip) | recursive-descent body parser (currently bodies preserve via existing-body fallback rather than parse) |
-| ts-like syntax | `crates/syntax-plugin/ts-like/` | **Done** | — |
-| rust-like syntax | `crates/syntax-plugin/rust-like/` | **Done** (preservation roundtrip) | recursive-descent body parser (currently bodies preserve via existing-body fallback rather than parse) |
-| VS Code extension | `packages/vscode-extension/` | **Phase 3 done** (compile command produces .wasm) | web-host support |
-| compiler-component | `crates/compiler-component/` | **Done** (WIT wrapper around `wast-compiler` rlib) | — |
+- All four WIT packages share one type vocabulary: the **`wast:types`** package
+  in `wit-types/types.wit`. `wast:core`, `wast:codec`, and `wast:compiler`
+  `use wast:types/types@0.1.0.{…}` — one definition, no copies to drift.
+- `syntax-plugin.to-text` returns `result<string, list<wast-error>>` (plugins
+  must fail rather than render lossy placeholders); `from-text` returns
+  `result<wast-component, list<wast-error>>`.
+- Rust crates bind the shared types once via `wast_syntax_core::wit_types` and
+  remap their generated bindings onto it with
+  `[package.metadata.component.bindings] with = { "wast:types/types@0.1.0" = "wast_syntax_core::wit_types" }`.
+- The WIT `syntax-plugin` interface is the language-agnostic contract — anyone
+  can implement it in any language that targets WASM Components.
 
-## Detailed TODO
+## Storage and encoding formats
 
-### partial-manager (`crates/partial-manager/src/lib.rs`)
-- [x] **extract**: Walk function bodies to find call references and include called funcs
-- [x] **extract**: `include_caller` — scan all func bodies for calls to target, include callers
-- [x] **merge**: Validate that all func references in partial's internal funcs exist in full (missing_dependency check)
+- **`wast.json`** — row-oriented JSON (each func/type row inlines its `uid`,
+  ready for a 1:1 SQLite row mapping). The top-level object has a **required
+  integer `version` field** (no serde default — files without it are
+  rejected). Current schema version: **1** (`WastDb::CURRENT_VERSION`).
+- **Function bodies** — `option<list<u8>>` in WIT. The byte layout is a single
+  **format-version byte** (`BODY_FORMAT_VERSION = 1`) followed by the
+  `postcard` encoding of `Vec<Instruction>` (see
+  `crates/syntax-plugin/internal/pattern-analyzer/`). Decoders reject unknown
+  versions.
+- **`wast.db`** — future SQLite format (same logical schema). The codec is
+  byte-oriented: hosts pass full file contents in/out, because vscode-web's
+  workspace fs has no partial r/w.
+- **`world.wit` + `wast.json` + `syms.en.yaml` are SOURCE CODE** —
+  hand-authored, or edited via the VS Code extension's text-pane round-trip
+  (`from_text` → `merge` → `codec.write`). Never design build-time generators
+  that emit them. The canonical shared sample lives at `packages/sample-wast/`.
 
-### compiler (`crates/compiler/`) — top priority
-- [x] Extract shared serde types into new `crates/wast-types/` crate (prerequisite; the wast-codec and compiler depend on it)
-- [x] Scaffold `crates/compiler/` as plain rlib (no `-hosted` suffix; future wasm-component migration is mechanical)
-- [x] v0: emit fixed Component WAT for WASI CLI empty run (`wasi:cli/run@0.2.0`), verify via `wasmtime::component::Command` → `Ok(())`
-- [x] v0.1: emit `u32 -> u32` identity function, verify via Rust `wasmtime::component` harness
-- [x] v0.2: numeric primitives — `Const`, `Arithmetic` (add/sub/mul/div with signedness), `Compare` (eq/ne/lt/le/gt/ge with signedness) across i32/i64/u32/u64/f32/f64/bool; type-inferred `Const`; `s32`/`s64` mapping for lifted signatures
-- [x] v0.3: `Call` to internal funcs — single core module houses all internal + exported funcs, callers push args in the callee's declared param order (callers may pass args by name in any order)
-- [x] v0.4: control flow (`If`/`Else` with optional typed result, `Block`/`Loop`, `Br`/`BrIf`) + `LocalSet` with first-assignment local declaration (locals collected from body, emitted as `(local …)` after params)
-- [x] v0.5: imported `Call` — component-level `(import …)` → `canon lower` core func → core-module `(import "imports" "name" …)` wired via `(with "imports" (instance …))` at instantiation. Primitive-only imports (no memory/realloc yet)
-- [x] v0.6: `option<prim>` / `result<prim, prim>` **in param position** + `IsErr` on result locals. Canonical-ABI flat layout: each compound param expands to `(i32 disc, join<payload> payload)` core slots. `LocalGet` pushes all slots; `IsErr` reads only the disc slot. Return position requires `cabi_realloc` — deferred.
-- [x] v0.7: memory + `cabi_realloc` infrastructure. Every non-empty core module now exports `memory` (1 page) + a bump-allocator `cabi_realloc` backed by a mutable `$heap_end` global (starts at 1024). Bulk `memory.copy` handles realloc grows. `canon lift` threads `(memory $m "memory") (realloc (func $m "cabi_realloc"))`. `canon lower` still lacks options due to circular ref (core instance $m not yet created) — compound imports deferred until the allocator module is split out.
-- [x] v0.8: compound returns — `Some`/`None`/`Ok`/`Err` with primitive payload. Core funcs whose flat-result slot count > `MAX_FLAT_RESULTS=1` switch to indirect return (single `i32` pointer). `body_needs_ret_ptr` scans the body for variant ctors and reserves an extra `i32` local. `size_align`/`store_op`/`align_up` helpers implement the Canonical-ABI variant layout (u8 disc + padded payload).
-- [x] v0.9: `MatchOption` / `MatchResult` destructuring. Bindings (`some_binding`, `ok_binding`, `err_binding`) are collected as function-scope locals with the payload WIT type. MatchOption `local.set`s payload into the binding then branches on disc. MatchResult uses `local.tee`+`local.set` to seed both ok/err bindings in one go, then branches. MatchResult currently requires ok/err to share a core type (heterogeneous join + truncation deferred).
-- [x] v0.10 spike: validated `wit-component` + `wit-parser` (v0.219, matching wasmtime 27's wasmparser) can wrap our core module output into a Component. Spike covers both `identity(u32)->u32` and indirect-return `mk-some(u32)->option<u32>`.
-- [x] v0.11: rewrote emit.rs. `compile_component` now emits **core-only WAT** (single `(module …)`), synthesizes a WIT world from `db`'s exports/imports (inline type refs for option/result), embeds the `component-type` custom section via `embed_component_metadata`, and wraps via `ComponentEncoder`. Consequences: hand-rolled `canon lift`/`canon lower` + outer `(component …)` + memory-option threading are all gone. Imports use `"$root"` namespace convention. `canon lower` circular-reference problem is solved (wit-component handles it). All 25 tests pass end-to-end unchanged. Core body emit (IR → core WAT instructions) is unchanged — only the shell changed.
-- [x] v0.12: `string` in **param** position + `StringLen` IR instruction. `ResolvedType::String` separated from `Primitive`; flat_slots=`["i32","i32"]` (ptr,len), size_align=(8,4). `StringLen` on `LocalGet(string_local)` reads the `len` slot directly. Syntax plugins (raw/ruby-like/ts-like/rust-like) got StringLen render stubs. Host→guest string passing verified with ASCII + multi-byte UTF-8 (`"あいう"` → 9 bytes).
-- [x] v0.13: `StringLiteral { bytes }` IR + data segments. `collect_literal_table` pre-scans every body; each unique literal is assigned a memory offset starting at `STATIC_DATA_BASE=1024` (dedup'd). `$heap_end` initial value bumps past all literals so the bump allocator doesn't clobber static data. `(data (i32.const OFFSET) "\HH…")` emitted per literal. `StringLen(StringLiteral(..))` compile-time folds to `i32.const bytes.len()`. Tested: compile-time fold, cross-Call literal arg, multi-byte UTF-8 (`"こんにちは"` → 15 bytes).
-- [x] v0.14: **string return** via indirect return. `emit_body` detects string-returning functions and wraps the body's last instruction (LocalGet of a string local, or StringLiteral) in: allocate 8-byte return area via `cabi_realloc(0, 0, 4, 8)`, store (ptr, len) at offsets 0/4, push the buffer pointer as the core result. `ret_ptr_slot` is now reserved whenever the return type is indirect (not just when the body contains Some/Ok/Err). Tests: echo(s) passthrough, greeting() from literal, UTF-8 round-trip.
-- [x] v0.15: `list<T>` param + return + `ListLen` IR. Same (ptr, len) flat layout as string; `len` is the element count. `ResolvedType::List(inner)` variant; `emit_body`'s string-return wrap generalized to `emit_ptrlen_return_wrap` which now handles both String and List returns with the same 8-byte return area pattern. `ListLen(LocalGet(list_local))` reads the len slot directly. Tests: len-of(xs: list<u32>) across empty/small/100-element cases, echo-list passthrough, list<i64> round-trip with 8-byte-aligned elements. `ListLiteral` (construction from element list) deferred.
-- [x] v0.16: `record` with primitive fields. Flat form is concatenation of fields' flats. WIT world declarations use `record NAME { … }` syntax (not `type NAME = record { … }` — WIT disallows that). IR: `RecordGet { value, field }` reads a field's flat slots from a record local; `RecordLiteral { fields }` at return position triggers `emit_record_return_wrap` which allocates record size bytes and writes each field at its Canonical-ABI byte offset via the appropriate `{ty}.store offset=N align=M` (align is actual byte count — fixed `store_op` to return power-of-two byte value, not the exponent). Tests: get-x/get-y field access on `point`, make-point constructor, heterogeneous `mixed { flag: bool, big: u64, small: u32 }` with non-trivial padding.
-- [x] v0.17: general `variant` with N cases (each case optional payload). `option`/`result` stay routed through Some/None/Ok/Err IR nodes; this handles user-declared variants. IR additions: `VariantCtor { case, value }` + `MatchVariant { value, arms: [MatchArm { case, binding?, body }] }`. Flat layout: i32 disc + slot-wise flat-join over all cases' payloads. `emit_variant_return_wrap` stores disc + selected case payload. `MatchVariant` emits a nested if-else chain over disc, pre-seeding every arm binding with the (shared) payload slot so only the matched arm needs to read it. WIT synthesis emits `variant NAME { a, b(ty), … }`. Primitive payloads + homogeneous core type across cases — heterogeneous join (needs wrap/extend) deferred. Test: `variant shape { circle(u32), square(u32), unit }` round-trip.
-- [x] v0.18: `tuple<T1, T2, …>` — positional anonymous record. Same layout as record (concatenated flat slots, byte offsets via `record_field_info` on synthetic `"0"`/`"1"`/… names). IR: `TupleGet { value, index: u32 }` + `TupleLiteral { values }`. `emit_tuple_return_wrap` for indirect return. WIT inlines `tuple<T, T, …>` at use sites (no type declaration). Tests: first/second element access on `pair`, `make-pair` construction, heterogeneous alignment `(bool, u64, u32)` with padding.
-- [x] v0.19: **char**, **enum**, **flags**. `char` already worked (primitive, flat=i32, Canonical ABI as 4-byte Unicode scalar) — added a round-trip test covering ASCII + multi-byte (`あ`, `😀`). `enum` added to `wast-core.wit` + `wast-types::WitType::Enum` — reuses VariantCtor/MatchVariant (payload-less variant). `flags` (bitmask) emitted as compile-time `i32.const <mask>` via new `Instruction::FlagsCtor { flags }` for ≤32 flags (i64 for 33-64). Both propagate through file-manager + file-manager-hosted bindings conversions and partial-manager's type-ref walk. Tests: char roundtrip, enum ctor + match-dispatch on `color { red, green, blue }`, flags passthrough + `FlagsCtor { read, write }` → `Perms::READ | Perms::WRITE`.
-- [x] v0.20: **nested compound** — record/tuple/variant fields with `string` or `list<T>` (not just primitives). New `emit_field_store` helper dispatches on field type: Primitive → existing IR-driven emit; String/List → two-slot `(ptr, len)` pair stored at `offset` and `offset+4`. Refactored `emit_record_return_wrap`, `emit_tuple_return_wrap`, `emit_variant_return_wrap` to route every field through `emit_field_store`. `collect_literals_rec` now descends into `RecordLiteral`, `TupleLiteral`, `VariantCtor`, `MatchVariant` so nested `StringLiteral`s reach the literal table. Tests: record with `{message: string, count: u32}` from literal + from param, tuple `(string, u32)`, variant case `text(string)`.
-- [x] v0.21: **ListLiteral** — runtime list construction. New `Instruction::ListLiteral { values }` IR + `emit_list_literal` helper: `cabi_realloc(0, 0, elem_align, count*elem_size)` → stash buffer ptr → per-element `emit_field_store` at offset `i * elem_size`. Reserves an extra i32 scratch local (`list_buf_slot`) when body contains any ListLiteral. Handled at return position (via `emit_ptrlen_return_wrap`) and as nested compound field (via `emit_field_store`). Tests: empty list, const u32 list, params-as-elements, i64 list (8-byte align), list<string> (nested compound path), record with list<u32> field. Syntax plugins (raw/ruby-like/ts-like/rust-like) got ListLiteral render stubs.
-- [x] v0.22: **deep nested compound** — record/tuple/variant/list fields whose type is itself a compound (record-of-record, option<u32>, tuple<record, string>, list<record>, etc.). `emit_field_store` now has arms for Record, Tuple, Variant, Option, Result, Enum, Flags: each dispatches on the source constructor (RecordLiteral/TupleLiteral/VariantCtor/Some/None/Ok/Err/FlagsCtor) and writes disc + payload fields directly into the parent buffer at the computed offset — no separate allocation, since the Canonical ABI inlines compounds in memory. Tests: record-of-record, record with `option<u32>` field (Some/None), tuple `(point, string)`, list of records. LocalGet of a nested-compound source is still deferred.
-- [x] v0.23: **resource** (minimal end-to-end). WIT additions: `WitType::{Resource, Own(String), Borrow(String)}` cascading through `wit/wast-core.wit` + `wit-hosted/file-manager-hosted.wit` + regenerated bindings across file-manager / file-manager-hosted / partial-manager / 4 syntax plugins / demo-gen. `ResolvedType::{Own,Borrow}(String)` flatten to i32. IR additions: `ResourceNew` / `ResourceRep` / `ResourceDrop`. Emit: for each declared resource, auto-import `[resource-new]R` / `[resource-rep]R` / `[resource-drop]R` from module `"[export]wast:generated/generated-iface"`; resource-member exports (`[constructor]R` / `[method]R.op` / `[static]R.op` / `[dtor]R`) get prefixed with `wast:generated/generated-iface#`. `synthesize_world` partitions funcs by resource membership (name prefix) and emits a `resource R { constructor(...); op: func(...); op: static func(...); }` block inside a generated interface — `[dtor]R` is implicit in WIT (no member syntax) so it's skipped from the synthesized text but still gets the interface-path prefix on its core export name. Interfaces are required for wit-component's resource plumbing. Test uses `wasmtime::component::bindgen!` against a fixed WIT that matches our synthesizer's output; constructor body is `ResourceNew { rep: LocalGet("init") }`, method body passes `self_` through unchanged (wasmtime's `lower_borrow` for own-instance resources passes the rep directly, not a handle). Non-obvious learning: the untyped `Val::Resource`/`Func::call` API does not round-trip guest-defined resource handles correctly — must use bindgen or the ResourceAny-typed path. Dtor verification: wit-component silently skips mis-named `[dtor]R` exports, so compile success alone is insufficient — the dtor test wires a world-level imported `record-drop: func(rep: u32)` that the dtor body calls, and the host impl collects every rep for assertion. Tests: constructor + method, static factory, dtor observes all drops.
-- [x] v0.24: **LocalGet of compound in field position**. Previously `emit_field_store`'s Record/Tuple arms only dispatched on `RecordLiteral`/`TupleLiteral` sources. Now `LocalGet` of a compound-typed local also works via a new `emit_copy_from_local` helper: walks the type recursively and emits direct slot-to-memory stores at Canonical-ABI byte offsets. Handles primitives, strings/lists (2-slot ptr+len), records/tuples (recursive per field), enums/flags (sized disc), and own/borrow handles (i32). Variant/option/result LocalGet copy is deferred — needs disc-read + runtime branch to copy the selected case's payload. Tests: `record pair { a: point, b: point }` from two point params, `tuple<point, u32>` from a record param, `record outer { inner: record_with_string_and_list, count: u32 }` from an inner param (exercising the nested string+list path).
-- [x] v0.25: **LocalGet copy of option/result/variant in field position**. Extends v0.24 beyond record/tuple/string/list/enum/flags/handle sources to the disc+payload compounds. A shared `emit_variant_like_copy` helper stores the source's disc slot (u8 at `base_offset`) plus the flat-joined payload slot at `base_offset + align_up(1, max_case_align)`, using the joined core type's natural store op. Since the payload memory offset is the same regardless of which case is active (and all cases fit in ≤ the join type's width), we can write unconditionally without a disc-branch. Also routed LocalGet sources through the Variant/Option/Result arms of `emit_field_store` before the literal-ctor dispatch. Scope: single-slot payload only (matches the v0.9 homogeneous-join limit). Tests: record with `option<u32>` field from an option param, record with `result<u32, u32>` field from a result param, tuple with `variant shape { circle(u32), square(u32), unit }` field from a shape param — each tested across all disc values.
-- [x] v0.26: **option&lt;T&gt; multi-slot support**. Two tiny changes with a big surface-area payoff. (1) `flat_slots(Option(inner))` now recurses into `flat_slots(inner)` instead of calling `wit_to_core` (which only accepted primitives), so `option<string>` / `option<list<T>>` / `option<record>` are valid param, return, and field types across the whole compiler. (2) `emit_copy_from_local`'s Option arm stops routing through the single-slot `emit_variant_like_copy` helper; instead it stores the disc at `base_offset` and recurses into `emit_copy_from_local(inner, src_base+1, ..., base_offset + align_up(1, align_of(inner)))`. Option is safe without runtime disc branching because it has exactly one case — the memory layout is fully determined by T, and readers gate on the disc so any bytes written when disc=0 are "don't care". Tests: record with `option<string>` field (Some/None/empty-string), record with `option<list<u32>>` field (Some list / None). Result and Variant multi-slot still need a disc branch (deferred — layouts differ per case).
-- [x] v0.27: **result/variant homogeneous multi-slot copy**. Two changes: (1) `flat_slots(Result(ok, err))` stops calling `wit_to_core` directly; it flat-joins the two sides' full flat forms slot-by-slot, so `result<string, string>`, `result<list<T>, list<T>>`, etc. become valid types everywhere. (2) `emit_copy_from_local`'s Result and Variant arms take the same shortcut v0.26 added for Option when the memory layout is uniform: if `ok_ty == err_ty` (or every variant case shares a single distinct payload type), store the disc and recurse into that payload type's copy. A `variant msg { text(string), empty }` shape counts as homogeneous since payload-less cases have no layout to clash with. Truly heterogeneous layouts (`result<u32, u64>`, `variant { text(string), count(u32) }`) still fall back to `emit_variant_like_copy`'s single-slot path, which errors on multi-slot — that path needs a real disc branch and per-case memory write, deferred. Tests: record with `result<string, string>` field (Ok/Err round-trips), record with `variant msg { text(string), empty }` field.
-- [x] v0.28: **imported resource**. A resource declared with `TypeSource::Imported(_)` is now routed through a separate `imported-iface` (under the same `wast:generated` package), imported by the world via `import imported-iface;`. Resource-member imports (`FuncSource::Imported("[constructor]R")` / `[method]R.op` / `[static]R.op`) use `"wast:generated/imported-iface"` as the core import module with no `[export]` prefix and no `#` in field names — the path-to-resource is encoded in the module, not the field. Only `[resource-drop]R` is auto-imported for imported resources (the guest never owns the table, so `[resource-new]R` / `[resource-rep]R` are never emitted). synthesize_world splits resource types into two buckets by source — `TypeSource::Imported` into imported-iface, anything else into the existing generated-iface. Test spins up a bindgen-generated `Host`/`HostCounter` trait on a `HostState` that keeps a `ResourceTable<HostCounter>`; the exported `roundtrip(n: u32) -> u32` calls the imported ctor → get → ResourceDrop and returns the read value. Host-side `drops: Arc<Mutex<Vec<u32>>>` records every rep it sees dropped.
-- [x] v0.29: **heterogeneous result at MatchResult** (single-slot i32/i64). The prior "ok and err must share a core type" limit at `MatchResult` is lifted when the two sides join to i64 (one u32 + one u64, etc.). New `heterogeneous_narrow_op(from, to)` helper returns `i32.wrap_i64` for the i64→i32 case. MatchResult emit detects `ok_core != err_core` and switches from the tee/set pattern to a branch-then-narrow one: the wider binding is `local.set` from the joined flat slot (its type already matches); inside the narrower case's `if` branch we `local.get` the wider local, apply the narrow op, and `local.set` the narrower binding before running its body. Scope: single-slot i32/i64 only — f32/f64 combos and reinterpret mixes are deferred to a later pass. Also: when the narrower binding goes unused in its case body (like the test's `err(_) -> 999`), no narrow is needed and we skip it. Test: `classify(r: result<u32, u64>) -> u32` exercised with Ok(42), Ok(u32::MAX), Err(1e12), Err(u64::MAX).
-- [x] v0.30: **heterogeneous MatchVariant** (single-slot i32/i64). The v0.29 narrow pattern generalized to N-case variants. Previously MatchVariant pre-populated every arm's binding with a single `local.set` before the branch chain — cheap, but only works when every binding's core type matches the flat-joined payload slot. Now each arm's binding-set moves inside its own branch: we `local.get` the joined payload slot, apply `heterogeneous_narrow_op(joined, bcore)` if the binding's core type is narrower, then `local.set` the binding. Arms without a binding skip the prefix entirely. Scope still single-slot i32/i64 (f/i reinterpret and multi-slot payloads deferred). Test `variant id { short(u32), long(u64), anon }`: `kind(i: id) -> u32` exercised across Short(42), Short(u32::MAX), Long(1e12), Long(u64::MAX), Anon. Short's u32 binding is populated via `i64.extend_i32_u`-paired `i32.wrap_i64` on the joined slot; Long's u64 binding takes the slot as-is; Anon skips the prefix since it has no binding.
-- [x] v0.31: **implicit widen at LocalGet**. New `implicit_widen_op(from, to)` returns the matching widening op when a single-slot primitive flows from a narrower local into a wider consumer: `i64.extend_i32_s` for signed sources, `i64.extend_i32_u` for unsigned, `f64.promote_f32` for float widen. Compound source/target types fall through (no widen — non-primitive types aren't subject to numeric widening). The hook lives in `emit_instr`'s `LocalGet` arm: when `slots.len() == 1` and `expected` is provided, call the helper, emit `local.get + widen_op` if needed. This unblocks calls like Arithmetic-with-mixed-widths (`promote(x: u32) -> u64 { x + 0u64 }`) and direct widen-at-return (`identity-wide(x: u32) -> u64 { x }`). Tests cover unsigned u32→u64 (high-bit set), signed i32→i64 (negative values, i32::MIN), and bare LocalGet at return position.
-- [x] v0.32: **heterogeneous variant/result construction — payload offset fix**. Pre-existing latent bug: `emit_variant_ctor`, `emit_variant_return_wrap`, and `emit_field_store`'s Variant/Result arms all computed the payload memory offset as `align_up(1, selected_case_align)`. The Canonical ABI actually places the payload at `align_up(1, max_case_align)` — equal to the variant's overall alignment. For homogeneous variants the two are identical so the bug stayed invisible; heterogeneous variants like `result<u32, u64>` (case aligns 4 and 8) miss-aligned the u32 case payload at offset 4 instead of 8, so a host reading the Ok payload at the variant-aligned offset 8 saw zeros from the bump-allocator instead of the value. Fix: each path now uses `size_align(outer_ty)?.1` for the payload offset. Tests: `mk-ok(x: u32) -> result<u32, u64>` and `mk-err(e: u64) -> result<u32, u64>` round-trip Ok/Err with extreme values; `variant kind { small(u32), big(u64), unit }` exercised across all three constructor entry points.
-- [x] v0.33: **variant_like_copy uniform-width multi-slot**. Drops the `flat.len() > 2` ceiling in `emit_variant_like_copy` when every joined payload slot has the same core type. Each slot is unconditionally copied at `pay_off + i * slot_width` using the shared store op. The "junk" written into trailing slots for cases that use fewer slots lands outside that case's `size_align` footprint, so its reader never sees it (the disc gates first). Mixed-width joined slots (`[i64, i32]`, etc., from a record case mixed with a scalar case) still need a real disc branch + per-case writes — kept as the explicit "deferred" error. Tests: `record { outcome: result<string, u32>, retries: u32 }` round-trips Ok("hello") / Err(404) / Ok("") + `record { data: option<list<u32>>, tag: u32 }` round-trips Some([1,2,3]) / None.
-- [x] v0.34: **imported resource extras + float reinterpret narrows**. The v0.28 imported-resource pipeline gains a static-method test (`zero: static func() -> counter` on the host side, called from the guest's exported `via-zero`). Same `Host` / `HostCounter` trait, same `ResourceTable<HostCounter>` plumbing — verifies that `[static]R.op` routing through `IMPORTED_RESOURCE_IFACE_PATH` works end-to-end. Float side: `heterogeneous_narrow_op` and `implicit_widen_op` now handle `i32 ↔ f32`, `i64 ↔ f64` (same-width bit reinterprets) and `f64 → f32` demote. Test exercises `result<u32, f32>` MatchResult: the joined slot is i32 (per `join(i32, f32) = i32`), the f32 case binding read uses `f32.reinterpret_i32`, and Err(3.14) / Err(-Inf) / Ok(42) all round-trip.
-- [x] v0.35: **mixed-width disc-branch copy**. Drops the "joined slots must all share a core type" restriction in `emit_variant_like_copy`. When the join is non-uniform (e.g. `result<u64, string>` joining as `[i64, i32]`), the new `emit_variant_like_copy_branched` emits a per-case `if (disc==i)` chain. Each case's branch walks `case_flat_slot_offsets` (a new helper that enumerates `(byte_offset, core_type)` for the case's natural memory layout — covers primitive / string / list / record / tuple / enum / flags / handle), reads the joined source slot at the corresponding flat-slot index, narrows with `heterogeneous_narrow_op` if the joined slot is wider, and stores at the case-natural offset. Cases that use fewer slots than the join simply don't touch the trailing positions; cases with their own multi-slot layout (string's ptr@0, len@4) get the right per-slot writes. Test: `record { outcome: result<u64, string>, tag: u32 }` round-trips Ok(1e12) / Ok(u64::MAX) (8-byte i64 store at offset 8 within payload region) / Err("oops") / Err("") (i32.wrap_i64 of widened ptr at offset 8, then i32 len store at offset 12).
-- [ ] Roadmap: case payload nested option/result/variant in disc-branch copy → WIT identifier kebab-case auto-normalization
-- See [crates/compiler/PLAN.md](crates/compiler/PLAN.md) for full context
+Historical note: the WASI-fs-based `crates/file-manager/` was retired 2026-04 —
+jco couldn't transpile its WASI fs deps and vscode-web has no partial-access
+fs API, so the byte-oriented codec model fits both web and desktop hosts.
 
-### wast-codec (`crates/wast-codec/src/lib.rs`)
-- [x] Content-based API: accept `world.wit` / `wast.json` / `syms.en.yaml` bytes and return serialized outputs, so web and desktop hosts can use the same component without WASI or sync fs
-- [x] `read` from serialized `wast.json` + optional `syms.en.yaml` and return `wast-component`
-- [x] `write` / `merge` (full WastComponent ↔ component-files round-trip)
-- [x] **compile-wit**: Parse `world.wit` and populate exported/imported funcs and types into initial wast.json (renamed from the old `bindgen` method)
-- [x] **write/merge**: Deeper world.wit validation (wit_path existence + param count matching for exported/imported funcs)
-- [x] Row-oriented JSON schema (each func/type is an object with inline `uid`, ready for SQLite row mapping)
-- [ ] Populate `calls: Vec<String>` on each func via `pattern-analyzer::deserialize_body` at write time (caller→callee edge index for future SQLite indexing)
-- [ ] Migrate storage to SQLite (`wast.db`) once JSON compiler path stabilizes; partial r/w is impossible in vscode-web (workspace fs is whole-file only) so the codec stays byte-oriented and the host (or a future host-imported page-level VFS) decides chunking
-
-The WASI-fs-based variant (`crates/file-manager/`) was retired 2026-04 — jco couldn't transpile its WASI fs deps and vscode-web's workspace fs has no partial-access API anyway, so the byte-oriented codec model fits both vscode-web and desktop hosts cleanly.
-
-### syntax plugins (ruby-like, ts-like, rust-like, raw)
-- [x] **to_text**: Render actual body instructions (all plugins deserialize via pattern-analyzer and render real instructions with language-specific syntax)
-- [x] **from_text (ts-like)**: Full body expression parser — recursive descent parser handles all instruction types (if/else, while, block, switch/match, calls, arithmetic, comparisons, WIT types). Parses TS-like text back to `Vec<Instruction>` and serializes via pattern-analyzer
-- [x] **from_text (ruby-like, rust-like) — preservation roundtrip**: Both plugins parse signatures and skip the body, restoring the body bytes from the `existing` component on `from_text`. Ruby-like's body skip now handles nested `end`-terminated constructs (`if`/`loop do`/`begin`/`case`) by counting opener/closer depth; rust-like already counted brace nesting. The to_text → from_text → to_text identity holds across the full v0.16-era IR (tests below). Replacing the skip path with a real recursive-descent parser remains future work.
-- [x] **from_text (raw)**: Full S-expression parser — tokenizer + recursive sexp builder + walker that decodes every instruction shape the renderer emits. Type refs resolve back to existing uids via the inline-rendered-form map (so `(option u32)` lands at `opt_u32` not a fresh uid). Call/record arg names are recovered from `(; $name ;)` block comments interleaved between args. Both `sync_identity` and `text_identity` Node tests cover raw alongside the other 3 plugins.
-- [x] **Body roundtrip tests (ts-like)**: simple instructions, calls, arithmetic, comparisons, if/else, loops, blocks, WIT types (some/ok/err/isErr), match-option, match-result, nested constructs
-- [x] **Body roundtrip tests (ruby-like, rust-like)**: same 11-case battery as ts-like — locks in the preservation contract.
-
-### VS Code extension (`packages/vscode-extension/`)
-- [x] TreeView panel — scans workspace recursively for wast.json files, lists components and functions with display names from syms. Properly filters .git/node_modules, supports depth limit
-- [x] **Phase 1**: bundle wasm components (4 syntax plugins + partial-manager + codec) into `dist/components/`, switch all fs reads to `vscode.workspace.fs` (web-host-ready), virtual docs render real surface text via the configured `syntax-plugin.to_text`. `?func=uid` URIs go through `partial-manager.extract` first so a single-func view is a self-consistent partial.
-- [x] fs.watch for external wast.json changes — detects changes, refreshes tree, notifies open virtual documents
-- [x] **Phase 2**: editable virtual docs via `FileSystemProvider` (replaces the read-only `TextDocumentContentProvider`). `writeFile` runs `from_text` → `partial-manager.merge` → `codec.write` and persists `wast.json` (+ `syms.<lang>.yaml` when the codec emits one). Per-stage failures throw `FileSystemError`s that surface as VS Code's "Unable to save file" toast with the stage label and the underlying `WastError` messages.
-- [x] **Phase 3**: compile command — new `wast-compiler-component` crate (`crates/compiler-component/` + `wit-compiler/compiler.wit`) wraps the `wast-compiler` rlib in a WIT interface (`compile(component, world-wit) -> result<list<u8>, wast-error>`). Bundled alongside the other 6 components; the `WAST: Compile current component` command writes the wasm to `<dir>/dist/<name>.wasm`. Required a side-fix in `partial-manager.merge`: `Exported` source now propagates body / params / result from the partial (preserving `full`'s source tag), so editing an exported func's body actually round-trips.
-- [ ] **Phase 4**: vscode-web compatibility — resolve jco's bare-specifier imports (`@bytecodealliance/preview2-shim/*`) under the web extension host (currently relies on Node's `node_modules` resolution).
-- [ ] LSP diagnostics (real-time `from_text` validation while editing)
-- [ ] Session conflict handling
-
-## Responsibility Boundaries
+## Responsibility boundaries
 
 | Layer | Responsibility |
 |---|---|
@@ -126,53 +90,113 @@ The WASI-fs-based variant (`crates/file-manager/`) was retired 2026-04 — jco c
 | **syms** | Human display names only (not needed for wasm generation). Per-language files |
 | **wast-codec** | WastComponent ↔ wast.json bytes (future wast.db SQLite). world.wit consistency validation. Byte-oriented, host-driven I/O |
 | **partial-manager** | extract / merge (stage 2 validation) |
-| **syntax-plugin** | wast <-> text bidirectional conversion (stage 1 validation). New UID generation. **The WIT `syntax-plugin` interface is the language-agnostic contract — anyone can implement it in any language that targets WASM Components.** |
-| **wast-syntax-core** | Optional Rust scaffolding for plugins written in Rust: name maps, WIT-type traversal, type-uid resolution. Not part of the WIT contract. See [docs/PLUGIN-AUTHORING.md](docs/PLUGIN-AUTHORING.md). |
+| **syntax-plugin** | wast ↔ text bidirectional conversion (stage 1 validation). New UID generation |
+| **wast-syntax-core** | Optional Rust scaffolding for Rust plugins. Not part of the WIT contract. See [docs/PLUGIN-AUTHORING.md](docs/PLUGIN-AUTHORING.md) |
 | **CLI / Editor** | User operations and workflow control |
 
-## Development Commands
+### partial-manager semantics (condensed)
 
-```bash
-# Rust
-cargo component build --workspace   # Build all wasm components
-cargo test --workspace               # Run all Rust tests
-cargo fmt                            # Format source code
+`extract(full, targets)` builds a partial: every target is included; targets
+*without* `include_caller` are forced to `Exported(uid)` (signature locked —
+the partial can't prove all callers are visible); targets *with*
+`include_caller` keep their original source and pull their direct callers in
+(with bodies); callees are added as signature-only `Imported(uid)` stubs.
+`merge(partial, full)` verifies `Imported`/`Exported` signatures against
+`full`, replaces/adds `Internal` funcs, and errors on `signature_mismatch`,
+`missing_dependency`, or `uid_conflict`.
 
-# TypeScript
-pnpm install                         # Install dependencies
-pnpm build                           # Build all packages
-pnpm test                            # Run all tests
+### Compiler pipeline (condensed)
 
-# Devcontainer image publish (split architecture)
-cd .devcontainer && ./push.sh        # Local arm64 push: arm64-<sha>, arm64-latest
-# Then run workflow: Publish Devcontainer Image
-# input source_sha=<same sha>         # Builds amd64 in GitHub Actions and publishes multi-arch manifest
-
-# CI check (same as GitHub Actions)
-cargo component build --workspace && \
-  find . -name bindings.rs -path '*/src/*' | xargs rustfmt && \
-  cargo fmt --check && \
-  cargo test --workspace && \
-  pnpm build && \
-  pnpm test
+```
+WastDb + synthesized WIT world
+  → emit_core_module (core-only WAT)        # the hand-written part
+  → wat::parse_str → core .wasm
+  → wit_component::embed_component_metadata
+  → wit_component::ComponentEncoder         # shell: canon lift/lower, wiring
+  → Component .wasm
 ```
 
-## Key Design Principles
+The compiler emits only the core module; the component shell is delegated to
+`wit-component` (pinned at 0.219 to match wasmtime 27's wasmparser). The IR
+stays a high-level semantic representation (not a core-opcode list) so syntax
+plugins can round-trip it. Coverage today: numerics, control flow, calls
+(internal + imported), option/result/variant/record/tuple/enum/flags,
+string/list (params, returns, literals), nested compounds, resources
+(exported + imported), heterogeneous narrows/widens. Remaining gaps are listed
+in [crates/compiler/PLAN.md](crates/compiler/PLAN.md).
+
+### Syntax plugin from_text status
+
+- **raw**, **ts-like**: full body parsers (S-expression / recursive descent) —
+  structural round-trip of signatures *and* bodies.
+- **ruby-like**, **rust-like**: signatures parse; bodies are preserved from
+  the `existing` component (depth-aware body skip). Real body parsers are
+  future work (see their `PLAN.md`s).
+
+### VS Code extension status
+
+Bundles 7 components into `dist/components/` (4 syntax plugins,
+partial-manager, codec, compiler). TreeView over workspace `wast.json` files;
+editable `wast://` virtual docs via `FileSystemProvider` (save runs
+`from_text` → `merge` → `codec.write`); fs.watch refresh; `WAST: Compile
+current component` writes `<dir>/dist/<name>.wasm`. Runs on Node (desktop)
+hosts; vscode-web support is future work (see
+[packages/vscode-extension/PLAN.md](packages/vscode-extension/PLAN.md)).
+
+## Development commands
+
+Toolchain: Rust 1.96.0 (pinned in `rust-toolchain.toml`, target
+`wasm32-wasip1`), Node 24 / pnpm 10 / wasmtime via `mise` (`mise.toml`),
+plus `cargo-component` (the devcontainer installs it with
+`cargo binstall cargo-component wasm-tools`).
+
+```bash
+# mise tasks (preferred)
+mise run build              # cargo component build --workspace + pnpm install + pnpm build
+mise run test-component     # cargo test --workspace (depends on build)
+mise run test-ts            # pnpm test (depends on build)
+mise run ci                 # build + both test tasks (what CI runs)
+mise run bundle-components  # rebuild the vscode-extension component bundle
+
+# direct
+cargo component build --workspace   # build all wasm components
+cargo test --workspace              # all Rust tests
+cargo fmt                           # format (CI enforces cargo fmt --check)
+pnpm install && pnpm build && pnpm test   # TS packages
+
+# Devcontainer image publish (split architecture)
+cd .devcontainer && ./push.sh        # local arm64 push: arm64-<sha>, arm64-latest
+# then run the "Publish Devcontainer Image" workflow with source_sha=<same sha>
+```
+
+CI (`.github/workflows/ci.yml`) runs `mise run ci` then `cargo fmt --check`
+inside the devcontainer image. `.github/workflows/deploy-pages.yml` builds
+`packages/web-demo` and deploys its `dist/` to GitHub Pages.
+
+## Key design principles
 
 - **Names are not code essence** — all identifiers are meaningless UIDs
 - **wasm generation requires only wast + wit** — syms are never needed
 - **Minimize identifier change cost** — UIDs are stable, display names are in syms
 - **WastComponent is the central type** — partial and full share the same type definition
 - **Syntax plugins are stateless** — called fresh each time
-- **`world.wit` + `wast.json` + `syms.en.yaml` are SOURCE CODE** — hand-authored, or edited via the VS Code extension's text-pane round-trip (`from_text` → `merge` → `codec.write`). Never design build-time generators that emit them. The canonical shared sample lives at `packages/sample-wast/`.
+- **The compiler IR is a high-level semantic representation** — never a core
+  opcode list; anything `wit-component` can do is delegated to `wit-component`
 
 ## Tech debt / scheduled cleanup
 
-- **`crates/demo-gen`** — legacy build-time generator that emits the v0.x milestone `.wasm` + `manifest.json` for the web-demo playground. Conceptually obsolete under the source-code rule above, but kept for now because the eventual replacement (a handful of consolidated hand-authored demos covering all implemented features) isn't designed yet. Treat as legacy: don't extend with new milestone entries on its Rust DSL side. Removal path: hand-author 2-3 rich `packages/<demo>/` folders, switch `transpile-all.mjs` to read from those, delete the crate.
+- **`crates/demo-gen`** — legacy build-time generator that emits the v0.x
+  milestone `.wasm` + `manifest.json` for the web-demo playground.
+  Conceptually obsolete under the source-code rule above, but kept until the
+  replacement (a few consolidated hand-authored demos) is designed. Treat as
+  legacy: don't extend it with new milestone entries. Removal path:
+  hand-author 2-3 rich `packages/<demo>/` folders, switch
+  `transpile-all.mjs` to read from those, delete the crate.
 
-## Agent Instructions
+## Agent instructions
 
-**When completing a task**, update this file:
-1. Move the completed item from the TODO list (change `[ ]` to `[x]`)
-2. Update the Module Status table (remaining column)
-3. Commit the AGENTS.md update together with the implementation
+When completing a task:
+1. Remove the finished item from the relevant `PLAN.md` (PLAN files hold
+   *only* future work — delete done items rather than checking them off).
+2. If behavior described in this file changed, update this file to match.
+3. Commit the doc updates together with the implementation.

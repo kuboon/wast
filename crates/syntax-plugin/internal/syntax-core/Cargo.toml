@@ -6,5 +6,7 @@ license.workspace = true
 
 [dependencies]
 wast-types = { path = "../../../wast-types" }
+wast-pattern-analyzer = { path = "../pattern-analyzer" }
+wit-bindgen = { workspace = true }
 
 [lib]

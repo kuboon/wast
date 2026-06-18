@@ -18,6 +18,7 @@ fn load(db: &WastDb) -> (Engine, Component) {
 #[test]
 fn echo_char() {
     let db = WastDb {
+        version: WastDb::CURRENT_VERSION,
         funcs: vec![WastFuncRow {
             uid: "echo".into(),
             func: WastFunc {

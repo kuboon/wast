@@ -2,12 +2,11 @@
 #[rustfmt::skip]
 mod bindings;
 
-mod convert;
-
-use bindings::wast::core::types::*;
 use std::collections::BTreeMap;
 use wast_pattern_analyzer::{ArithOp, CompareOp, Instruction};
-use wast_syntax_core::{RenderContext, TypePrinter};
+use wast_syntax_core::scaffold::{self, ExistingIndex, UidGen};
+use wast_syntax_core::wit_types::*;
+use wast_syntax_core::{RenderContext, TypePrinter, convert};
 
 struct Component;
 
@@ -110,38 +109,37 @@ fn parse_primitive(s: &str) -> Option<PrimitiveType> {
 // Body rendering
 // ---------------------------------------------------------------------------
 
+/// Render a serialized body. A body that fails to deserialize is an
+/// error — rendering a placeholder comment instead silently produced
+/// lossy output that could not faithfully round-trip.
 fn render_body(
     body: &[u8],
     indent: &str,
     returns_value: bool,
     local_names: &BTreeMap<String, String>,
     func_names: &BTreeMap<String, String>,
-) -> String {
-    match wast_pattern_analyzer::deserialize_body(body) {
-        Ok(instructions) => {
-            let mut lines = Vec::new();
-            let last_idx = instructions.len().saturating_sub(1);
-            for (i, instr) in instructions.iter().enumerate() {
-                let rendered = render_instruction(instr, indent, local_names, func_names);
-                if rendered.is_empty() {
-                    continue;
-                }
-                // TS needs an explicit `return` — a bare trailing expression
-                // evaluates to nothing. Wrap the last value-producing
-                // instruction in `return <expr>;` when the function returns.
-                if returns_value && i == last_idx && is_value_expr(instr) {
-                    let leading: String =
-                        rendered.chars().take_while(|c| c.is_whitespace()).collect();
-                    let trimmed = rendered[leading.len()..].to_string();
-                    lines.push(format!("{leading}return {trimmed};"));
-                } else {
-                    lines.push(rendered);
-                }
-            }
-            lines.join("\n")
+) -> Result<String, String> {
+    let instructions = wast_pattern_analyzer::deserialize_body(body)
+        .map_err(|e| format!("cannot deserialize body ({} bytes): {e}", body.len()))?;
+    let mut lines = Vec::new();
+    let last_idx = instructions.len().saturating_sub(1);
+    for (i, instr) in instructions.iter().enumerate() {
+        let rendered = render_instruction(instr, indent, local_names, func_names);
+        if rendered.is_empty() {
+            continue;
         }
-        Err(_) => format!("{}// [body: {} bytes]", indent, body.len()),
+        // TS needs an explicit `return` — a bare trailing expression
+        // evaluates to nothing. Wrap the last value-producing
+        // instruction in `return <expr>;` when the function returns.
+        if returns_value && i == last_idx && is_value_expr(instr) {
+            let leading: String = rendered.chars().take_while(|c| c.is_whitespace()).collect();
+            let trimmed = rendered[leading.len()..].to_string();
+            lines.push(format!("{leading}return {trimmed};"));
+        } else {
+            lines.push(rendered);
+        }
     }
+    Ok(lines.join("\n"))
 }
 
 /// Instructions whose rendered form is an expression (has a value) — these
@@ -511,22 +509,40 @@ fn resolve_to_uid(name: &str, rev_map: &BTreeMap<String, String>) -> String {
 fn find_matching_paren_str(s: &str, open_pos: usize) -> Option<usize> {
     let bytes = s.as_bytes();
     let mut depth = 0i32;
-    for i in open_pos..bytes.len() {
-        match bytes[i] {
-            b'(' => depth += 1,
-            b')' => {
-                depth -= 1;
-                if depth == 0 {
-                    return Some(i);
-                }
+    let mut in_str = false;
+    let mut i = open_pos;
+    while i < bytes.len() {
+        let b = bytes[i];
+        if in_str {
+            // Skip escaped characters inside string literals.
+            if b == b'\\' {
+                i += 2;
+                continue;
             }
-            _ => {}
+            if b == b'"' {
+                in_str = false;
+            }
+        } else {
+            match b {
+                b'"' => in_str = true,
+                b'(' => depth += 1,
+                b')' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return Some(i);
+                    }
+                }
+                _ => {}
+            }
         }
+        i += 1;
     }
     None
 }
 
-/// Find the rightmost occurrence of `pattern` in `s` at paren depth 0.
+/// Find the rightmost occurrence of `pattern` in `s` at bracket depth 0,
+/// skipping over string literals (so operators inside `"..."` never split
+/// the expression).
 fn find_rightmost_top_level(s: &str, pattern: &str) -> Option<usize> {
     let pat = pattern.as_bytes();
     let pat_len = pat.len();
@@ -535,57 +551,80 @@ fn find_rightmost_top_level(s: &str, pattern: &str) -> Option<usize> {
     }
     let bytes = s.as_bytes();
     let mut depth = 0i32;
+    let mut in_str = false;
     let mut last = None;
-    for i in 0..=s.len() - pat_len {
-        match bytes[i] {
-            b'(' => depth += 1,
-            b')' => depth -= 1,
+    let mut i = 0;
+    while i < bytes.len() {
+        let b = bytes[i];
+        if in_str {
+            if b == b'\\' {
+                i += 2;
+                continue;
+            }
+            if b == b'"' {
+                in_str = false;
+            }
+            i += 1;
+            continue;
+        }
+        match b {
+            b'"' => {
+                in_str = true;
+                i += 1;
+                continue;
+            }
+            b'(' | b'[' | b'{' => depth += 1,
+            b')' | b']' | b'}' => depth -= 1,
             _ => {}
         }
-        if depth == 0 && &bytes[i..i + pat_len] == pat {
+        if depth == 0 && i + pat_len <= bytes.len() && &bytes[i..i + pat_len] == pat {
             last = Some(i);
         }
+        i += 1;
     }
     last
 }
 
-/// Split `s` on `delimiter` at top-level (not inside any of `()`, `[]`,
-/// `{}`, or `<>` brackets). Respecting `{}` and `<>` is essential for
-/// rendered compound types like `record { x: u32, y: u32 }` and
-/// `Option<Result<u32, u64>>`.
-fn split_top_level(s: &str, delimiter: char) -> Vec<&str> {
-    let mut parts = Vec::new();
+use wast_syntax_core::scaffold::split_top_level;
+
+/// Net brace depth change of a line, ignoring braces inside string
+/// literals and `//` line comments.
+fn brace_delta(line: &str) -> i32 {
+    let bytes = line.as_bytes();
     let mut depth = 0i32;
-    let mut start = 0;
-    for (i, ch) in s.char_indices() {
-        match ch {
-            '(' | '[' | '{' | '<' => depth += 1,
-            ')' | ']' | '}' | '>' => depth -= 1,
-            c if c == delimiter && depth == 0 => {
-                parts.push(&s[start..i]);
-                start = i + ch.len_utf8();
+    let mut in_str = false;
+    let mut i = 0;
+    while i < bytes.len() {
+        let b = bytes[i];
+        if in_str {
+            if b == b'\\' {
+                i += 2;
+                continue;
             }
-            _ => {}
+            if b == b'"' {
+                in_str = false;
+            }
+        } else {
+            match b {
+                b'"' => in_str = true,
+                b'/' if i + 1 < bytes.len() && bytes[i + 1] == b'/' => break,
+                b'{' => depth += 1,
+                b'}' => depth -= 1,
+                _ => {}
+            }
         }
+        i += 1;
     }
-    parts.push(&s[start..]);
-    parts
+    depth
 }
 
-/// Skip past a `{...}` block (brace-counting). `i` should point to the first
-/// line inside the block (after the opening `{`). On return, `i` points to the
-/// line after the closing `}`.
+/// Skip past a `{...}` block. `i` should point to the first line inside the
+/// block (after the opening `{`). On return, `i` points to the line after
+/// the closing `}`. Brace counting is lexically aware (strings/comments).
 fn skip_block(lines: &[&str], i: &mut usize) {
     let mut depth = 1i32;
     while *i < lines.len() {
-        for ch in lines[*i].chars() {
-            if ch == '{' {
-                depth += 1;
-            }
-            if ch == '}' {
-                depth -= 1;
-            }
-        }
+        depth += brace_delta(lines[*i]);
         *i += 1;
         if depth <= 0 {
             break;
@@ -595,12 +634,17 @@ fn skip_block(lines: &[&str], i: &mut usize) {
 
 /// Parse a sequence of statements from `lines[*i..]`.
 /// Stops (without consuming) at `}`, `} else`, or `case ` lines.
+///
+/// A statement that fails to parse is a hard error carrying the offending
+/// 0-based line index — silently skipping it used to re-serialize a
+/// *partial* body, dropping the unparsed statements without any
+/// diagnostic.
 fn parse_stmts(
     lines: &[&str],
     i: &mut usize,
     rev_local: &BTreeMap<String, String>,
     rev_func: &BTreeMap<String, String>,
-) -> Vec<Instruction> {
+) -> Result<Vec<Instruction>, (usize, String)> {
     let mut instrs = Vec::new();
     while *i < lines.len() {
         let trimmed = lines[*i].trim();
@@ -614,18 +658,17 @@ fn parse_stmts(
         let saved = *i;
         match parse_stmt(lines, i, rev_local, rev_func) {
             Ok(instr) => instrs.push(instr),
-            Err(_) => {
-                *i = saved;
-                if lines[*i].trim().ends_with('{') {
-                    *i += 1;
-                    skip_block(lines, i);
-                } else {
-                    *i += 1;
-                }
-            }
+            Err(e) => return Err((saved, e)),
         }
     }
-    instrs
+    Ok(instrs)
+}
+
+/// Fold a nested `parse_stmts` error (line index + message) into a plain
+/// message so `parse_stmt` keeps a `String` error type; the top-level
+/// caller re-attaches its own line number.
+fn flatten_stmt_err((line, e): (usize, String)) -> String {
+    format!("line {}: {}", line + 1, e)
 }
 
 /// Parse a single statement starting at `lines[*i]`.
@@ -700,10 +743,10 @@ fn parse_stmt(
         let cond_str = &after[1..cp];
         let condition = parse_expr_str(cond_str, rev_local, rev_func)?;
         *i += 1;
-        let then_body = parse_stmts(lines, i, rev_local, rev_func);
+        let then_body = parse_stmts(lines, i, rev_local, rev_func).map_err(flatten_stmt_err)?;
         let else_body = if *i < lines.len() && lines[*i].trim().starts_with("} else {") {
             *i += 1;
-            parse_stmts(lines, i, rev_local, rev_func)
+            parse_stmts(lines, i, rev_local, rev_func).map_err(flatten_stmt_err)?
         } else {
             vec![]
         };
@@ -725,7 +768,7 @@ fn parse_stmt(
             None
         };
         *i += 1;
-        let body = parse_stmts(lines, i, rev_local, rev_func);
+        let body = parse_stmts(lines, i, rev_local, rev_func).map_err(flatten_stmt_err)?;
         if *i < lines.len() && lines[*i].trim() == "}" {
             *i += 1;
         }
@@ -742,7 +785,7 @@ fn parse_stmt(
             None
         };
         *i += 1;
-        let body = parse_stmts(lines, i, rev_local, rev_func);
+        let body = parse_stmts(lines, i, rev_local, rev_func).map_err(flatten_stmt_err)?;
         if *i < lines.len() && lines[*i].trim() == "}" {
             *i += 1;
         }
@@ -767,7 +810,7 @@ fn parse_stmt(
             if cl.starts_with("case ") && cl.ends_with(':') {
                 let label = cl[5..cl.len() - 1].trim().to_string();
                 *i += 1;
-                let body = parse_stmts(lines, i, rev_local, rev_func);
+                let body = parse_stmts(lines, i, rev_local, rev_func).map_err(flatten_stmt_err)?;
                 cases.push((label, body));
             } else {
                 *i += 1;
@@ -941,6 +984,49 @@ fn parse_atom(
         }
     }
 
+    // "..." — string literal (inverse of the `{:?}` rendering)
+    if s.len() >= 2 && s.starts_with('"') && s.ends_with('"') {
+        if let Some(stripped) = s.get(1..s.len() - 1) {
+            // Reject strings whose closing quote actually belongs to a
+            // different literal (e.g. `"a" b "c"`): unescape validates.
+            if let Ok(bytes) = unescape_string_literal(stripped) {
+                return Ok(Instruction::StringLiteral { bytes });
+            }
+        }
+    }
+
+    // { a: EXPR, b: EXPR } — record literal; { a, b } — flags constructor
+    if s.starts_with('{') && s.ends_with('}') {
+        let inner = s[1..s.len() - 1].trim();
+        if inner.is_empty() {
+            return Ok(Instruction::FlagsCtor { flags: vec![] });
+        }
+        let parts: Vec<&str> = split_top_level(inner, ',')
+            .into_iter()
+            .map(|p| p.trim())
+            .collect();
+        let is_ident =
+            |p: &str| !p.is_empty() && p.chars().all(|c| c.is_alphanumeric() || c == '_');
+        if parts.iter().all(|p| is_ident(p)) {
+            return Ok(Instruction::FlagsCtor {
+                flags: parts.iter().map(|p| p.to_string()).collect(),
+            });
+        }
+        let mut fields = Vec::new();
+        for part in &parts {
+            let colon = part
+                .find(':')
+                .ok_or_else(|| format!("record literal field missing ':': {part}"))?;
+            let fname = part[..colon].trim();
+            if !is_ident(fname) {
+                return Err(format!("invalid record field name: {fname}"));
+            }
+            let fval = parse_expr_str(part[colon + 1..].trim(), rev_local, rev_func)?;
+            fields.push((fname.to_string(), fval));
+        }
+        return Ok(Instruction::RecordLiteral { fields });
+    }
+
     // NAME(ARGS) — function call
     if let Some(paren_pos) = s.find('(') {
         if s.ends_with(')') {
@@ -970,7 +1056,70 @@ fn parse_atom(
         return Ok(Instruction::LocalGet { uid });
     }
 
+    // EXPR.field — record field access. `.length` is ambiguous (both
+    // string-len and list-len render as `.length`), so reject it rather
+    // than guess and silently corrupt the body.
+    if let Some(dot) = find_rightmost_top_level(s, ".") {
+        let field = s[dot + 1..].trim();
+        if field == "length" {
+            return Err("cannot parse `.length` (ambiguous string/list length)".to_string());
+        }
+        if !field.is_empty() && field.chars().all(|c| c.is_alphanumeric() || c == '_') && dot > 0 {
+            let value = parse_expr_str(&s[..dot], rev_local, rev_func)?;
+            return Ok(Instruction::RecordGet {
+                value: Box::new(value),
+                field: field.to_string(),
+            });
+        }
+    }
+
     Err(format!("cannot parse expression: {}", s))
+}
+
+/// Decode the escapes produced by Rust's `{:?}` string formatting (which
+/// `to_text` uses for string literals): `\n`, `\t`, `\r`, `\\`, `\"`,
+/// `\'`, `\0` and `\u{HEX}`.
+fn unescape_string_literal(s: &str) -> Result<Vec<u8>, String> {
+    let mut out = Vec::with_capacity(s.len());
+    let mut chars = s.chars();
+    let mut buf = [0u8; 4];
+    while let Some(c) = chars.next() {
+        if c == '"' {
+            // An unescaped quote means the trailing quote we stripped was
+            // not this literal's terminator.
+            return Err("unescaped quote inside string literal".to_string());
+        }
+        if c != '\\' {
+            out.extend_from_slice(c.encode_utf8(&mut buf).as_bytes());
+            continue;
+        }
+        match chars.next() {
+            Some('n') => out.push(b'\n'),
+            Some('t') => out.push(b'\t'),
+            Some('r') => out.push(b'\r'),
+            Some('\\') => out.push(b'\\'),
+            Some('"') => out.push(b'"'),
+            Some('\'') => out.push(b'\''),
+            Some('0') => out.push(0),
+            Some('u') => {
+                if chars.next() != Some('{') {
+                    return Err("bad \\u escape".to_string());
+                }
+                let mut hex = String::new();
+                for h in chars.by_ref() {
+                    if h == '}' {
+                        break;
+                    }
+                    hex.push(h);
+                }
+                let cp = u32::from_str_radix(&hex, 16).map_err(|e| format!("bad \\u: {e}"))?;
+                let ch = char::from_u32(cp).ok_or("bad \\u codepoint")?;
+                out.extend_from_slice(ch.encode_utf8(&mut buf).as_bytes());
+            }
+            other => return Err(format!("unknown escape: \\{other:?}")),
+        }
+    }
+    Ok(out)
 }
 
 fn build_match_instruction(
@@ -1029,23 +1178,27 @@ fn build_match_instruction(
     }
 }
 
-/// Parse function body lines and return serialized instructions (or existing
-/// body when the text consists entirely of comments / is empty).
+/// Parse function body lines and return serialized instructions (or the
+/// existing body when the text consists entirely of comments / is empty).
+///
+/// Any statement that fails to parse aborts the body with an error
+/// (line index + message); the caller surfaces it as a `WastError` and
+/// skips past the body so parsing can continue with the next function.
 fn parse_func_body(
     lines: &[&str],
     i: &mut usize,
     rev_local: &BTreeMap<String, String>,
     rev_func: &BTreeMap<String, String>,
     existing_body: Option<Vec<u8>>,
-) -> Option<Vec<u8>> {
-    let instructions = parse_stmts(lines, i, rev_local, rev_func);
+) -> Result<Option<Vec<u8>>, (usize, String)> {
+    let instructions = parse_stmts(lines, i, rev_local, rev_func)?;
     if *i < lines.len() && lines[*i].trim() == "}" {
         *i += 1;
     }
     if instructions.is_empty() {
-        existing_body
+        Ok(existing_body)
     } else {
-        Some(wast_pattern_analyzer::serialize_body(&instructions))
+        Ok(Some(wast_pattern_analyzer::serialize_body(&instructions)))
     }
 }
 
@@ -1053,7 +1206,7 @@ fn parse_func_body(
 // to_text
 // ---------------------------------------------------------------------------
 
-fn func_to_text(func_uid: &str, func: &WastFunc, ctx: &RenderContext) -> String {
+fn func_to_text(func_uid: &str, func: &WastFunc, ctx: &RenderContext) -> Result<String, String> {
     let source_uid = match &func.source {
         FuncSource::Internal(u) | FuncSource::Imported(u) | FuncSource::Exported(u) => u.clone(),
     };
@@ -1081,31 +1234,32 @@ fn func_to_text(func_uid: &str, func: &WastFunc, ctx: &RenderContext) -> String 
         None => String::new(),
     };
 
-    match &func.source {
-        FuncSource::Imported(_) => {
-            format!("declare function {}({}){};", name, params_str, result_str)
+    let render = |b: &Option<Vec<u8>>, returns: bool| -> Result<String, String> {
+        match b {
+            Some(b) => render_body(b, "  ", returns, &ctx.local_names, &ctx.func_names)
+                .map_err(|e| format!("func '{func_uid}': {e}")),
+            None => Ok("  // [no body]".to_string()),
         }
+    };
+
+    match &func.source {
+        FuncSource::Imported(_) => Ok(format!(
+            "declare function {}({}){};",
+            name, params_str, result_str
+        )),
         FuncSource::Exported(_) => {
-            let returns = func.result.is_some();
-            let body_str = match &func.body {
-                Some(b) => render_body(b, "  ", returns, &ctx.local_names, &ctx.func_names),
-                None => "  // [no body]".to_string(),
-            };
-            format!(
+            let body_str = render(&func.body, func.result.is_some())?;
+            Ok(format!(
                 "export function {}({}){} {{\n{}\n}}",
                 name, params_str, result_str, body_str
-            )
+            ))
         }
         FuncSource::Internal(_) => {
-            let returns = func.result.is_some();
-            let body_str = match &func.body {
-                Some(b) => render_body(b, "  ", returns, &ctx.local_names, &ctx.func_names),
-                None => "  // [no body]".to_string(),
-            };
-            format!(
+            let body_str = render(&func.body, func.result.is_some())?;
+            Ok(format!(
                 "function {}({}){} {{\n{}\n}}",
                 name, params_str, result_str, body_str
-            )
+            ))
         }
     }
 }
@@ -1217,28 +1371,31 @@ fn parse_signature(sig: &str) -> Option<ParsedFunc> {
     })
 }
 
-fn generate_uid() -> String {
-    use core::sync::atomic::{AtomicU32, Ordering};
-    static COUNTER: AtomicU32 = AtomicU32::new(0xa000);
-    let val = COUNTER.fetch_add(1, Ordering::Relaxed);
-    format!("{:04x}", val & 0xffff)
-}
-
 // ---------------------------------------------------------------------------
 // Guest implementation
 // ---------------------------------------------------------------------------
 
 impl bindings::exports::wast::core::syntax_plugin::Guest for Component {
-    fn to_text(component: WastComponent) -> String {
+    fn to_text(component: WastComponent) -> Result<String, Vec<WastError>> {
         let native_syms = convert::syms(&component.syms);
         let native_types = convert::type_list(&component.types);
         let ctx = RenderContext::new(&native_syms, &native_types);
 
         let mut parts: Vec<String> = Vec::new();
+        let mut errors: Vec<WastError> = Vec::new();
         for (func_uid, func) in &component.funcs {
-            parts.push(func_to_text(func_uid, func, &ctx));
+            match func_to_text(func_uid, func, &ctx) {
+                Ok(text) => parts.push(text),
+                Err(e) => errors.push(WastError {
+                    message: format!("render_error: {e}"),
+                    location: Some(format!("func {func_uid}")),
+                }),
+            }
         }
-        parts.join("\n\n")
+        if !errors.is_empty() {
+            return Err(errors);
+        }
+        Ok(parts.join("\n\n"))
     }
 
     fn from_text(text: String, existing: WastComponent) -> Result<WastComponent, Vec<WastError>> {
@@ -1246,43 +1403,17 @@ impl bindings::exports::wast::core::syntax_plugin::Guest for Component {
         let native_types = convert::type_list(&existing.types);
         let ctx = RenderContext::new(&native_syms, &native_types);
 
-        // Reverse maps: display_name -> uid
-        let rev_func: BTreeMap<String, String> = ctx
-            .func_names
-            .iter()
-            .map(|(k, v)| (v.clone(), k.clone()))
-            .collect();
-        let rev_local: BTreeMap<String, String> = ctx
-            .local_names
-            .iter()
-            .map(|(k, v)| (v.clone(), k.clone()))
-            .collect();
-
-        // Existing funcs by uid for body preservation
-        let existing_funcs: BTreeMap<String, &WastFunc> = existing
-            .funcs
-            .iter()
-            .map(|(uid, f)| (uid.clone(), f))
-            .collect();
-
-        // Also build a map from source uid -> (func_uid, func)
-        let existing_by_source: BTreeMap<String, (&str, &WastFunc)> = existing
-            .funcs
-            .iter()
-            .map(|(uid, f)| {
-                let src = match &f.source {
-                    FuncSource::Internal(u) | FuncSource::Imported(u) | FuncSource::Exported(u) => {
-                        u.clone()
-                    }
-                };
-                (src, (uid.as_str(), f))
-            })
-            .collect();
+        // Reverse map: display_name -> uid (funcs). The *local* reverse
+        // map is built per function inside the loop — see
+        // `scaffold::func_rev_local` for why a global one is wrong.
+        let rev_func = ExistingIndex::reverse(&ctx.func_names);
+        let index = ExistingIndex::new(&existing);
+        let mut uid_gen = UidGen::new(index.used_uids.clone());
 
         let mut errors: Vec<WastError> = Vec::new();
         let mut funcs: Vec<(FuncUid, WastFunc)> = Vec::new();
         let mut new_syms_internal: Vec<SymEntry> = existing.syms.internal.clone();
-        let mut new_syms_local: Vec<SymEntry> = existing.syms.local.clone();
+        let new_syms_local: Vec<SymEntry> = existing.syms.local.clone();
 
         let lines: Vec<&str> = text.lines().collect();
         let mut i = 0;
@@ -1303,30 +1434,24 @@ impl bindings::exports::wast::core::syntax_plugin::Guest for Component {
                 let sig_str = sig_str.trim_end_matches(';');
                 match parse_signature(sig_str) {
                     Some(parsed) => {
-                        let (func_uid, source_uid) = resolve_func_uid(
+                        let (func_uid, source_uid) = scaffold::resolve_func_uid(
                             &parsed.name,
                             &rev_func,
-                            &existing_by_source,
-                            &existing_funcs,
-                            true,
+                            &index,
+                            &mut uid_gen,
                         );
+                        let existing_func = index.find(&source_uid, &func_uid);
+                        let rev_local = scaffold::func_rev_local(&ctx.local_names, existing_func);
 
-                        let params = resolve_params(
-                            &parsed.params,
-                            &rev_local,
-                            &existing.types,
-                            &ctx,
-                            &mut new_syms_local,
-                        );
+                        let params = scaffold::resolve_params(&parsed.params, &rev_local, |t| {
+                            parse_type_ref_str(t, &existing.types, &ctx)
+                        });
                         let result = parsed
                             .result_type
                             .as_ref()
                             .map(|r| parse_type_ref_str(r, &existing.types, &ctx));
 
-                        let body = existing_by_source
-                            .get(&source_uid)
-                            .and_then(|(_, f)| f.body.clone())
-                            .or_else(|| existing_funcs.get(&func_uid).and_then(|f| f.body.clone()));
+                        let body = existing_func.and_then(|f| f.body.clone());
 
                         funcs.push((
                             func_uid,
@@ -1359,36 +1484,51 @@ impl bindings::exports::wast::core::syntax_plugin::Guest for Component {
                 let sig_str = sig_str.trim_end_matches('{').trim();
                 match parse_signature(sig_str) {
                     Some(parsed) => {
-                        let (func_uid, source_uid) = resolve_func_uid(
+                        let (func_uid, source_uid) = scaffold::resolve_func_uid(
                             &parsed.name,
                             &rev_func,
-                            &existing_by_source,
-                            &existing_funcs,
-                            false,
+                            &index,
+                            &mut uid_gen,
                         );
-
-                        let existing_body = existing_by_source
-                            .get(&source_uid)
-                            .and_then(|(_, f)| f.body.clone())
-                            .or_else(|| existing_funcs.get(&func_uid).and_then(|f| f.body.clone()));
+                        let existing_func = index.find(&source_uid, &func_uid);
+                        let rev_local = scaffold::func_rev_local(&ctx.local_names, existing_func);
+                        let existing_body = existing_func.and_then(|f| f.body.clone());
 
                         i += 1;
-                        let body =
-                            parse_func_body(&lines, &mut i, &rev_local, &rev_func, existing_body);
-
-                        let params = resolve_params(
-                            &parsed.params,
+                        let body = match parse_func_body(
+                            &lines,
+                            &mut i,
                             &rev_local,
-                            &existing.types,
-                            &ctx,
-                            &mut new_syms_local,
-                        );
+                            &rev_func,
+                            existing_body,
+                        ) {
+                            Ok(b) => b,
+                            Err((line_idx, msg)) => {
+                                errors.push(WastError {
+                                    message: format!("parse_error: {msg}"),
+                                    location: Some(format!("line {}", line_idx + 1)),
+                                });
+                                // Skip past the rest of this body so the
+                                // following functions still get parsed
+                                // (and their own errors reported).
+                                skip_block(&lines, &mut i);
+                                continue;
+                            }
+                        };
+
+                        let params = scaffold::resolve_params(&parsed.params, &rev_local, |t| {
+                            parse_type_ref_str(t, &existing.types, &ctx)
+                        });
                         let result = parsed
                             .result_type
                             .as_ref()
                             .map(|r| parse_type_ref_str(r, &existing.types, &ctx));
 
-                        ensure_func_sym(&source_uid, &parsed.name, &mut new_syms_internal);
+                        scaffold::ensure_func_sym(
+                            &source_uid,
+                            &parsed.name,
+                            &mut new_syms_internal,
+                        );
 
                         funcs.push((
                             func_uid,
@@ -1417,36 +1557,51 @@ impl bindings::exports::wast::core::syntax_plugin::Guest for Component {
                 let sig_str = sig_str.trim_end_matches('{').trim();
                 match parse_signature(sig_str) {
                     Some(parsed) => {
-                        let (func_uid, source_uid) = resolve_func_uid(
+                        let (func_uid, source_uid) = scaffold::resolve_func_uid(
                             &parsed.name,
                             &rev_func,
-                            &existing_by_source,
-                            &existing_funcs,
-                            false,
+                            &index,
+                            &mut uid_gen,
                         );
-
-                        let existing_body = existing_by_source
-                            .get(&source_uid)
-                            .and_then(|(_, f)| f.body.clone())
-                            .or_else(|| existing_funcs.get(&func_uid).and_then(|f| f.body.clone()));
+                        let existing_func = index.find(&source_uid, &func_uid);
+                        let rev_local = scaffold::func_rev_local(&ctx.local_names, existing_func);
+                        let existing_body = existing_func.and_then(|f| f.body.clone());
 
                         i += 1;
-                        let body =
-                            parse_func_body(&lines, &mut i, &rev_local, &rev_func, existing_body);
-
-                        let params = resolve_params(
-                            &parsed.params,
+                        let body = match parse_func_body(
+                            &lines,
+                            &mut i,
                             &rev_local,
-                            &existing.types,
-                            &ctx,
-                            &mut new_syms_local,
-                        );
+                            &rev_func,
+                            existing_body,
+                        ) {
+                            Ok(b) => b,
+                            Err((line_idx, msg)) => {
+                                errors.push(WastError {
+                                    message: format!("parse_error: {msg}"),
+                                    location: Some(format!("line {}", line_idx + 1)),
+                                });
+                                // Skip past the rest of this body so the
+                                // following functions still get parsed
+                                // (and their own errors reported).
+                                skip_block(&lines, &mut i);
+                                continue;
+                            }
+                        };
+
+                        let params = scaffold::resolve_params(&parsed.params, &rev_local, |t| {
+                            parse_type_ref_str(t, &existing.types, &ctx)
+                        });
                         let result = parsed
                             .result_type
                             .as_ref()
                             .map(|r| parse_type_ref_str(r, &existing.types, &ctx));
 
-                        ensure_func_sym(&source_uid, &parsed.name, &mut new_syms_internal);
+                        scaffold::ensure_func_sym(
+                            &source_uid,
+                            &parsed.name,
+                            &mut new_syms_internal,
+                        );
 
                         funcs.push((
                             func_uid,
@@ -1648,75 +1803,6 @@ fn fixup_call_args(
     changed
 }
 
-/// Resolve a function name to (func_uid, source_uid).
-fn resolve_func_uid(
-    name: &str,
-    rev_func: &BTreeMap<String, String>,
-    existing_by_source: &BTreeMap<String, (&str, &WastFunc)>,
-    existing_funcs: &BTreeMap<String, &WastFunc>,
-    _is_import: bool,
-) -> (String, String) {
-    if let Some(source_uid) = rev_func.get(name) {
-        if let Some((func_uid, _)) = existing_by_source.get(source_uid.as_str()) {
-            return (func_uid.to_string(), source_uid.clone());
-        }
-        return (source_uid.clone(), source_uid.clone());
-    }
-    // No syms entry overrides the rendered name. `to_text` falls back to
-    // the source-val first, then the func-uid. Try both directions before
-    // fabricating a fresh UID — otherwise body Calls referencing the
-    // existing UID become dangling references.
-    if let Some((func_uid, _)) = existing_by_source.get(name) {
-        return (func_uid.to_string(), name.to_string());
-    }
-    if let Some(f) = existing_funcs.get(name) {
-        let source_val = match &f.source {
-            FuncSource::Internal(s) | FuncSource::Imported(s) | FuncSource::Exported(s) => {
-                s.clone()
-            }
-        };
-        return (name.to_string(), source_val);
-    }
-    let uid = generate_uid();
-    (uid.clone(), uid)
-}
-
-/// Resolve parameter names and types from parsed strings.
-fn resolve_params(
-    parsed: &[(String, String)],
-    rev_local: &BTreeMap<String, String>,
-    types: &[(TypeUid, WastTypeDef)],
-    ctx: &RenderContext,
-    _new_syms_local: &mut Vec<SymEntry>,
-) -> Vec<(FuncUid, WitTypeRef)> {
-    parsed
-        .iter()
-        .map(|(pname, ptype)| {
-            // When syms.local maps the rendered name back to an explicit
-            // UID, reuse it. Otherwise the displayed name IS the UID
-            // (that's what to_text falls back to when no sym overrides
-            // it) — using the name verbatim keeps body LocalGet refs
-            // pointing at the same param.
-            let param_uid = rev_local
-                .get(pname.as_str())
-                .cloned()
-                .unwrap_or_else(|| pname.clone());
-            let type_ref = parse_type_ref_str(ptype, types, ctx);
-            (param_uid, type_ref)
-        })
-        .collect()
-}
-
-/// Ensure a sym entry exists for a function.
-fn ensure_func_sym(source_uid: &str, name: &str, syms_internal: &mut Vec<SymEntry>) {
-    if !syms_internal.iter().any(|e| e.uid == source_uid) {
-        syms_internal.push(SymEntry {
-            uid: source_uid.to_string(),
-            display_name: name.to_string(),
-        });
-    }
-}
-
 bindings::export!(Component with_types_in bindings);
 
 #[cfg(test)]
@@ -1733,7 +1819,11 @@ mod tests {
                         source: FuncSource::Internal("f1".to_string()),
                         params: vec![("p1".to_string(), "t1".to_string())],
                         result: Some("t1".to_string()),
-                        body: Some(vec![1, 2, 3]),
+                        body: Some(wast_pattern_analyzer::serialize_body(&[
+                            Instruction::LocalGet {
+                                uid: "p1".to_string(),
+                            },
+                        ])),
                     },
                 ),
                 (
@@ -1751,7 +1841,9 @@ mod tests {
                         source: FuncSource::Exported("f3".to_string()),
                         params: vec![],
                         result: Some("t1".to_string()),
-                        body: Some(vec![10, 20]),
+                        body: Some(wast_pattern_analyzer::serialize_body(&[
+                            Instruction::Const { value: 7 },
+                        ])),
                     },
                 ),
             ],
@@ -1795,7 +1887,7 @@ mod tests {
     #[test]
     fn test_to_text_contains_display_names() {
         let comp = make_test_component();
-        let text = Component::to_text(comp);
+        let text = Component::to_text(comp).unwrap();
         assert!(text.contains("my_func"), "should contain func name");
         assert!(text.contains("param_one"), "should contain param name");
         assert!(text.contains("imported_fn"), "should contain import name");
@@ -1814,7 +1906,7 @@ mod tests {
     #[test]
     fn test_to_text_internal_func_format() {
         let comp = make_test_component();
-        let text = Component::to_text(comp);
+        let text = Component::to_text(comp).unwrap();
         assert!(
             text.contains("function my_func(param_one: u32): u32"),
             "internal func signature: {}",
@@ -1825,7 +1917,7 @@ mod tests {
     #[test]
     fn test_to_text_import_format() {
         let comp = make_test_component();
-        let text = Component::to_text(comp);
+        let text = Component::to_text(comp).unwrap();
         assert!(
             text.contains("declare function imported_fn(param_two: u32)"),
             "import signature: {}",
@@ -1836,7 +1928,7 @@ mod tests {
     #[test]
     fn test_to_text_export_format() {
         let comp = make_test_component();
-        let text = Component::to_text(comp);
+        let text = Component::to_text(comp).unwrap();
         assert!(
             text.contains("export function exported_fn(): u32"),
             "export signature: {}",
@@ -1847,7 +1939,7 @@ mod tests {
     #[test]
     fn test_roundtrip_to_text_from_text_to_text() {
         let comp = make_test_component();
-        let text1 = Component::to_text(comp.clone());
+        let text1 = Component::to_text(comp.clone()).unwrap();
 
         let parsed = Component::from_text(text1.clone(), comp.clone());
         assert!(parsed.is_ok(), "from_text failed: {:?}", parsed.err());
@@ -1855,29 +1947,33 @@ mod tests {
 
         assert_eq!(parsed.funcs.len(), comp.funcs.len(), "func count mismatch");
 
-        let text2 = Component::to_text(parsed);
+        let text2 = Component::to_text(parsed).unwrap();
         assert_eq!(text1, text2, "roundtrip text mismatch");
     }
 
     #[test]
     fn test_from_text_preserves_body() {
         let comp = make_test_component();
-        let text = Component::to_text(comp.clone());
+        let expected = comp
+            .funcs
+            .iter()
+            .find(|(uid, _)| uid == "f1")
+            .unwrap()
+            .1
+            .body
+            .clone();
+        let text = Component::to_text(comp.clone()).unwrap();
         let parsed = Component::from_text(text, comp).unwrap();
 
         let f1 = parsed.funcs.iter().find(|(uid, _)| uid == "f1");
         assert!(f1.is_some(), "f1 should exist");
-        assert_eq!(
-            f1.unwrap().1.body,
-            Some(vec![1, 2, 3]),
-            "body should be preserved"
-        );
+        assert_eq!(f1.unwrap().1.body, expected, "body should round-trip");
     }
 
     #[test]
     fn test_from_text_preserves_func_source_kinds() {
         let comp = make_test_component();
-        let text = Component::to_text(comp.clone());
+        let text = Component::to_text(comp.clone()).unwrap();
         let parsed = Component::from_text(text, comp).unwrap();
 
         let has_internal = parsed
@@ -1916,7 +2012,7 @@ mod tests {
                 local: vec![],
             },
         };
-        let text = Component::to_text(comp.clone());
+        let text = Component::to_text(comp.clone()).unwrap();
         assert_eq!(text, "", "empty component should produce empty text");
 
         let parsed = Component::from_text(text, comp);
@@ -1990,10 +2086,10 @@ mod tests {
     /// Assert that to_text → from_text → to_text produces identical text.
     fn assert_body_roundtrip(instructions: Vec<Instruction>) {
         let comp = make_body_component(instructions);
-        let text1 = Component::to_text(comp.clone());
+        let text1 = Component::to_text(comp.clone()).unwrap();
         let parsed = Component::from_text(text1.clone(), comp);
         assert!(parsed.is_ok(), "from_text failed: {:?}", parsed.err());
-        let text2 = Component::to_text(parsed.unwrap());
+        let text2 = Component::to_text(parsed.unwrap()).unwrap();
         assert_eq!(
             text1, text2,
             "body roundtrip text mismatch:\n--- expected ---\n{}\n--- actual ---\n{}",
@@ -2219,5 +2315,136 @@ mod tests {
                 else_body: vec![],
             },
         ]);
+    }
+
+    #[test]
+    fn test_to_text_errors_on_undeserializable_body() {
+        let mut comp = make_test_component();
+        comp.funcs[0].1.body = Some(vec![0xff, 0xfe, 0xfd]);
+        let result = Component::to_text(comp);
+        assert!(result.is_err(), "garbage body must surface an error");
+        assert!(result.unwrap_err()[0].message.contains("render_error"));
+    }
+
+    #[test]
+    fn test_from_text_unparsable_statement_is_an_error() {
+        let comp = make_test_component();
+        let text = "export function exported_fn(): u32 {\n  @@@ not a statement\n}\n";
+        let result = Component::from_text(text.to_string(), comp);
+        assert!(result.is_err(), "unparsable body statement must error");
+        let errs = result.unwrap_err();
+        assert!(
+            errs.iter().any(|e| e.message.contains("parse_error")),
+            "expected parse_error, got: {errs:?}"
+        );
+        assert!(
+            errs[0].location.as_deref() == Some("line 2"),
+            "error should carry the body line: {errs:?}"
+        );
+    }
+
+    #[test]
+    fn test_body_roundtrip_record_literal_and_get() {
+        assert_body_roundtrip(vec![Instruction::RecordLiteral {
+            fields: vec![
+                (
+                    "x".to_string(),
+                    Instruction::LocalGet {
+                        uid: "p1".to_string(),
+                    },
+                ),
+                ("y".to_string(), Instruction::Const { value: 2 }),
+            ],
+        }]);
+        assert_body_roundtrip(vec![Instruction::RecordGet {
+            value: Box::new(Instruction::LocalGet {
+                uid: "p1".to_string(),
+            }),
+            field: "x".to_string(),
+        }]);
+    }
+
+    #[test]
+    fn test_body_roundtrip_string_literal() {
+        assert_body_roundtrip(vec![Instruction::StringLiteral {
+            bytes: "hello, \"wast\" \\ world\n".as_bytes().to_vec(),
+        }]);
+    }
+
+    #[test]
+    fn test_local_names_scoped_per_function() {
+        // Two functions whose params share the display name "x" but have
+        // different uids. Each body must resolve "x" back to *its own*
+        // param uid, not the other function's.
+        let body1 = wast_pattern_analyzer::serialize_body(&[Instruction::LocalGet {
+            uid: "p1".to_string(),
+        }]);
+        let body2 = wast_pattern_analyzer::serialize_body(&[Instruction::LocalGet {
+            uid: "p2".to_string(),
+        }]);
+        let comp = WastComponent {
+            funcs: vec![
+                (
+                    "f1".to_string(),
+                    WastFunc {
+                        source: FuncSource::Internal("f1".to_string()),
+                        params: vec![("p1".to_string(), "t1".to_string())],
+                        result: Some("t1".to_string()),
+                        body: Some(body1.clone()),
+                    },
+                ),
+                (
+                    "f2".to_string(),
+                    WastFunc {
+                        source: FuncSource::Internal("f2".to_string()),
+                        params: vec![("p2".to_string(), "t1".to_string())],
+                        result: Some("t1".to_string()),
+                        body: Some(body2.clone()),
+                    },
+                ),
+            ],
+            types: vec![(
+                "t1".to_string(),
+                WastTypeDef {
+                    source: TypeSource::Internal("t1".to_string()),
+                    definition: WitType::Primitive(PrimitiveType::U32),
+                },
+            )],
+            syms: Syms {
+                wit_syms: vec![],
+                internal: vec![
+                    SymEntry {
+                        uid: "f1".to_string(),
+                        display_name: "alpha".to_string(),
+                    },
+                    SymEntry {
+                        uid: "f2".to_string(),
+                        display_name: "beta".to_string(),
+                    },
+                    SymEntry {
+                        uid: "t1".to_string(),
+                        display_name: "u32".to_string(),
+                    },
+                ],
+                local: vec![
+                    SymEntry {
+                        uid: "p1".to_string(),
+                        display_name: "x".to_string(),
+                    },
+                    SymEntry {
+                        uid: "p2".to_string(),
+                        display_name: "x".to_string(),
+                    },
+                ],
+            },
+        };
+        let text = Component::to_text(comp.clone()).unwrap();
+        let parsed = Component::from_text(text, comp).unwrap();
+        let f1 = &parsed.funcs.iter().find(|(u, _)| u == "f1").unwrap().1;
+        let f2 = &parsed.funcs.iter().find(|(u, _)| u == "f2").unwrap().1;
+        assert_eq!(f1.params[0].0, "p1");
+        assert_eq!(f2.params[0].0, "p2");
+        assert_eq!(f1.body, Some(body1), "f1 body must reference p1");
+        assert_eq!(f2.body, Some(body2), "f2 body must reference p2");
     }
 }

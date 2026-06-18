@@ -2,8 +2,8 @@
 #[rustfmt::skip]
 mod bindings;
 
-use bindings::wast::core::types::*;
 use wast_pattern_analyzer::{ArithOp, CompareOp, Instruction};
+use wast_syntax_core::wit_types::*;
 
 struct Component;
 
@@ -430,11 +430,13 @@ fn render_instruction(instr: &Instruction, indent: &str) -> String {
     }
 }
 
-fn render_body(body: &[u8], indent: &str) -> String {
-    match wast_pattern_analyzer::deserialize_body(body) {
-        Ok(instructions) => render_instructions(&instructions, indent),
-        Err(_) => format!("{}(; body: {} bytes ;)", indent, body.len()),
-    }
+/// Render a serialized body. A body that fails to deserialize is an error:
+/// silently rendering a placeholder comment used to *lose the body* on the
+/// next `from_text` (the comment parsed back to "no instructions").
+fn render_body(body: &[u8], indent: &str) -> Result<String, String> {
+    let instructions = wast_pattern_analyzer::deserialize_body(body)
+        .map_err(|e| format!("cannot deserialize body ({} bytes): {e}", body.len()))?;
+    Ok(render_instructions(&instructions, indent))
 }
 
 // ---------------------------------------------------------------------------
@@ -449,7 +451,11 @@ fn render_func_source(source: &FuncSource) -> (&'static str, &str) {
     }
 }
 
-fn func_to_text(func_uid: &str, func: &WastFunc, types: &[(TypeUid, WastTypeDef)]) -> String {
+fn func_to_text(
+    func_uid: &str,
+    func: &WastFunc,
+    types: &[(TypeUid, WastTypeDef)],
+) -> Result<String, String> {
     let (source_kind, source_uid) = render_func_source(&func.source);
 
     let params_str: String = func
@@ -470,14 +476,17 @@ fn func_to_text(func_uid: &str, func: &WastFunc, types: &[(TypeUid, WastTypeDef)
     };
 
     let body_str = match &func.body {
-        Some(b) => format!("\n{}", render_body(b, "    ")),
+        Some(b) => format!(
+            "\n{}",
+            render_body(b, "    ").map_err(|e| format!("func '{func_uid}': {e}"))?
+        ),
         None => String::new(),
     };
 
-    format!(
+    Ok(format!(
         "  (func ${} ({} ${}){}{}{}\n  )",
         func_uid, source_kind, source_uid, params_str, result_str, body_str
-    )
+    ))
 }
 
 // ---------------------------------------------------------------------------
@@ -505,6 +514,25 @@ fn type_to_text(type_uid: &str, typedef: &WastTypeDef, types: &[(TypeUid, WastTy
 // Syms rendering
 // ---------------------------------------------------------------------------
 
+/// Escape a string for embedding in a double-quoted raw-syntax literal.
+/// Inverse of the escapes `tokenize` understands: backslash, quote, the
+/// common control characters, and `\HH` hex for any other control byte.
+fn escape_str(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for &b in s.as_bytes() {
+        match b {
+            b'\\' => out.push_str("\\\\"),
+            b'"' => out.push_str("\\\""),
+            b'\n' => out.push_str("\\n"),
+            b'\t' => out.push_str("\\t"),
+            b'\r' => out.push_str("\\r"),
+            0x00..=0x1f | 0x7f => out.push_str(&format!("\\{b:02x}")),
+            _ => out.push(b as char),
+        }
+    }
+    out
+}
+
 fn syms_to_text(syms: &Syms) -> String {
     let mut lines = Vec::new();
     lines.push("  (syms".to_string());
@@ -512,7 +540,11 @@ fn syms_to_text(syms: &Syms) -> String {
     if !syms.wit_syms.is_empty() {
         lines.push("    (wit".to_string());
         for (uid, display) in &syms.wit_syms {
-            lines.push(format!("      (sym \"{}\" \"{}\")", uid, display));
+            lines.push(format!(
+                "      (sym \"{}\" \"{}\")",
+                escape_str(uid),
+                escape_str(display)
+            ));
         }
         lines.push("    )".to_string());
     }
@@ -522,7 +554,8 @@ fn syms_to_text(syms: &Syms) -> String {
         for entry in &syms.internal {
             lines.push(format!(
                 "      (sym \"{}\" \"{}\")",
-                entry.uid, entry.display_name
+                escape_str(&entry.uid),
+                escape_str(&entry.display_name)
             ));
         }
         lines.push("    )".to_string());
@@ -533,7 +566,8 @@ fn syms_to_text(syms: &Syms) -> String {
         for entry in &syms.local {
             lines.push(format!(
                 "      (sym \"{}\" \"{}\")",
-                entry.uid, entry.display_name
+                escape_str(&entry.uid),
+                escape_str(&entry.display_name)
             ));
         }
         lines.push("    )".to_string());
@@ -1585,8 +1619,9 @@ fn from_text_inner(text: &str, existing: &WastComponent) -> Result<WastComponent
 // ---------------------------------------------------------------------------
 
 impl bindings::exports::wast::core::syntax_plugin::Guest for Component {
-    fn to_text(component: WastComponent) -> String {
+    fn to_text(component: WastComponent) -> Result<String, Vec<WastError>> {
         let mut parts: Vec<String> = Vec::new();
+        let mut errors: Vec<WastError> = Vec::new();
 
         parts.push("(component".to_string());
 
@@ -1597,14 +1632,24 @@ impl bindings::exports::wast::core::syntax_plugin::Guest for Component {
 
         // Funcs
         for (func_uid, func) in &component.funcs {
-            parts.push(func_to_text(func_uid, func, &component.types));
+            match func_to_text(func_uid, func, &component.types) {
+                Ok(text) => parts.push(text),
+                Err(e) => errors.push(WastError {
+                    message: format!("render_error: {e}"),
+                    location: Some(format!("func {func_uid}")),
+                }),
+            }
+        }
+
+        if !errors.is_empty() {
+            return Err(errors);
         }
 
         // Syms
         parts.push(syms_to_text(&component.syms));
 
         parts.push(")".to_string());
-        parts.join("\n")
+        Ok(parts.join("\n"))
     }
 
     fn from_text(text: String, existing: WastComponent) -> Result<WastComponent, Vec<WastError>> {
@@ -1639,7 +1684,7 @@ mod tests {
             types: vec![],
             syms: make_empty_syms(),
         };
-        let text = Component::to_text(comp);
+        let text = Component::to_text(comp).unwrap();
         assert!(text.starts_with("(component"));
         assert!(text.ends_with(')'));
     }
@@ -1687,7 +1732,7 @@ mod tests {
             result: None,
             body: None,
         };
-        let text = func_to_text("f1", &func, &types);
+        let text = func_to_text("f1", &func, &types).unwrap();
         assert!(text.contains("(func $f1 (import $log)"));
         assert!(text.contains("(param $p1 string)"));
         assert!(!text.contains("(result"));
@@ -1714,7 +1759,7 @@ mod tests {
             result: Some("tid_u32".to_string()),
             body: Some(body),
         };
-        let text = func_to_text("f2", &func, &types);
+        let text = func_to_text("f2", &func, &types).unwrap();
         assert!(text.contains("(func $f2 (export $handle)"));
         assert!(text.contains("(param $p1 u32)"));
         assert!(text.contains("(result u32)"));
@@ -1805,7 +1850,7 @@ mod tests {
                 ],
             },
         ]);
-        let text = render_body(&body, "  ");
+        let text = render_body(&body, "  ").unwrap();
         assert!(text.contains("(block $blk"));
         assert!(text.contains("(loop $lp"));
         assert!(text.contains("(br_if $lp"));
@@ -1825,7 +1870,7 @@ mod tests {
             then_body: vec![Instruction::Return],
             else_body: vec![Instruction::Nop],
         }]);
-        let text = render_body(&body, "  ");
+        let text = render_body(&body, "  ").unwrap();
         assert!(text.contains("(if"));
         assert!(text.contains("(i64.eq"));
         assert!(text.contains("(then"));
@@ -1842,7 +1887,7 @@ mod tests {
                 ("b".to_string(), Instruction::Const { value: 2 }),
             ],
         }]);
-        let text = render_body(&body, "  ");
+        let text = render_body(&body, "  ").unwrap();
         assert!(text.contains("(call $add"));
         assert!(text.contains("(; $a ;)"));
         assert!(text.contains("(i64.const 1)"));
@@ -1859,7 +1904,7 @@ mod tests {
             }),
             rhs: Box::new(Instruction::Const { value: 1 }),
         }]);
-        let text = render_body(&body, "  ");
+        let text = render_body(&body, "  ").unwrap();
         assert!(text.contains("(i64.add"));
         assert!(text.contains("(local.get $x)"));
         assert!(text.contains("(i64.const 1)"));
@@ -1875,7 +1920,7 @@ mod tests {
             some_body: vec![Instruction::Return],
             none_body: vec![Instruction::Nop],
         }]);
-        let text = render_body(&body, "  ");
+        let text = render_body(&body, "  ").unwrap();
         assert!(text.contains("(match_option"));
         assert!(text.contains("(some $val"));
         assert!(text.contains("(none"));
@@ -1892,7 +1937,7 @@ mod tests {
             err_binding: "e".to_string(),
             err_body: vec![Instruction::Nop],
         }]);
-        let text = render_body(&body, "  ");
+        let text = render_body(&body, "  ").unwrap();
         assert!(text.contains("(match_result"));
         assert!(text.contains("(ok $v"));
         assert!(text.contains("(err $e"));
@@ -1917,7 +1962,7 @@ mod tests {
                 }),
             },
         ]);
-        let text = render_body(&body, "  ");
+        let text = render_body(&body, "  ").unwrap();
         assert!(text.contains("(some"));
         assert!(text.contains("(i64.const 42)"));
         assert!(text.contains("(none)"));
@@ -2009,7 +2054,7 @@ mod tests {
                 }],
             },
         };
-        let text = Component::to_text(comp);
+        let text = Component::to_text(comp).unwrap();
         // Should contain component wrapper
         assert!(text.starts_with("(component"));
         assert!(text.ends_with(')'));
@@ -2029,7 +2074,7 @@ mod tests {
             types: vec![],
             syms: make_empty_syms(),
         };
-        let text = Component::to_text(comp.clone());
+        let text = Component::to_text(comp.clone()).unwrap();
         let result = Component::from_text(text, comp).unwrap();
         assert!(result.funcs.is_empty());
         assert!(result.types.is_empty());
@@ -2074,7 +2119,7 @@ mod tests {
             types,
             syms: make_empty_syms(),
         };
-        let text = Component::to_text(comp.clone());
+        let text = Component::to_text(comp.clone()).unwrap();
         let parsed = Component::from_text(text, comp.clone()).unwrap();
         assert_eq!(parsed.funcs.len(), 1);
         assert_eq!(parsed.funcs[0].0, "f1");
@@ -2151,7 +2196,7 @@ mod tests {
             types,
             syms: make_empty_syms(),
         };
-        let text = Component::to_text(comp.clone());
+        let text = Component::to_text(comp.clone()).unwrap();
         let parsed = Component::from_text(text, comp.clone()).unwrap();
         // Type refs should resolve back to their uids, not inline forms.
         assert_eq!(parsed.funcs[0].1.result.as_deref(), Some("point"));
@@ -2172,5 +2217,55 @@ mod tests {
         } else {
             panic!("expected call");
         }
+    }
+
+    #[test]
+    fn test_to_text_errors_on_undeserializable_body() {
+        let comp = WastComponent {
+            funcs: vec![(
+                "f1".to_string(),
+                WastFunc {
+                    source: FuncSource::Internal("f1".to_string()),
+                    params: vec![],
+                    result: None,
+                    body: Some(vec![0xff, 0xfe, 0xfd]),
+                },
+            )],
+            types: vec![],
+            syms: make_empty_syms(),
+        };
+        let result = Component::to_text(comp);
+        assert!(result.is_err(), "garbage body must surface an error");
+        let errs = result.unwrap_err();
+        assert!(errs[0].message.contains("render_error"));
+    }
+
+    #[test]
+    fn test_syms_special_characters_roundtrip() {
+        let comp = WastComponent {
+            funcs: vec![],
+            types: vec![],
+            syms: Syms {
+                wit_syms: vec![],
+                internal: vec![SymEntry {
+                    uid: "f1".to_string(),
+                    display_name: "say \"hi\" \\ there\n".to_string(),
+                }],
+                local: vec![SymEntry {
+                    uid: "p1".to_string(),
+                    display_name: "tab\there".to_string(),
+                }],
+            },
+        };
+        let text = Component::to_text(comp.clone()).unwrap();
+        // The raw quote must not appear unescaped (which would break the
+        // string literal).
+        assert!(text.contains("\\\"hi\\\""), "quotes escaped: {text}");
+        let parsed = Component::from_text(text, comp.clone()).unwrap();
+        assert_eq!(
+            parsed.syms.internal[0].display_name,
+            "say \"hi\" \\ there\n"
+        );
+        assert_eq!(parsed.syms.local[0].display_name, "tab\there");
     }
 }

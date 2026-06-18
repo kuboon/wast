@@ -23,6 +23,7 @@ fn widen_u32_to_u64_via_arith() {
     // u32 LocalGet(x) used to produce an i32 value and fail validation
     // against the i64.add op; now it emits `i64.extend_i32_u`.
     let db = WastDb {
+        version: WastDb::CURRENT_VERSION,
         funcs: vec![WastFuncRow {
             uid: "promote".into(),
             func: WastFunc {
@@ -65,6 +66,7 @@ fn widen_i32_signed_to_i64_via_arith() {
     // For signed source types the widen is `i64.extend_i32_s` so a
     // negative value preserves its sign in the wider type.
     let db = WastDb {
+        version: WastDb::CURRENT_VERSION,
         funcs: vec![WastFuncRow {
             uid: "promote_s".into(),
             func: WastFunc {
@@ -105,6 +107,7 @@ fn widen_at_return_position_directly() {
     // return type is u64, so emit_body propagates expected=u64 and the
     // LocalGet emits a widening `i64.extend_i32_u`.
     let db = WastDb {
+        version: WastDb::CURRENT_VERSION,
         funcs: vec![WastFuncRow {
             uid: "identity_wide".into(),
             func: WastFunc {

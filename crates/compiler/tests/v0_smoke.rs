@@ -24,6 +24,7 @@ impl WasiView for Ctx {
 #[tokio::test(flavor = "current_thread")]
 async fn wasi_cli_empty_run_exits_ok() {
     let db = WastDb {
+        version: WastDb::CURRENT_VERSION,
         funcs: vec![],
         types: vec![],
     };

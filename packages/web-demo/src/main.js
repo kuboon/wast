@@ -2,6 +2,8 @@
 // imports the corresponding transpiled component module when the user hits
 // Run — that keeps the initial page weight small.
 
+import { formatResult, parseInputField } from "./format.js";
+
 const MANIFEST_URL = new URL("../public/components/manifest.json", import.meta.url);
 
 async function loadManifest() {
@@ -28,21 +30,6 @@ function h(tag, props = {}, children = []) {
     el.append(c instanceof Node ? c : document.createTextNode(String(c)));
   }
   return el;
-}
-
-/** Map a manifest result tag + runtime value to a printable string. */
-function formatResult(tag, value) {
-  if (value === undefined) return "(void)";
-  if (tag === "string") return JSON.stringify(value);
-  if (tag?.startsWith("option<")) {
-    if (value === null || value === undefined) return "none";
-    return `some(${JSON.stringify(value)})`;
-  }
-  if (tag?.startsWith("list<") || Array.isArray(value)) {
-    return JSON.stringify(value);
-  }
-  if (typeof value === "object") return JSON.stringify(value);
-  return String(value);
 }
 
 function buildInputField(param) {
@@ -89,22 +76,6 @@ function defaultInputFor(param) {
     case "tuple":
       return JSON.stringify(param.elems.map(() => 0));
     default: return "null";
-  }
-}
-
-/** Coerce the text input of a param into the JS value jco expects. */
-function parseInputField(param, raw) {
-  const trimmed = raw.trim();
-  switch (param.kind) {
-    case "u32": case "i32": case "u64": case "i64":
-    case "f32": case "f64":
-      return Number(trimmed);
-    case "bool":
-      return trimmed === "true";
-    default:
-      // Everything else is a JSON literal: strings, option, list, record,
-      // tuple, variant, etc.
-      return JSON.parse(trimmed);
   }
 }
 

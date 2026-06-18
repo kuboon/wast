@@ -34,6 +34,7 @@ struct OptRec {
 fn record_with_option_field_from_param() {
     // wrap(o: option<u32>, c: u32) -> opt_rec  { { flag: o, count: c } }
     let db = WastDb {
+        version: WastDb::CURRENT_VERSION,
         funcs: vec![WastFuncRow {
             uid: "wrap".into(),
             func: WastFunc {
@@ -112,6 +113,7 @@ struct ResRec {
 fn record_with_result_field_from_param() {
     // wrap(r: result<u32, u32>, n: u32) -> res_rec  { { status: r, retries: n } }
     let db = WastDb {
+        version: WastDb::CURRENT_VERSION,
         funcs: vec![WastFuncRow {
             uid: "wrap".into(),
             func: WastFunc {
@@ -192,6 +194,7 @@ enum Shape {
 fn tuple_with_variant_field_from_param() {
     // pair(s: shape, n: u32) -> tuple<shape, u32>  { (s, n) }
     let db = WastDb {
+        version: WastDb::CURRENT_VERSION,
         funcs: vec![WastFuncRow {
             uid: "pair".into(),
             func: WastFunc {

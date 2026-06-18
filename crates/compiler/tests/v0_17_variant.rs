@@ -48,6 +48,7 @@ fn shape_type_row() -> WastTypeRow {
 fn variant_ctor_circle() {
     // mk-circle(r: u32) -> shape  { circle(r) }
     let db = WastDb {
+        version: WastDb::CURRENT_VERSION,
         funcs: vec![WastFuncRow {
             uid: "mk_circle".into(),
             func: WastFunc {
@@ -78,6 +79,7 @@ fn variant_ctor_circle() {
 fn variant_ctor_payloadless_unit() {
     // mk-unit() -> shape  { unit }
     let db = WastDb {
+        version: WastDb::CURRENT_VERSION,
         funcs: vec![WastFuncRow {
             uid: "mk_unit".into(),
             func: WastFunc {
@@ -113,6 +115,7 @@ fn match_variant_dispatch() {
     // proxies" for each case verify the dispatch selects the right arm.
     use wast_pattern_analyzer::ArithOp;
     let db = WastDb {
+        version: WastDb::CURRENT_VERSION,
         funcs: vec![WastFuncRow {
             uid: "describe".into(),
             func: WastFunc {

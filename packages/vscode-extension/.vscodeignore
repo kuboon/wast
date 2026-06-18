@@ -1,0 +1,16 @@
+# Files excluded from the packaged .vsix. The shipped extension needs only
+# package.json, dist/** (compiled extension + bundled wasm components), and
+# the production node_modules vsce includes automatically.
+
+.vscode/**
+src/**
+test/**
+scripts/**
+tsconfig.json
+PLAN.md
+pnpm-lock.yaml
+.gitignore
+
+# Type declarations and sourcemaps from tsc are dev-only artifacts.
+dist/**/*.d.ts
+dist/**/*.map

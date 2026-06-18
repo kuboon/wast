@@ -1,25 +1,12 @@
-# ruby-like — Ruby-like Syntax Plugin
+# ruby-like — Future Work
 
-## Purpose
+Current state: signatures fully parse in `from_text`; function bodies are
+preserved verbatim from the `existing` component via a nesting-aware body skip
+(counts `if`/`loop do`/`begin`/`case` … `end` depth). See AGENTS.md.
 
-Wasm component implementing `syntax-plugin` interface with Ruby-like text syntax.
+## Remaining
 
-## Interfaces
-
-Exports: `syntax-plugin` (to-text, from-text)
-
-## Key Responsibilities
-
-- Convert WastComponent to Ruby-like text (using syms for display names)
-- Parse Ruby-like text back to WastComponent
-- Generate new UIDs for new identifiers
-- Stage 1 validation (parse errors, unknown UIDs, etc.)
-
-## Dependencies
-
-- `wit/wast-core.wit`
-- `wast-pattern-analyzer` (internal library)
-
-## Status
-
-Not started.
+- **Recursive-descent body parser** — replace the preservation-based body skip
+  with a real parser so body edits in Ruby-like text round-trip (parse to
+  `Vec<Instruction>`, serialize via `wast-pattern-analyzer`), matching what
+  ts-like and raw already do.

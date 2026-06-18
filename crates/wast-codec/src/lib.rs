@@ -1,13 +1,15 @@
 wit_bindgen::generate!({
-    path: "../../wit-codec",
-    world: "codec-world",
+    path: ["../../wit-types", "../../wit-codec"],
+    world: "wast:codec/codec-world",
+    generate_all,
 });
 
 mod syms_yaml;
 mod wit_parser;
 
-use crate::wast::codec::types::{
-    ComponentFiles, FuncSource as BindingFuncSource, PrimitiveType as BindingPrimitiveType,
+use crate::exports::wast::codec::codec::ComponentFiles;
+use crate::wast::types::types::{
+    FuncSource as BindingFuncSource, PrimitiveType as BindingPrimitiveType,
     SymEntry as BindingSymEntry, Syms as BindingSyms, TypeSource as BindingTypeSource,
     WastComponent, WastError, WastFunc as BindingWastFunc, WastTypeDef as BindingWastTypeDef,
     WitType as BindingWitType,
@@ -196,8 +198,8 @@ fn db_to_binding(db: &WastDb, syms: &Syms) -> WastComponent {
 }
 
 fn binding_to_db(component: &WastComponent) -> (WastDb, Syms) {
-    let db = WastDb {
-        funcs: component
+    let db = WastDb::new(
+        component
             .funcs
             .iter()
             .map(|(uid, func)| WastFuncRow {
@@ -210,7 +212,7 @@ fn binding_to_db(component: &WastComponent) -> (WastDb, Syms) {
                 },
             })
             .collect(),
-        types: component
+        component
             .types
             .iter()
             .map(|(uid, type_def)| WastTypeRow {
@@ -221,7 +223,7 @@ fn binding_to_db(component: &WastComponent) -> (WastDb, Syms) {
                 },
             })
             .collect(),
-    };
+    );
 
     let syms = Syms {
         wit_syms: component.syms.wit_syms.clone(),
@@ -260,6 +262,34 @@ fn read_db_and_syms(
     let db_text = parse_utf8(db_bytes, "wast.json")?;
     let db: WastDb = serde_json::from_str(&db_text)
         .map_err(|e| err_at(format!("invalid JSON in wast.json: {}", e), "wast.json"))?;
+    if db.version != WastDb::CURRENT_VERSION {
+        return Err(err_at(
+            format!(
+                "unsupported wast.json schema version {} (this build supports version {})",
+                db.version,
+                WastDb::CURRENT_VERSION
+            ),
+            "wast.json",
+        ));
+    }
+    let mut seen_funcs = std::collections::BTreeSet::new();
+    for row in &db.funcs {
+        if !seen_funcs.insert(row.uid.as_str()) {
+            return Err(err_at(
+                format!("duplicate func uid '{}' in wast.json", row.uid),
+                "wast.json",
+            ));
+        }
+    }
+    let mut seen_types = std::collections::BTreeSet::new();
+    for row in &db.types {
+        if !seen_types.insert(row.uid.as_str()) {
+            return Err(err_at(
+                format!("duplicate type uid '{}' in wast.json", row.uid),
+                "wast.json",
+            ));
+        }
+    }
 
     let syms = match syms_bytes {
         Some(bytes) => {
@@ -318,17 +348,35 @@ fn merge_db_and_syms(
     partial_db: WastDb,
     partial_syms: Syms,
 ) -> (WastDb, Syms) {
-    let partial_func_uids: std::collections::BTreeSet<String> =
-        partial_db.funcs.iter().map(|row| row.uid.clone()).collect();
     let partial_type_uids: std::collections::BTreeSet<String> =
         partial_db.types.iter().map(|row| row.uid.clone()).collect();
 
-    let mut funcs: Vec<WastFuncRow> = full_db
-        .funcs
-        .into_iter()
-        .filter(|row| !partial_func_uids.contains(&row.uid))
-        .collect();
-    funcs.extend(partial_db.funcs);
+    // Func-merge contract (kept aligned with partial-manager's merge
+    // semantics where cheap):
+    //  - A partial row with `body: None` while the full row HAS a body is a
+    //    signature-only stub (this is how `extract` represents pulled-in
+    //    callees, retagged as Imported). Blindly replacing the full row
+    //    would silently destroy the real implementation, so the full row's
+    //    body AND source are preserved.
+    //  - Otherwise the partial row wins, except that an `Exported` partial
+    //    source does not overwrite full's source tag: extract retags owned
+    //    funcs as Exported only to lock their signature, and that marker
+    //    must not leak into storage (mirrors partial-manager's
+    //    source-preservation rule).
+    let mut funcs: Vec<WastFuncRow> = full_db.funcs;
+    for mut prow in partial_db.funcs {
+        if let Some(existing) = funcs.iter_mut().find(|row| row.uid == prow.uid) {
+            if prow.func.body.is_none() && existing.func.body.is_some() {
+                prow.func.body = existing.func.body.clone();
+                prow.func.source = existing.func.source.clone();
+            } else if matches!(prow.func.source, FuncSource::Exported(_)) {
+                prow.func.source = existing.func.source.clone();
+            }
+            *existing = prow;
+        } else {
+            funcs.push(prow);
+        }
+    }
 
     let mut types: Vec<WastTypeRow> = full_db
         .types
@@ -350,7 +398,7 @@ fn merge_db_and_syms(
     let local = merge_sym_entries(full_syms.local, partial_syms.local);
 
     (
-        WastDb { funcs, types },
+        WastDb::new(funcs, types),
         Syms {
             wit_syms,
             internal,
@@ -359,53 +407,190 @@ fn merge_db_and_syms(
     )
 }
 
+/// Lookup table from type-ref uid to its definition.
+type TypeTable<'a> = std::collections::BTreeMap<&'a str, &'a WitType>;
+
+/// Resolve a type ref against a table, treating primitive names (incl. the
+/// WIT spellings `s32`/`s64` for the signed types) as built-ins.
+fn expand_ref<'a>(type_ref: &str, table: &TypeTable<'a>) -> Option<std::borrow::Cow<'a, WitType>> {
+    let prim = match type_ref {
+        "s32" => Some(PrimitiveType::I32),
+        "s64" => Some(PrimitiveType::I64),
+        other => parse_primitive(other),
+    };
+    if let Some(p) = prim {
+        return Some(std::borrow::Cow::Owned(WitType::Primitive(p)));
+    }
+    table.get(type_ref).map(|t| std::borrow::Cow::Borrowed(*t))
+}
+
+/// Recursion guard for [`type_refs_equiv`]. WIT types cannot be recursive,
+/// but db tables are untrusted input and could contain ref cycles.
+const MAX_TYPE_DEPTH: u32 = 64;
+
+/// Structural equivalence of two type refs, each resolved against its own
+/// table. Uid spellings are meaningless (the db may call `option<u32>`
+/// "opt_u32"); only the resolved structure counts.
+///
+/// TODO: this covers all current `WitType` shapes structurally; subtleties
+/// like resource identity across own/borrow boundaries are compared
+/// structurally only (a `Resource` matches any `Resource`).
+fn type_refs_equiv(
+    a_ref: &str,
+    a_table: &TypeTable,
+    b_ref: &str,
+    b_table: &TypeTable,
+    depth: u32,
+) -> bool {
+    if depth == 0 {
+        // Cycle in untrusted input (or pathological nesting) — refuse.
+        return false;
+    }
+    let (a, b) = match (expand_ref(a_ref, a_table), expand_ref(b_ref, b_table)) {
+        (Some(a), Some(b)) => (a, b),
+        // Dangling ref on either side.
+        _ => return false,
+    };
+    let recurse =
+        |ra: &str, rb: &str| -> bool { type_refs_equiv(ra, a_table, rb, b_table, depth - 1) };
+    match (a.as_ref(), b.as_ref()) {
+        (WitType::Primitive(pa), WitType::Primitive(pb)) => {
+            std::mem::discriminant(pa) == std::mem::discriminant(pb)
+        }
+        (WitType::Option(ia), WitType::Option(ib)) => recurse(ia, ib),
+        (WitType::Result(oa, ea), WitType::Result(ob, eb)) => recurse(oa, ob) && recurse(ea, eb),
+        (WitType::List(ia), WitType::List(ib)) => recurse(ia, ib),
+        (WitType::Record(fa), WitType::Record(fb)) => {
+            fa.len() == fb.len()
+                && fa
+                    .iter()
+                    .zip(fb)
+                    .all(|((na, ra), (nb, rb))| na == nb && recurse(ra, rb))
+        }
+        (WitType::Variant(ca), WitType::Variant(cb)) => {
+            ca.len() == cb.len()
+                && ca.iter().zip(cb).all(|((na, pa), (nb, pb))| {
+                    na == nb
+                        && match (pa, pb) {
+                            (Some(ra), Some(rb)) => recurse(ra, rb),
+                            (Option::None, Option::None) => true,
+                            _ => false,
+                        }
+                })
+        }
+        (WitType::Tuple(ta), WitType::Tuple(tb)) => {
+            ta.len() == tb.len() && ta.iter().zip(tb).all(|(ra, rb)| recurse(ra, rb))
+        }
+        (WitType::Enum(ca), WitType::Enum(cb)) => ca == cb,
+        (WitType::Flags(na), WitType::Flags(nb)) => na == nb,
+        (WitType::Resource, WitType::Resource) => true,
+        (WitType::Own(ra), WitType::Own(rb)) | (WitType::Borrow(ra), WitType::Borrow(rb)) => {
+            recurse(ra, rb)
+        }
+        _ => false,
+    }
+}
+
+/// Validate one wast func against its world.wit counterpart: param count,
+/// param names, param types (structural), and result presence + type.
+fn validate_func_signature(
+    uid: &str,
+    func: &WastFunc,
+    wit_func: &wit_parser::WitFunc,
+    db_table: &TypeTable,
+    wit_table: &TypeTable,
+) -> Result<(), WastError> {
+    if func.params.len() != wit_func.params.len() {
+        return Err(err(format!(
+            "wit_inconsistency: func {} param count mismatch (wast.json has {}, world.wit has {})",
+            uid,
+            func.params.len(),
+            wit_func.params.len()
+        )));
+    }
+    for ((db_name, db_ref), (wit_name, wit_ref)) in func.params.iter().zip(&wit_func.params) {
+        if db_name != wit_name {
+            return Err(err(format!(
+                "wit_inconsistency: func {} param name mismatch \
+                 (wast.json has '{}', world.wit has '{}')",
+                uid, db_name, wit_name
+            )));
+        }
+        if !type_refs_equiv(db_ref, db_table, wit_ref, wit_table, MAX_TYPE_DEPTH) {
+            return Err(err(format!(
+                "wit_inconsistency: func {} param '{}' type mismatch \
+                 (wast.json ref '{}' does not match world.wit type '{}')",
+                uid, db_name, db_ref, wit_ref
+            )));
+        }
+    }
+    match (&func.result, &wit_func.result) {
+        (Option::None, Option::None) => {}
+        (Some(db_ref), Some(wit_ref)) => {
+            if !type_refs_equiv(db_ref, db_table, wit_ref, wit_table, MAX_TYPE_DEPTH) {
+                return Err(err(format!(
+                    "wit_inconsistency: func {} result type mismatch \
+                     (wast.json ref '{}' does not match world.wit type '{}')",
+                    uid, db_ref, wit_ref
+                )));
+            }
+        }
+        (Some(_), Option::None) => {
+            return Err(err(format!(
+                "wit_inconsistency: func {} declares a result but world.wit has none",
+                uid
+            )));
+        }
+        (Option::None, Some(_)) => {
+            return Err(err(format!(
+                "wit_inconsistency: func {} has no result but world.wit declares one",
+                uid
+            )));
+        }
+    }
+    Ok(())
+}
+
 fn validate_against_parsed_world(parsed: &ParsedWorld, db: &WastDb) -> Result<(), WastError> {
-    let wit_exports: std::collections::BTreeMap<&str, usize> = parsed
+    let wit_exports: std::collections::BTreeMap<&str, &wit_parser::WitFunc> = parsed
         .exports
         .iter()
-        .map(|func| (func.wit_path.as_str(), func.params.len()))
+        .map(|func| (func.wit_path.as_str(), func))
         .collect();
-    let wit_imports: std::collections::BTreeMap<&str, usize> = parsed
+    let wit_imports: std::collections::BTreeMap<&str, &wit_parser::WitFunc> = parsed
         .imports
         .iter()
-        .map(|func| (func.wit_path.as_str(), func.params.len()))
+        .map(|func| (func.wit_path.as_str(), func))
+        .collect();
+    let db_table: TypeTable = db
+        .types
+        .iter()
+        .map(|row| (row.uid.as_str(), &row.def.definition))
+        .collect();
+    let wit_table: TypeTable = parsed
+        .types
+        .iter()
+        .map(|(uid, def)| (uid.as_str(), &def.definition))
         .collect();
 
     for row in &db.funcs {
         let uid = &row.uid;
         let func = &row.func;
-        match &func.source {
-            FuncSource::Exported(wit_id) => match wit_exports.get(wit_id.as_str()) {
-                None => {
-                    return Err(err(format!(
-                        "wit_inconsistency: exported func {} not found in world.wit",
-                        uid
-                    )));
-                }
-                Some(expected_params) if func.params.len() != *expected_params => {
-                    return Err(err(format!(
-                        "wit_inconsistency: func {} param count mismatch",
-                        uid
-                    )));
-                }
-                Some(_) => {}
-            },
-            FuncSource::Imported(wit_id) => match wit_imports.get(wit_id.as_str()) {
-                None => {
-                    return Err(err(format!(
-                        "wit_inconsistency: imported func {} not found in world.wit",
-                        uid
-                    )));
-                }
-                Some(expected_params) if func.params.len() != *expected_params => {
-                    return Err(err(format!(
-                        "wit_inconsistency: func {} param count mismatch",
-                        uid
-                    )));
-                }
-                Some(_) => {}
-            },
-            FuncSource::Internal(_) => {}
+        let (lookup, kind) = match &func.source {
+            FuncSource::Exported(wit_id) => (wit_exports.get(wit_id.as_str()), "exported"),
+            FuncSource::Imported(wit_id) => (wit_imports.get(wit_id.as_str()), "imported"),
+            FuncSource::Internal(_) => continue,
+        };
+        match lookup {
+            None => {
+                return Err(err(format!(
+                    "wit_inconsistency: {} func {} not found in world.wit",
+                    kind, uid
+                )));
+            }
+            Some(wit_func) => {
+                validate_func_signature(uid, func, wit_func, &db_table, &wit_table)?;
+            }
         }
     }
 
@@ -422,35 +607,23 @@ impl exports::wast::codec::codec::Guest for Component {
         let parsed = parse_world_bytes(&world_wit)?;
 
         let mut funcs: Vec<WastFuncRow> = Vec::new();
-        let mut types: Vec<WastTypeRow> = Vec::new();
         let mut wit_syms: Vec<(String, String)> = Vec::new();
-        let mut seen_types = std::collections::BTreeSet::<String>::new();
 
-        let mut ensure_type = |type_name: &str| {
-            if seen_types.contains(type_name) {
-                return;
-            }
-            if let Some(p) = parse_primitive(type_name) {
-                seen_types.insert(type_name.to_string());
-                types.push(WastTypeRow {
-                    uid: type_name.to_string(),
-                    def: WastTypeDef {
-                        source: TypeSource::Imported(type_name.to_string()),
-                        definition: WitType::Primitive(p),
-                    },
-                });
-            }
-        };
+        // A world may both import and export a func with the same wit path
+        // (`import f: func(); export f: func();`). Row uids must be unique,
+        // so imported funcs that collide with an export get a `#import`
+        // suffix on their uid; the `source` keeps the true wit path.
+        let export_paths: std::collections::BTreeSet<&str> =
+            parsed.exports.iter().map(|f| f.wit_path.as_str()).collect();
 
         for f in &parsed.imports {
-            for (_, tname) in &f.params {
-                ensure_type(tname);
-            }
-            if let Some(ret) = &f.result {
-                ensure_type(ret);
-            }
+            let uid = if export_paths.contains(f.wit_path.as_str()) {
+                format!("{}#import", f.wit_path)
+            } else {
+                f.wit_path.clone()
+            };
             funcs.push(WastFuncRow {
-                uid: f.wit_path.clone(),
+                uid: uid.clone(),
                 func: WastFunc {
                     source: FuncSource::Imported(f.wit_path.clone()),
                     params: f.params.clone(),
@@ -458,16 +631,10 @@ impl exports::wast::codec::codec::Guest for Component {
                     body: None,
                 },
             });
-            wit_syms.push((f.wit_path.clone(), f.name.clone()));
+            wit_syms.push((uid, f.name.clone()));
         }
 
         for f in &parsed.exports {
-            for (_, tname) in &f.params {
-                ensure_type(tname);
-            }
-            if let Some(ret) = &f.result {
-                ensure_type(ret);
-            }
             funcs.push(WastFuncRow {
                 uid: f.wit_path.clone(),
                 func: WastFunc {
@@ -480,7 +647,19 @@ impl exports::wast::codec::codec::Guest for Component {
             wit_syms.push((f.wit_path.clone(), f.name.clone()));
         }
 
-        let db = WastDb { funcs, types };
+        // Materialize a row for every type the funcs reference — primitives,
+        // user-declared types, and anonymous compounds alike — so the
+        // generated db has no dangling type refs.
+        let types: Vec<WastTypeRow> = parsed
+            .types
+            .iter()
+            .map(|(uid, def)| WastTypeRow {
+                uid: uid.clone(),
+                def: def.clone(),
+            })
+            .collect();
+
+        let db = WastDb::new(funcs, types);
         let syms = Syms {
             wit_syms,
             internal: vec![],
@@ -551,6 +730,7 @@ world bot {
     #[test]
     fn validate_against_parsed_world_rejects_missing_export() {
         let db = WastDb {
+            version: 1,
             funcs: vec![WastFuncRow {
                 uid: "wrong".to_string(),
                 func: WastFunc {
@@ -572,6 +752,7 @@ world bot {
     #[test]
     fn validate_against_parsed_world_rejects_param_count_mismatch() {
         let db = WastDb {
+            version: 1,
             funcs: vec![WastFuncRow {
                 uid: "handle-event".to_string(),
                 func: WastFunc {
@@ -640,5 +821,352 @@ world bot {
                 .iter()
                 .any(|entry| entry.uid == "internal/helper" && entry.display_name == "helper")
         );
+    }
+
+    // ── wast.json schema version ──
+
+    fn db_json(version_field: Option<&str>) -> Vec<u8> {
+        let version = version_field
+            .map(|v| format!("\"version\": {v}, "))
+            .unwrap_or_default();
+        format!("{{ {version}\"funcs\": [], \"types\": [] }}").into_bytes()
+    }
+
+    #[test]
+    fn read_accepts_version_1() {
+        assert!(<Component as Guest>::read(db_json(Some("1")), None).is_ok());
+    }
+
+    #[test]
+    fn read_rejects_missing_version() {
+        let error = <Component as Guest>::read(db_json(None), None).expect_err("missing version");
+        assert!(error.message.contains("version"), "{}", error.message);
+    }
+
+    #[test]
+    fn read_rejects_wrong_version() {
+        let error = <Component as Guest>::read(db_json(Some("2")), None).expect_err("version 2");
+        assert!(
+            error
+                .message
+                .contains("unsupported wast.json schema version 2"),
+            "{}",
+            error.message
+        );
+    }
+
+    #[test]
+    fn read_rejects_duplicate_uid() {
+        let json = br#"{
+            "version": 1,
+            "funcs": [
+                { "uid": "dup", "source": { "Internal": "dup" }, "params": [], "result": null, "body": null },
+                { "uid": "dup", "source": { "Internal": "dup" }, "params": [], "result": null, "body": null }
+            ],
+            "types": []
+        }"#;
+        let error = <Component as Guest>::read(json.to_vec(), None).expect_err("duplicate uid");
+        assert!(
+            error.message.contains("duplicate func uid 'dup'"),
+            "{}",
+            error.message
+        );
+    }
+
+    // ── compile_wit: import/export name collision (uid disambiguation) ──
+
+    #[test]
+    fn compile_wit_disambiguates_import_export_collision() {
+        let wit = br#"
+package test:pkg;
+
+world w {
+  import ping: func() -> u32;
+  export ping: func() -> u32;
+}
+"#
+        .to_vec();
+        let files = <Component as Guest>::compile_wit(wit).expect("compile_wit");
+        let component =
+            <Component as Guest>::read(files.wast_json, files.syms_en_yaml).expect("read");
+        let uids: Vec<&str> = component
+            .funcs
+            .iter()
+            .map(|(uid, _)| uid.as_str())
+            .collect();
+        assert_eq!(uids.len(), 2);
+        assert!(uids.contains(&"ping"), "{uids:?}");
+        assert!(uids.contains(&"ping#import"), "{uids:?}");
+        let import = component
+            .funcs
+            .iter()
+            .find(|(uid, _)| uid == "ping#import")
+            .unwrap();
+        assert!(
+            matches!(&import.1.source, BindingFuncSource::Imported(path) if path == "ping"),
+            "source must keep the true wit path"
+        );
+    }
+
+    // ── merge: imported stub must not clobber a real body ──
+
+    #[test]
+    fn merge_preserves_body_when_partial_has_imported_stub() {
+        // full: internal func WITH body. partial: the same uid as an
+        // extract-produced Imported stub (body: None). merge must keep the
+        // full row's body and source instead of silently dropping them.
+        let real_body = vec![1u8, 0]; // version byte + empty instruction list
+        let full_db = WastDb::new(
+            vec![WastFuncRow {
+                uid: "helper".to_string(),
+                func: WastFunc {
+                    source: FuncSource::Internal("helper".to_string()),
+                    params: vec![],
+                    result: None,
+                    body: Some(real_body.clone()),
+                },
+            }],
+            vec![],
+        );
+        let full_syms = Syms {
+            wit_syms: vec![],
+            internal: vec![],
+            local: vec![],
+        };
+        let partial_db = WastDb::new(
+            vec![WastFuncRow {
+                uid: "helper".to_string(),
+                func: WastFunc {
+                    source: FuncSource::Imported("helper".to_string()),
+                    params: vec![],
+                    result: None,
+                    body: None,
+                },
+            }],
+            vec![],
+        );
+        let partial_syms = full_syms.clone();
+
+        let (merged_db, _) = merge_db_and_syms(full_db, full_syms, partial_db, partial_syms);
+        assert_eq!(merged_db.funcs.len(), 1);
+        let row = &merged_db.funcs[0];
+        assert_eq!(
+            row.func.body,
+            Some(real_body),
+            "imported stub must not erase the real body"
+        );
+        assert!(
+            matches!(&row.func.source, FuncSource::Internal(_)),
+            "source must be preserved alongside the body"
+        );
+    }
+
+    #[test]
+    fn merge_keeps_full_source_for_exported_partial_rows() {
+        // extract retags owned funcs as Exported to lock their signature;
+        // that marker must not overwrite full's Internal source tag.
+        let full_db = WastDb::new(
+            vec![WastFuncRow {
+                uid: "f".to_string(),
+                func: WastFunc {
+                    source: FuncSource::Internal("f".to_string()),
+                    params: vec![],
+                    result: None,
+                    body: Some(vec![1, 0]),
+                },
+            }],
+            vec![],
+        );
+        let empty = Syms {
+            wit_syms: vec![],
+            internal: vec![],
+            local: vec![],
+        };
+        let partial_db = WastDb::new(
+            vec![WastFuncRow {
+                uid: "f".to_string(),
+                func: WastFunc {
+                    source: FuncSource::Exported("f".to_string()),
+                    params: vec![],
+                    result: None,
+                    body: Some(vec![1, 1, 33]), // edited body (Nop)
+                },
+            }],
+            vec![],
+        );
+        let (merged_db, _) = merge_db_and_syms(full_db, empty.clone(), partial_db, empty);
+        let row = &merged_db.funcs[0];
+        assert_eq!(row.func.body, Some(vec![1, 1, 33]), "body must propagate");
+        assert!(matches!(&row.func.source, FuncSource::Internal(_)));
+    }
+
+    // ── validation: names / types / result presence ──
+
+    #[test]
+    fn validate_rejects_param_name_mismatch() {
+        let db = WastDb {
+            version: 1,
+            funcs: vec![WastFuncRow {
+                uid: "handle-event".to_string(),
+                func: WastFunc {
+                    source: FuncSource::Exported("handle-event".to_string()),
+                    params: vec![("wrong-name".to_string(), "u32".to_string())],
+                    result: Some("bool".to_string()),
+                    body: None,
+                },
+            }],
+            types: vec![],
+        };
+        let error = validate_against_parsed_world(&sample_parsed_world(), &db)
+            .expect_err("expected validation error");
+        assert!(
+            error.message.contains("param name mismatch"),
+            "{}",
+            error.message
+        );
+    }
+
+    #[test]
+    fn validate_rejects_param_type_mismatch() {
+        let db = WastDb {
+            version: 1,
+            funcs: vec![WastFuncRow {
+                uid: "handle-event".to_string(),
+                func: WastFunc {
+                    source: FuncSource::Exported("handle-event".to_string()),
+                    params: vec![("event-id".to_string(), "u64".to_string())],
+                    result: Some("bool".to_string()),
+                    body: None,
+                },
+            }],
+            types: vec![],
+        };
+        let error = validate_against_parsed_world(&sample_parsed_world(), &db)
+            .expect_err("expected validation error");
+        assert!(error.message.contains("type mismatch"), "{}", error.message);
+    }
+
+    #[test]
+    fn validate_rejects_result_presence_mismatch() {
+        let db = WastDb {
+            version: 1,
+            funcs: vec![WastFuncRow {
+                uid: "handle-event".to_string(),
+                func: WastFunc {
+                    source: FuncSource::Exported("handle-event".to_string()),
+                    params: vec![("event-id".to_string(), "u32".to_string())],
+                    result: None,
+                    body: None,
+                },
+            }],
+            types: vec![],
+        };
+        let error = validate_against_parsed_world(&sample_parsed_world(), &db)
+            .expect_err("expected validation error");
+        assert!(
+            error.message.contains("world.wit declares one"),
+            "{}",
+            error.message
+        );
+    }
+
+    #[test]
+    fn validate_accepts_structurally_equal_refs_with_different_uids() {
+        // The db calls its option type "opt_u32"; the world.wit side calls it
+        // "option<u32>". Structural comparison must accept this.
+        let wit = br#"
+package test:pkg;
+
+world w {
+  export unwrap-or: func(o: option<u32>, default: u32) -> u32;
+}
+"#;
+        let parsed =
+            wit_parser::parse_world(std::str::from_utf8(wit).unwrap()).expect("parse world");
+        let db = WastDb {
+            version: 1,
+            funcs: vec![WastFuncRow {
+                uid: "unwrap_or".to_string(),
+                func: WastFunc {
+                    source: FuncSource::Exported("unwrap-or".to_string()),
+                    params: vec![
+                        ("o".to_string(), "opt_u32".to_string()),
+                        ("default".to_string(), "u32".to_string()),
+                    ],
+                    result: Some("u32".to_string()),
+                    body: None,
+                },
+            }],
+            types: vec![WastTypeRow {
+                uid: "opt_u32".to_string(),
+                def: WastTypeDef {
+                    source: TypeSource::Internal("opt_u32".to_string()),
+                    definition: WitType::Option("u32".to_string()),
+                },
+            }],
+        };
+        validate_against_parsed_world(&parsed, &db).expect("structural match should validate");
+    }
+
+    // ── sample-wast fixture: compile_wit with compound types, no dangling refs ──
+
+    fn sample_wast_path(file: &str) -> std::path::PathBuf {
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../packages/sample-wast")
+            .join(file)
+    }
+
+    #[test]
+    fn compile_sample_world_has_no_dangling_type_refs() {
+        let world = std::fs::read(sample_wast_path("world.wit")).expect("read world.wit");
+        let files = <Component as Guest>::compile_wit(world).expect("compile_wit");
+        let component =
+            <Component as Guest>::read(files.wast_json, files.syms_en_yaml).expect("read");
+
+        let type_uids: std::collections::BTreeSet<&str> = component
+            .types
+            .iter()
+            .map(|(uid, _)| uid.as_str())
+            .collect();
+        let resolves = |r: &str| parse_primitive(r).is_some() || type_uids.contains(r);
+        for (uid, func) in &component.funcs {
+            for (pname, pref) in &func.params {
+                assert!(
+                    resolves(pref),
+                    "dangling param type ref '{pref}' on {uid}.{pname}"
+                );
+            }
+            if let Some(ret) = &func.result {
+                assert!(resolves(ret), "dangling result type ref '{ret}' on {uid}");
+            }
+        }
+        // The user-declared record and the anonymous option must have rows.
+        assert!(type_uids.contains("point"), "{type_uids:?}");
+        assert!(type_uids.contains("option<u32>"), "{type_uids:?}");
+        let point = component.types.iter().find(|(u, _)| u == "point").unwrap();
+        assert!(matches!(&point.1.definition, BindingWitType::Record(_)));
+    }
+
+    #[test]
+    fn sample_fixture_reads_validates_and_bodies_decode() {
+        let wast_json = std::fs::read(sample_wast_path("wast.json")).expect("read wast.json");
+        let syms = std::fs::read(sample_wast_path("syms.en.yaml")).expect("read syms");
+        let world = std::fs::read(sample_wast_path("world.wit")).expect("read world.wit");
+
+        // read must succeed (version field + unique uids).
+        let component =
+            <Component as Guest>::read(wast_json, Some(syms)).expect("read sample fixture");
+        assert_eq!(component.funcs.len(), 12);
+
+        // every persisted body must decode with the current format version.
+        for (uid, func) in &component.funcs {
+            if let Some(body) = &func.body {
+                wast_pattern_analyzer::deserialize_body(body)
+                    .unwrap_or_else(|e| panic!("body of '{uid}' failed to decode: {e}"));
+            }
+        }
+
+        // write (which validates against world.wit) must succeed.
+        <Component as Guest>::write(world, component).expect("write/validate sample fixture");
     }
 }

@@ -1,5 +1,5 @@
 [tasks.build]
-run = "cargo component build --workspace && pnpm install && pnpm build"
+run = "cargo component build --workspace && pnpm install --frozen-lockfile && pnpm build"
 
 [tasks.bundle-components]
 run = "cd packages/vscode-extension && pnpm bundle-components"
@@ -17,8 +17,9 @@ description = 'Run CI tasks'
 depends = ['build', 'test-component', 'test-ts']
 
 [tools]
+# rustc itself is pinned by rust-toolchain.toml at the repo root.
 rust = "latest"
 cargo-binstall = { version = "latest", depends = ["rust"] }
 node = "24"
-pnpm = "latest"
+pnpm = "10"
 wasmtime = "latest"

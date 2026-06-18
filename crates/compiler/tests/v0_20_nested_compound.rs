@@ -47,6 +47,7 @@ fn greeting_type_row() -> WastTypeRow {
 fn record_with_string_field_literal() {
     // make-greeting(n: u32) -> greeting  { { message: "hello", count: n } }
     let db = WastDb {
+        version: WastDb::CURRENT_VERSION,
         funcs: vec![WastFuncRow {
             uid: "make_greeting".into(),
             func: WastFunc {
@@ -90,6 +91,7 @@ fn record_with_string_field_literal() {
 fn record_with_string_field_from_param() {
     // wrap(msg: string, n: u32) -> greeting  { { message: msg, count: n } }
     let db = WastDb {
+        version: WastDb::CURRENT_VERSION,
         funcs: vec![WastFuncRow {
             uid: "wrap".into(),
             func: WastFunc {
@@ -135,6 +137,7 @@ fn record_with_string_field_from_param() {
 fn tuple_with_string_element() {
     // labeled(msg: string, n: u32) -> tuple<string, u32>  { (msg, n) }
     let db = WastDb {
+        version: WastDb::CURRENT_VERSION,
         funcs: vec![WastFuncRow {
             uid: "labeled".into(),
             func: WastFunc {
@@ -188,6 +191,7 @@ enum Msg {
 #[test]
 fn variant_with_string_payload() {
     let db = WastDb {
+        version: WastDb::CURRENT_VERSION,
         funcs: vec![WastFuncRow {
             uid: "mk_text".into(),
             func: WastFunc {

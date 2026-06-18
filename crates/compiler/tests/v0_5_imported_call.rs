@@ -17,6 +17,7 @@ struct Ctx {
 #[test]
 fn exported_forwards_to_imported() {
     let db = WastDb {
+        version: WastDb::CURRENT_VERSION,
         funcs: vec![
             WastFuncRow {
                 uid: "bump".into(),

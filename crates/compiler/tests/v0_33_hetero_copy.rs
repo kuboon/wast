@@ -35,6 +35,7 @@ fn record_with_result_string_u32_field_from_param() {
     // result<string, u32>: ok = string ([ptr, len], 2 slots i32),
     //                      err = u32 (1 slot i32). joined payload [i32, i32].
     let db = WastDb {
+        version: WastDb::CURRENT_VERSION,
         funcs: vec![WastFuncRow {
             uid: "wrap".into(),
             func: WastFunc {
@@ -129,6 +130,7 @@ struct Bag {
 #[test]
 fn record_with_option_list_field_via_multi_slot_path() {
     let db = WastDb {
+        version: WastDb::CURRENT_VERSION,
         funcs: vec![WastFuncRow {
             uid: "wrap".into(),
             func: WastFunc {

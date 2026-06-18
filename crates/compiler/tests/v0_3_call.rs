@@ -14,6 +14,7 @@ fn body(instrs: Vec<Instruction>) -> Option<Vec<u8>> {
 #[test]
 fn double_via_internal_add() {
     let db = WastDb {
+        version: WastDb::CURRENT_VERSION,
         funcs: vec![
             // internal add(a: u32, b: u32) -> u32  { a + b }
             WastFuncRow {
@@ -68,6 +69,7 @@ fn call_arg_reordering() {
     // reorder them to match the callee's declared param list.
     // sub(a, b) = a - b; called as sub(b=10, a=100) → 100-10 = 90.
     let db = WastDb {
+        version: WastDb::CURRENT_VERSION,
         funcs: vec![
             WastFuncRow {
                 uid: "sub".into(),

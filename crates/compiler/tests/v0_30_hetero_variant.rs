@@ -40,6 +40,7 @@ enum Id {
 
 fn db_kind() -> WastDb {
     WastDb {
+        version: WastDb::CURRENT_VERSION,
         funcs: vec![WastFuncRow {
             uid: "kind".into(),
             func: WastFunc {

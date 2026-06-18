@@ -20,6 +20,7 @@ fn compile_component(db: &WastDb) -> (Engine, Component) {
 fn is_err_on_result_u32_u32() {
     // exported `check-err(r: result<u32, u32>) -> bool  { is_err(r) }`
     let db = WastDb {
+        version: WastDb::CURRENT_VERSION,
         funcs: vec![WastFuncRow {
             uid: "check_err".into(),
             func: WastFunc {
@@ -63,6 +64,7 @@ fn option_u32_param_passes_through_signature() {
     //
     // Body: push i32.const 1 (true).
     let db = WastDb {
+        version: WastDb::CURRENT_VERSION,
         funcs: vec![WastFuncRow {
             uid: "has_opt".into(),
             func: WastFunc {

@@ -46,6 +46,7 @@ fn point_type_row() -> WastTypeRow {
 fn record_get_field_x() {
     // get-x(p: point) -> u32  { p.x }
     let db = WastDb {
+        version: WastDb::CURRENT_VERSION,
         funcs: vec![WastFuncRow {
             uid: "get_x".into(),
             func: WastFunc {
@@ -83,6 +84,7 @@ fn record_get_field_x() {
 #[test]
 fn record_get_field_y() {
     let db = WastDb {
+        version: WastDb::CURRENT_VERSION,
         funcs: vec![WastFuncRow {
             uid: "get_y".into(),
             func: WastFunc {
@@ -116,6 +118,7 @@ fn record_get_field_y() {
 fn record_construct_and_return() {
     // make-point(x: u32, y: u32) -> point  { { x: x, y: y } }
     let db = WastDb {
+        version: WastDb::CURRENT_VERSION,
         funcs: vec![WastFuncRow {
             uid: "make_point".into(),
             func: WastFunc {
@@ -166,6 +169,7 @@ fn record_mixed_alignment_return() {
     // Layout: flag at 0 (1 byte) + 7 pad → big at 8 (8 bytes) → small at 16
     // (4 bytes), total 24 bytes padded to 8-byte alignment.
     let db = WastDb {
+        version: WastDb::CURRENT_VERSION,
         funcs: vec![WastFuncRow {
             uid: "make_mixed".into(),
             func: WastFunc {

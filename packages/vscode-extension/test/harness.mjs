@@ -12,7 +12,7 @@
 
 import { readFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const pkgRoot = join(here, "..");
@@ -21,10 +21,16 @@ const sampleWastDir = join(pkgRoot, "..", "sample-wast");
 
 const PLUGIN_IDS = ["raw", "ruby-like", "ts-like", "rust-like"];
 
+// import() takes URLs, not raw paths — a join()ed Windows path would be
+// mis-parsed (drive letter / backslashes), so go through pathToFileURL.
+function importPath(...segments) {
+  return import(pathToFileURL(join(...segments)).href);
+}
+
 async function loadPlugins() {
   const out = {};
   for (const id of PLUGIN_IDS) {
-    const mod = await import(join(componentsRoot, id, id.replace(/-/g, "_") + ".js"));
+    const mod = await importPath(componentsRoot, id, id.replace(/-/g, "_") + ".js");
     out[id] = mod.syntaxPlugin;
   }
   return out;
@@ -32,9 +38,9 @@ async function loadPlugins() {
 
 export async function loadRuntime() {
   const plugins = await loadPlugins();
-  const pm = (await import(join(componentsRoot, "partial-manager", "partial_manager.js"))).partialManager;
-  const codec = (await import(join(componentsRoot, "codec", "codec.js"))).codec;
-  const compiler = (await import(join(componentsRoot, "compiler", "compiler.js"))).compiler;
+  const pm = (await importPath(componentsRoot, "partial-manager", "partial_manager.js")).partialManager;
+  const codec = (await importPath(componentsRoot, "codec", "codec.js")).codec;
+  const compiler = (await importPath(componentsRoot, "compiler", "compiler.js")).compiler;
   return { plugins, partialManager: pm, codec, compiler };
 }
 

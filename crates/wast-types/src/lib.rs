@@ -111,8 +111,34 @@ pub struct Syms {
 /// On-disk format for `wast.json` — syms are NOT stored here (they go in
 /// `syms.*.yaml`). Row-oriented so each entry maps to a SQLite row when the
 /// future `wast.db` (SQLite) migration lands.
+///
+/// `version` is the schema version of the file. It is REQUIRED on
+/// deserialization (no serde default): a `wast.json` without a `version`
+/// field is rejected. The field is declared first so it serializes as the
+/// first JSON key.
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct WastDb {
+    pub version: u32,
     pub funcs: Vec<WastFuncRow>,
     pub types: Vec<WastTypeRow>,
+}
+
+impl WastDb {
+    /// The current (and only supported) `wast.json` schema version.
+    pub const CURRENT_VERSION: u32 = 1;
+
+    /// Construct a `WastDb` at [`Self::CURRENT_VERSION`].
+    pub fn new(funcs: Vec<WastFuncRow>, types: Vec<WastTypeRow>) -> Self {
+        Self {
+            version: Self::CURRENT_VERSION,
+            funcs,
+            types,
+        }
+    }
+}
+
+impl Default for WastDb {
+    fn default() -> Self {
+        Self::new(Vec::new(), Vec::new())
+    }
 }

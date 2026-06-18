@@ -33,6 +33,7 @@ struct ResStrRec {
 #[test]
 fn record_with_result_string_field_from_param() {
     let db = WastDb {
+        version: WastDb::CURRENT_VERSION,
         funcs: vec![WastFuncRow {
             uid: "wrap".into(),
             func: WastFunc {
@@ -124,6 +125,7 @@ struct Letter {
 fn record_with_variant_string_payload_from_param() {
     // wrap(m: msg, r: u32) -> letter  { { body: m, recipient: r } }
     let db = WastDb {
+        version: WastDb::CURRENT_VERSION,
         funcs: vec![WastFuncRow {
             uid: "wrap".into(),
             func: WastFunc {

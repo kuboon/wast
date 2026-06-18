@@ -31,6 +31,7 @@ fn pair_u32_u32_row() -> WastTypeRow {
 fn tuple_first_elem() {
     // first(p: tuple<u32, u32>) -> u32  { p.0 }
     let db = WastDb {
+        version: WastDb::CURRENT_VERSION,
         funcs: vec![WastFuncRow {
             uid: "first".into(),
             func: WastFunc {
@@ -60,6 +61,7 @@ fn tuple_first_elem() {
 #[test]
 fn tuple_second_elem() {
     let db = WastDb {
+        version: WastDb::CURRENT_VERSION,
         funcs: vec![WastFuncRow {
             uid: "second".into(),
             func: WastFunc {
@@ -90,6 +92,7 @@ fn tuple_second_elem() {
 fn tuple_construct_and_return() {
     // make-pair(x: u32, y: u32) -> tuple<u32, u32>  { (x, y) }
     let db = WastDb {
+        version: WastDb::CURRENT_VERSION,
         funcs: vec![WastFuncRow {
             uid: "make_pair".into(),
             func: WastFunc {
@@ -123,6 +126,7 @@ fn tuple_heterogeneous_alignment() {
     // make-triple(flag: bool, big: u64, small: u32) -> tuple<bool, u64, u32>
     // Exercises the layout algorithm with mixed alignments (1 + 7pad + 8 + 4).
     let db = WastDb {
+        version: WastDb::CURRENT_VERSION,
         funcs: vec![WastFuncRow {
             uid: "make_triple".into(),
             func: WastFunc {

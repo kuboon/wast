@@ -213,6 +213,8 @@ pub fn flat_slots(ty_ref: &str, type_map: &TypeMap) -> Result<Vec<&'static str>,
 /// - i64 → i32: `i32.wrap_i64`
 /// - i32 ↔ f32, i64 ↔ f64: bit-reinterpret (same width, different
 ///   interpretation; the joined slot stores either type's bit pattern)
+/// - i64 → f32: wrap to i32 then bit-reinterpret (the f32's bit pattern
+///   rides in the low 32 bits of the joined i64 slot per the Canonical ABI)
 /// - f64 → f32: `f32.demote_f64` (lossy in general, but the case's f32
 ///   was widened via `f64.promote_f32` and the same value flows back —
 ///   bit-pattern reinterpret would also be valid for the round-trip case)
@@ -227,10 +229,20 @@ fn heterogeneous_narrow_op(
         ("f32", "i32") => Ok("i32.reinterpret_f32"),
         ("i64", "f64") => Ok("f64.reinterpret_i64"),
         ("f64", "i64") => Ok("i64.reinterpret_f64"),
+        ("i64", "f32") => Ok("i32.wrap_i64\n      f32.reinterpret_i32"),
         ("f64", "f32") => Ok("f32.demote_f64"),
         _ => Err(CompileError::Unsupported(format!(
             "heterogeneous narrow from {from} to {to} not supported yet"
         ))),
+    }
+}
+
+/// Bit width (in bytes) of a core value type. Used to pick which binding can
+/// hold a joined slot's value losslessly (same-width reinterpret).
+fn core_width(core: &str) -> usize {
+    match core {
+        "i64" | "f64" => 8,
+        _ => 4,
     }
 }
 
@@ -273,28 +285,26 @@ fn implicit_widen_op(from: &str, to: &str) -> Result<Option<&'static str>, Compi
         ("f32", "i32") => Ok(Some("i32.reinterpret_f32")),
         ("i64", "f64") => Ok(Some("f64.reinterpret_i64")),
         ("f64", "i64") => Ok(Some("i64.reinterpret_f64")),
+        // f32 riding in an i64 joined slot: reinterpret bits, zero-extend.
+        ("f32", "i64") => Ok(Some("i32.reinterpret_f32\n      i64.extend_i32_u")),
         _ => Err(CompileError::Unsupported(format!(
             "implicit widen from {from} ({from_core}) to {to} ({to_core}) not supported"
         ))),
     }
 }
 
+/// Canonical ABI flat-join of two core value types, per the spec rule:
+/// `join(a, b) = a` if `a == b`; `i32` if `{a, b} == {i32, f32}`;
+/// otherwise `i64`. In particular `join(f32, f64) = i64` — NOT `f64` —
+/// because an f32 bit pattern cannot ride in an f64 slot losslessly
+/// (NaN canonicalization), so the spec falls back to an integer slot.
 fn join_core_type(a: &'static str, b: &'static str) -> Result<&'static str, CompileError> {
-    // Canonical ABI flat-join, restricted to v0.6 primitive payloads:
     if a == b {
         return Ok(a);
     }
-    // i32/i64 widening
     match (a, b) {
-        ("i32", "i64") | ("i64", "i32") => Ok("i64"),
-        ("f32", "f64") | ("f64", "f32") => Ok("f64"),
-        // i32↔f32 reinterpret as i32
         ("i32", "f32") | ("f32", "i32") => Ok("i32"),
-        // i64↔f64 reinterpret as i64
-        ("i64", "f64") | ("f64", "i64") => Ok("i64"),
-        _ => Err(CompileError::Unsupported(format!(
-            "flat-join of core types {a:?} and {b:?} not supported yet"
-        ))),
+        _ => Ok("i64"),
     }
 }
 
@@ -482,6 +492,46 @@ pub fn store_op(ty: &str) -> Result<(&'static str, u32), CompileError> {
     })
 }
 
+/// Canonical-ABI byte offset of a variant-like type's payload, relative to
+/// the start of the variant. The disc is a u8 at offset 0 and the payload
+/// starts at `align_up(1, max_case_align)`. `max_case_align` equals the
+/// outer type's alignment (per `variant_layout`), so we derive it from
+/// `size_align(outer_ty)` — using a single case's own alignment would be
+/// wrong for mixed-alignment variants (v0.32 fix).
+pub fn variant_payload_offset(outer_ty: &str, type_map: &TypeMap) -> Result<usize, CompileError> {
+    let (_, align) = size_align(outer_ty, type_map)?;
+    Ok(align_up(1, align))
+}
+
+/// Integer store op for a value of the given byte width (1/2/4/8). Used for
+/// disc-like values (enum discriminants, flags bitmasks) whose memory width
+/// is driven by `size_align`.
+fn sized_int_store_op(size: usize) -> Result<&'static str, CompileError> {
+    match size {
+        1 => Ok("i32.store8"),
+        2 => Ok("i32.store16"),
+        4 => Ok("i32.store"),
+        8 => Ok("i64.store"),
+        other => Err(CompileError::Unsupported(format!(
+            "integer store for {other}-byte width"
+        ))),
+    }
+}
+
+/// Store op + natural alignment for a core value type token (`i32`/`i64`/
+/// `f32`/`f64`). Counterpart of `store_op` (which takes WIT type names).
+fn core_store_op(core: &str) -> Result<(&'static str, usize), CompileError> {
+    match core {
+        "i32" => Ok(("i32.store", 4)),
+        "i64" => Ok(("i64.store", 8)),
+        "f32" => Ok(("f32.store", 4)),
+        "f64" => Ok(("f64.store", 8)),
+        other => Err(CompileError::Unsupported(format!(
+            "store op for core type {other:?}"
+        ))),
+    }
+}
+
 /// Map a WIT primitive type name (e.g. `"u32"`) to the core WASM type token
 /// used in WAT text (`"i32"`, `"i64"`, `"f32"`, `"f64"`).
 pub fn wit_to_core(ty: &str) -> Result<&'static str, CompileError> {
@@ -498,6 +548,29 @@ pub fn wit_to_core(ty: &str) -> Result<&'static str, CompileError> {
 
 fn is_float(ty: &str) -> bool {
     matches!(ty, "f32" | "f64")
+}
+
+/// Validate that an integer `Const` literal fits the target WIT type's value
+/// range, so out-of-range constants fail with a clear message instead of a
+/// cryptic downstream `wat parse failed`. `i64`/`u64` accept the full IR
+/// range (the IR literal is an i64; u64 consts keep its bit pattern).
+fn validate_const_range(value: i64, ty: &str) -> Result<(), CompileError> {
+    let ok = match ty {
+        "u32" => (0..=u32::MAX as i64).contains(&value),
+        "i32" => (i32::MIN as i64..=i32::MAX as i64).contains(&value),
+        "bool" => (0..=1).contains(&value),
+        "char" => (0..=0x10FFFF).contains(&value) && !(0xD800..=0xDFFF).contains(&value),
+        // i64/u64 (and anything that reached an i64 slot) take the literal
+        // as-is.
+        _ => true,
+    };
+    if ok {
+        Ok(())
+    } else {
+        Err(CompileError::InvalidInput(format!(
+            "Const value {value} is out of range for type {ty}"
+        )))
+    }
 }
 
 fn is_signed(ty: &str) -> bool {
@@ -815,6 +888,28 @@ pub fn emit_body(
     });
 
     let (init, last) = if wrap_kind.is_some() {
+        // The wrap emitters treat the final instruction as the producer of
+        // the (indirect) return value. Validate that up front so a body
+        // ending in a non-value instruction gets a clear error instead of a
+        // cryptic WAT validation failure (full multi-path return support is
+        // out of scope for now).
+        let result = result_ty.unwrap_or("?");
+        match instructions.last() {
+            None => {
+                return Err(CompileError::Unsupported(format!(
+                    "function declares return type {result:?} but its body is empty"
+                )));
+            }
+            Some(last) => {
+                if let Some(kind) = non_value_instr_kind(last) {
+                    return Err(CompileError::Unsupported(format!(
+                        "function declares return type {result:?} but the final body \
+                         instruction ({kind}) does not produce a value — the last \
+                         instruction must construct or load the return value"
+                    )));
+                }
+            }
+        }
         instructions
             .split_last()
             .map(|(last, init)| (init, Some(last)))
@@ -887,6 +982,22 @@ pub fn emit_body(
     }
 
     Ok(out)
+}
+
+/// If the instruction can never leave a value on the stack (statement-only
+/// forms), return its short kind name for diagnostics; `None` means it is a
+/// (potentially) value-producing form.
+fn non_value_instr_kind(i: &Instruction) -> Option<&'static str> {
+    Some(match i {
+        Instruction::Nop => "Nop",
+        Instruction::Return => "Return",
+        Instruction::LocalSet { .. } => "LocalSet",
+        Instruction::Br { .. } => "Br",
+        Instruction::BrIf { .. } => "BrIf",
+        Instruction::Block { .. } => "Block",
+        Instruction::Loop { .. } => "Loop",
+        _ => return None,
+    })
 }
 
 /// Wrap a (ptr, len)-producing instruction (for string or list return) into
@@ -1127,31 +1238,19 @@ fn emit_copy_from_local(
             }
             Ok(())
         }
-        ResolvedType::Enum(cases) => {
+        ResolvedType::Enum(_) => {
             // Enum flattens to a single i32 disc; memory width depends on
-            // case count. Use the same store_op dispatch as size_align's
-            // enum case.
+            // case count (driven by size_align's enum case).
             let (size, _) = size_align(ty, type_map)?;
-            let store = match size {
-                1 => "i32.store8",
-                2 => "i32.store16",
-                4 => "i32.store",
-                _ => unreachable!("enum with {} cases", cases.len()),
-            };
+            let store = sized_int_store_op(size)?;
             out.push_str(&format!(
                 "      local.get {ret_ptr}\n      local.get {src_base}\n      {store} offset={base_offset}\n"
             ));
             Ok(())
         }
-        ResolvedType::Flags(names) => {
+        ResolvedType::Flags(_) => {
             let (size, _) = size_align(ty, type_map)?;
-            let store = match size {
-                1 => "i32.store8",
-                2 => "i32.store16",
-                4 => "i32.store",
-                8 => "i64.store",
-                _ => unreachable!("flags with {} fields", names.len()),
-            };
+            let store = sized_int_store_op(size)?;
             out.push_str(&format!(
                 "      local.get {ret_ptr}\n      local.get {src_base}\n      {store} offset={base_offset}\n"
             ));
@@ -1174,8 +1273,7 @@ fn emit_copy_from_local(
             out.push_str(&format!(
                 "      local.get {ret_ptr}\n      local.get {src_base}\n      i32.store8 offset={base_offset}\n"
             ));
-            let (_, inner_align) = size_align(&inner, type_map)?;
-            let pay_off = base_offset + align_up(1, inner_align);
+            let pay_off = base_offset + variant_payload_offset(ty, type_map)?;
             emit_copy_from_local(&inner, src_base + 1, ret_ptr, pay_off, type_map, out)
         }
         ResolvedType::Result(ok, err) => {
@@ -1187,8 +1285,7 @@ fn emit_copy_from_local(
                 out.push_str(&format!(
                     "      local.get {ret_ptr}\n      local.get {src_base}\n      i32.store8 offset={base_offset}\n"
                 ));
-                let (_, pay_align) = size_align(&ok, type_map)?;
-                let pay_off = base_offset + align_up(1, pay_align);
+                let pay_off = base_offset + variant_payload_offset(ty, type_map)?;
                 emit_copy_from_local(&ok, src_base + 1, ret_ptr, pay_off, type_map, out)
             } else {
                 let cases: [Option<String>; 2] = [Some(ok), Some(err)];
@@ -1215,8 +1312,7 @@ fn emit_copy_from_local(
                     "      local.get {ret_ptr}\n      local.get {src_base}\n      i32.store8 offset={base_offset}\n"
                 ));
                 if let Some(t) = distinct.into_iter().next() {
-                    let (_, pay_align) = size_align(&t, type_map)?;
-                    let pay_off = base_offset + align_up(1, pay_align);
+                    let pay_off = base_offset + variant_payload_offset(ty, type_map)?;
                     emit_copy_from_local(&t, src_base + 1, ret_ptr, pay_off, type_map, out)
                 } else {
                     // All cases payload-less — just the disc.
@@ -1254,15 +1350,9 @@ fn emit_variant_like_copy(
         return Ok(());
     }
 
-    // Compute payload byte offset from the max alignment across cases.
-    let mut max_align = 1usize;
-    for p in payload_tys {
-        if let Some(p) = p {
-            let (_, a) = size_align(p, type_map)?;
-            max_align = max_align.max(a);
-        }
-    }
-    let pay_off = base_offset + align_up(1, max_align);
+    // Payload byte offset: disc u8 + padding up to the outer alignment
+    // (== max alignment across cases per variant_layout).
+    let pay_off = base_offset + variant_payload_offset(outer_ty, type_map)?;
 
     let payload_slots = &flat[1..];
     let uniform = payload_slots.iter().all(|s| *s == payload_slots[0]);
@@ -1273,17 +1363,7 @@ fn emit_variant_like_copy(
         // but those bytes fall outside the case's own size_align footprint,
         // so its reader (which consults the disc first) never sees them.
         let core_ty = payload_slots[0];
-        let (store, slot_width) = match core_ty {
-            "i32" => ("i32.store", 4usize),
-            "i64" => ("i64.store", 8),
-            "f32" => ("f32.store", 4),
-            "f64" => ("f64.store", 8),
-            other => {
-                return Err(CompileError::Unsupported(format!(
-                    "LocalGet copy payload core type {other:?}"
-                )));
-            }
-        };
+        let (store, slot_width) = core_store_op(core_ty)?;
         for (i, _) in payload_slots.iter().enumerate() {
             let off = pay_off + i * slot_width;
             out.push_str(&format!(
@@ -1391,17 +1471,7 @@ fn emit_case_inline(
         if !narrow.is_empty() {
             out.push_str(&format!("      {narrow}\n"));
         }
-        let (store, align) = match *case_core {
-            "i32" => ("i32.store", 4usize),
-            "i64" => ("i64.store", 8),
-            "f32" => ("f32.store", 4),
-            "f64" => ("f64.store", 8),
-            other => {
-                return Err(CompileError::Unsupported(format!(
-                    "case slot core type {other:?}"
-                )));
-            }
-        };
+        let (store, align) = core_store_op(*case_core)?;
         let total_off = pay_off + offset;
         out.push_str(&format!("      {store} offset={total_off} align={align}\n"));
     }
@@ -1699,12 +1769,10 @@ fn emit_field_store(
             ));
             if let (Some(pty), Some(val)) = (declared_payload.as_deref(), payload.as_deref()) {
                 // Canonical-ABI variant memory: payload sits at
-                // align_up(disc_size, max_case_align). Use the *outer* type's
-                // alignment (which equals max over all cases) — using a
-                // single case's alignment is wrong when the variant has
-                // mixed-alignment cases.
-                let (_, outer_align) = size_align(ty, type_map)?;
-                let payload_offset = align_up(1, outer_align);
+                // align_up(disc_size, max_case_align) — see
+                // variant_payload_offset for why the *outer* type's
+                // alignment is used.
+                let payload_offset = variant_payload_offset(ty, type_map)?;
                 emit_field_store(
                     val,
                     pty,
@@ -1735,8 +1803,7 @@ fn emit_field_store(
                     ));
                 }
                 Instruction::Some { value: inner_val } => {
-                    let (_, pay_align) = size_align(&inner, type_map)?;
-                    let payload_offset = align_up(1, pay_align);
+                    let payload_offset = variant_payload_offset(ty, type_map)?;
                     out.push_str(&format!(
                         "      local.get {ret_ptr}\n      i32.const 1\n      i32.store8 offset={base_offset}\n"
                     ));
@@ -1778,9 +1845,8 @@ fn emit_field_store(
                     )));
                 }
             };
-            // Use the result's outer alignment — which equals max(ok, err).
-            let (_, outer_align) = size_align(ty, type_map)?;
-            let payload_offset = align_up(1, outer_align);
+            // Payload offset uses the result's outer alignment (max(ok, err)).
+            let payload_offset = variant_payload_offset(ty, type_map)?;
             out.push_str(&format!(
                 "      local.get {ret_ptr}\n      i32.const {disc}\n      i32.store8 offset={base_offset}\n"
             ));
@@ -1818,12 +1884,7 @@ fn emit_field_store(
             })?;
             // Enum uses smallest int that holds the count. For ≤256 cases: i32.store8.
             let (size, _) = size_align(ty, type_map)?;
-            let store = match size {
-                1 => "i32.store8",
-                2 => "i32.store16",
-                4 => "i32.store",
-                _ => unreachable!(),
-            };
+            let store = sized_int_store_op(size)?;
             out.push_str(&format!(
                 "      local.get {ret_ptr}\n      i32.const {disc}\n      {store} offset={base_offset}\n"
             ));
@@ -1865,13 +1926,7 @@ fn emit_field_store(
                 mask |= 1u64 << bit;
             }
             let (size, _) = size_align(ty, type_map)?;
-            let store = match size {
-                1 => "i32.store8",
-                2 => "i32.store16",
-                4 => "i32.store",
-                8 => "i64.store",
-                _ => unreachable!(),
-            };
+            let store = sized_int_store_op(size)?;
             let core_const = if size == 8 {
                 format!("i64.const {mask}")
             } else {
@@ -2026,7 +2081,7 @@ fn emit_variant_return_wrap(
     // *variant's* alignment (max over cases), not the selected case's own
     // alignment — that's what readers expect per the Canonical ABI.
     if let (Some(pty), Some(val)) = (declared_payload.as_deref(), payload.as_deref()) {
-        let payload_offset = align_up(1, align);
+        let payload_offset = variant_payload_offset(variant_ty, type_map)?;
         emit_field_store(
             val,
             pty,
@@ -2272,6 +2327,7 @@ fn emit_instr(
             if is_float(ty) {
                 out.push_str(&format!("      {core}.const {}\n", *value as f64));
             } else {
+                validate_const_range(*value, ty)?;
                 out.push_str(&format!("      {core}.const {value}\n"));
             }
         }
@@ -3040,31 +3096,54 @@ fn emit_instr(
                 out.push_str("      end\n");
             } else {
                 // Heterogeneous: the flat payload slot is the join of
-                // ok_core and err_core. Set the wider binding first (its
-                // type matches the joined slot). In the other branch, read
-                // the wider local, narrow, then set the narrower binding.
+                // ok_core and err_core. Pick a "carrier" binding that can
+                // hold the joined value losslessly: a binding whose core
+                // type equals the join, or failing that one with the same
+                // bit width (same-width reinterprets are lossless — e.g.
+                // join(f32, f64) = i64, with f64 as the carrier). Set the
+                // carrier from the stack; in the other branch, read the
+                // carrier back, restore the joined bits, and narrow into
+                // the other binding.
                 let joined = join_core_type(ok_core, err_core)?;
-                let narrow = heterogeneous_narrow_op(
-                    joined,
-                    if joined == ok_core { err_core } else { ok_core },
-                )?;
-
-                let (wider_idx, narrower_idx, narrower_is_err) = if joined == ok_core {
-                    (ok_idx, err_idx, true)
+                let carrier_is_ok = if ok_core == joined {
+                    true
+                } else if err_core == joined {
+                    false
                 } else {
-                    (err_idx, ok_idx, false)
+                    core_width(ok_core) == core_width(joined)
+                };
+                let (carrier_idx, carrier_core, other_idx, other_core) = if carrier_is_ok {
+                    (ok_idx, ok_core, err_idx, err_core)
+                } else {
+                    (err_idx, err_core, ok_idx, ok_core)
+                };
+                // joined → carrier (lossless reinterpret or no-op).
+                let carrier_narrow = heterogeneous_narrow_op(joined, carrier_core)?;
+                // carrier → joined (reverse of the above) then → other.
+                let restore = heterogeneous_narrow_op(carrier_core, joined)?;
+                let other_narrow = heterogeneous_narrow_op(joined, other_core)?;
+
+                let emit_other_prefix = |out: &mut String| {
+                    out.push_str(&format!("      local.get {carrier_idx}\n"));
+                    if !restore.is_empty() {
+                        out.push_str(&format!("      {restore}\n"));
+                    }
+                    if !other_narrow.is_empty() {
+                        out.push_str(&format!("      {other_narrow}\n"));
+                    }
+                    out.push_str(&format!("      local.set {other_idx}\n"));
                 };
 
-                // Stack top is the joined payload; set it into the wider
+                // Stack top is the joined payload; set it into the carrier
                 // binding. Stack: [disc].
-                out.push_str(&format!("      local.set {wider_idx}\n"));
+                if !carrier_narrow.is_empty() {
+                    out.push_str(&format!("      {carrier_narrow}\n"));
+                }
+                out.push_str(&format!("      local.set {carrier_idx}\n"));
                 out.push_str(&format!("      if{result_clause}\n"));
                 // err branch
-                if narrower_is_err {
-                    // err is the narrower one — narrow from wider into err.
-                    out.push_str(&format!("      local.get {wider_idx}\n"));
-                    out.push_str(&format!("      {narrow}\n"));
-                    out.push_str(&format!("      local.set {narrower_idx}\n"));
+                if carrier_is_ok {
+                    emit_other_prefix(out);
                 }
                 for i in err_body {
                     emit_instr(
@@ -3080,10 +3159,8 @@ fn emit_instr(
                 }
                 out.push_str("      else\n");
                 // ok branch
-                if !narrower_is_err {
-                    out.push_str(&format!("      local.get {wider_idx}\n"));
-                    out.push_str(&format!("      {narrow}\n"));
-                    out.push_str(&format!("      local.set {narrower_idx}\n"));
+                if !carrier_is_ok {
+                    emit_other_prefix(out);
                 }
                 for i in ok_body {
                     emit_instr(
@@ -3175,7 +3252,7 @@ fn emit_variant_ctor(
     // critical for heterogeneous variants like result<u32, u64> where the
     // ok-case's own align (4) differs from the variant's max align (8).
     if let (Some(v), Some(pty)) = (value, payload_ty.as_deref()) {
-        let payload_offset = align_up(1, align);
+        let payload_offset = variant_payload_offset(expected_ty, type_map)?;
         let (store, align_pow2) = store_op(pty)?;
         out.push_str(&format!("      local.get {ret_ptr}\n"));
         emit_instr(

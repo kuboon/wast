@@ -16,6 +16,6 @@ ENV MISE_INSTALL_PATH=/usr/local/bin/mise
 RUN curl https://mise.run | sh
 RUN mkdir -p $HOME/.config/fish && echo '$MISE_INSTALL_PATH activate fish --shims | source' >> $HOME/.config/fish/config.fish && \
     echo '$MISE_INSTALL_PATH activate bash --shims | eval' >> $HOME/.bashrc
-COPY --parents mise.toml ./**/cargo.* ./**/package.json ./**/pnpm-lock.json ./
+COPY --parents mise.toml rust-toolchain.toml ./**/Cargo.toml Cargo.lock ./**/package.json pnpm-lock.yaml ./
 RUN mise trust && mise install --system --before 3d
 RUN mise x -- cargo binstall -y cargo-component wasm-tools

@@ -30,6 +30,7 @@ fn list_u32_type() -> WastTypeRow {
 fn list_literal_empty() {
     // make-empty() -> list<u32>  { ListLiteral { values: [] } }
     let db = WastDb {
+        version: WastDb::CURRENT_VERSION,
         funcs: vec![WastFuncRow {
             uid: "make_empty".into(),
             func: WastFunc {
@@ -59,6 +60,7 @@ fn list_literal_empty() {
 fn list_literal_u32_const() {
     // make-nums() -> list<u32>  { [1, 2, 3, 42] }
     let db = WastDb {
+        version: WastDb::CURRENT_VERSION,
         funcs: vec![WastFuncRow {
             uid: "make_nums".into(),
             func: WastFunc {
@@ -93,6 +95,7 @@ fn list_literal_u32_const() {
 fn list_literal_u32_from_params() {
     // pack(a: u32, b: u32, c: u32) -> list<u32>  { [a, b, c] }
     let db = WastDb {
+        version: WastDb::CURRENT_VERSION,
         funcs: vec![WastFuncRow {
             uid: "pack".into(),
             func: WastFunc {
@@ -133,6 +136,7 @@ fn list_literal_u32_from_params() {
 fn list_literal_i64_8byte_aligned() {
     // big() -> list<i64>  { [-1, 0, MAX] }
     let db = WastDb {
+        version: WastDb::CURRENT_VERSION,
         funcs: vec![WastFuncRow {
             uid: "big".into(),
             func: WastFunc {
@@ -175,6 +179,7 @@ fn list_literal_i64_8byte_aligned() {
 fn list_literal_of_strings() {
     // greetings() -> list<string>  { ["hello", "world"] }
     let db = WastDb {
+        version: WastDb::CURRENT_VERSION,
         funcs: vec![WastFuncRow {
             uid: "greetings".into(),
             func: WastFunc {
@@ -229,6 +234,7 @@ struct Bag {
 fn record_with_list_literal_field() {
     // make-bag(label: string) -> bag  { { items: [7, 8, 9], label: label } }
     let db = WastDb {
+        version: WastDb::CURRENT_VERSION,
         funcs: vec![WastFuncRow {
             uid: "make_bag".into(),
             func: WastFunc {

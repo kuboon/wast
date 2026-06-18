@@ -42,6 +42,12 @@ export class WastFileSystemProvider implements vscode.FileSystemProvider {
   private _onDidChangeFile = new vscode.EventEmitter<vscode.FileChangeEvent[]>();
   readonly onDidChangeFile = this._onDidChangeFile.event;
 
+  /** Newest underlying mtime observed when each component dir was last
+   *  rendered (readFile) or saved (writeFile). Keyed by dir URI string.
+   *  Used by writeFile to detect edits that landed on disk in between —
+   *  see the conflict check there. */
+  private lastSeenMtime = new Map<string, number>();
+
   constructor(private runtime: LoadedRuntime) {}
 
   watch(_uri: vscode.Uri): vscode.Disposable {
@@ -51,9 +57,48 @@ export class WastFileSystemProvider implements vscode.FileSystemProvider {
     return new vscode.Disposable(() => {});
   }
 
-  stat(_uri: vscode.Uri): vscode.FileStat {
-    // Sizes / times are advisory for VS Code; returning zeros works.
-    return { type: vscode.FileType.File, ctime: 0, mtime: 0, size: 0 };
+  /** Newest mtime across the files a virtual doc is rendered from
+   *  (wast.json + syms.<lang>.yaml). `undefined` if none exist. */
+  private async underlyingMtime(
+    dirUri: vscode.Uri,
+    lang: string,
+  ): Promise<number | undefined> {
+    let newest: number | undefined;
+    for (const name of ["wast.json", `syms.${lang}.yaml`]) {
+      try {
+        const st = await vscode.workspace.fs.stat(vscode.Uri.joinPath(dirUri, name));
+        newest = newest === undefined ? st.mtime : Math.max(newest, st.mtime);
+      } catch {
+        // file absent — syms is optional, wast.json absence surfaces later
+      }
+    }
+    return newest;
+  }
+
+  async stat(uri: vscode.Uri): Promise<vscode.FileStat> {
+    // Report the real ctime/mtime of the underlying wast.json (and syms)
+    // via workspace.fs so VS Code's own modified-since tracking works —
+    // returning constant zeros would make every external edit invisible
+    // to the editor's conflict handling. Size is advisory (the rendered
+    // text length differs from the on-disk JSON anyway).
+    const dirUri = decodeDirUri(uri);
+    if (!dirUri) {
+      throw vscode.FileSystemError.FileNotFound(`invalid wast:// URI: ${uri}`);
+    }
+    const lang = vscode.workspace
+      .getConfiguration("wast")
+      .get<string>("symsLanguage", "en");
+    try {
+      const st = await vscode.workspace.fs.stat(
+        vscode.Uri.joinPath(dirUri, "wast.json"),
+      );
+      const mtime = (await this.underlyingMtime(dirUri, lang)) ?? st.mtime;
+      return { type: vscode.FileType.File, ctime: st.ctime, mtime, size: st.size };
+    } catch {
+      throw vscode.FileSystemError.FileNotFound(
+        `wast.json not found in ${dirUri.fsPath}`,
+      );
+    }
   }
 
   // Directory operations don't apply to virtual component URIs.
@@ -83,6 +128,16 @@ export class WastFileSystemProvider implements vscode.FileSystemProvider {
     const cfg = vscode.workspace.getConfiguration("wast");
     const lang = cfg.get<string>("symsLanguage", "en");
     const pluginId = cfg.get<SyntaxPluginId>("syntaxPlugin", "ruby-like");
+
+    // Record the underlying mtime BEFORE reading the content. If a write
+    // races in between, we'll have read the newer content but recorded the
+    // older mtime — which at worst causes a spurious conflict error on the
+    // next save. Statting after the read would invert that: old content
+    // with a new mtime, silently overwriting the racing edit on save.
+    const mtime = await this.underlyingMtime(dirUri, lang);
+    if (mtime !== undefined) {
+      this.lastSeenMtime.set(dirUri.toString(), mtime);
+    }
 
     const loaded = await readComponent(dirUri, lang);
     if (!loaded) {
@@ -133,6 +188,30 @@ export class WastFileSystemProvider implements vscode.FileSystemProvider {
     const cfg = vscode.workspace.getConfiguration("wast");
     const lang = cfg.get<string>("symsLanguage", "en");
     const pluginId = cfg.get<SyntaxPluginId>("syntaxPlugin", "ruby-like");
+
+    // Conflict check: if wast.json / syms changed on disk after this view
+    // was last rendered, a blind save would merge the pane text into the
+    // *new* disk state and silently clobber whoever wrote it. Fail the
+    // save instead and let the user decide. We bump the recorded mtime so
+    // a deliberate second save (after the warning) does overwrite.
+    const dirKey = dirUri.toString();
+    const lastSeen = this.lastSeenMtime.get(dirKey);
+    const currentMtime = await this.underlyingMtime(dirUri, lang);
+    if (
+      lastSeen !== undefined &&
+      currentMtime !== undefined &&
+      currentMtime > lastSeen
+    ) {
+      this.lastSeenMtime.set(dirKey, currentMtime);
+      throw saveError("conflict", [
+        {
+          message:
+            `wast.json in ${dirUri.fsPath} changed on disk since this view was opened. ` +
+            "Revert the editor to load the new content, or save again to overwrite it.",
+          location: null,
+        },
+      ]);
+    }
 
     const loaded = await readComponent(dirUri, lang);
     if (!loaded) {
@@ -192,6 +271,13 @@ export class WastFileSystemProvider implements vscode.FileSystemProvider {
     if (files.symsEnYaml !== null) {
       const symsUri = vscode.Uri.joinPath(dirUri, `syms.${lang}.yaml`);
       await vscode.workspace.fs.writeFile(symsUri, files.symsEnYaml);
+    }
+
+    // Our own write is now the latest state — record its mtime so the next
+    // save doesn't flag it as a conflict.
+    const written = await this.underlyingMtime(dirUri, lang);
+    if (written !== undefined) {
+      this.lastSeenMtime.set(dirKey, written);
     }
   }
 
@@ -256,8 +342,28 @@ function saveError(
 // URI codec
 // ---------------------------------------------------------------------------
 
+// base64url helpers built on TextEncoder/TextDecoder + atob/btoa so they
+// work in both the desktop (Node) and web extension hosts — `Buffer` is
+// Node-only and breaks the browser build.
+
+function base64UrlEncode(text: string): string {
+  const bytes = new TextEncoder().encode(text);
+  let bin = "";
+  for (const b of bytes) bin += String.fromCharCode(b);
+  return btoa(bin).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+}
+
+function base64UrlDecode(encoded: string): string {
+  const b64 =
+    encoded.replace(/-/g, "+").replace(/_/g, "/") +
+    "=".repeat((4 - (encoded.length % 4)) % 4);
+  const bin = atob(b64);
+  const bytes = Uint8Array.from(bin, (c) => c.charCodeAt(0));
+  return new TextDecoder("utf-8").decode(bytes);
+}
+
 export function encodeDir(dirUri: vscode.Uri): string {
-  return Buffer.from(dirUri.toString(), "utf-8").toString("base64url");
+  return base64UrlEncode(dirUri.toString());
 }
 
 export function decodeDirUri(uri: vscode.Uri): vscode.Uri | null {
@@ -265,9 +371,7 @@ export function decodeDirUri(uri: vscode.Uri): vscode.Uri | null {
     // path is "/<encoded>/component" — split and grab the first segment.
     const segments = uri.path.split("/").filter((s) => s.length > 0);
     if (segments.length === 0) return null;
-    return vscode.Uri.parse(
-      Buffer.from(segments[0], "base64url").toString("utf-8"),
-    );
+    return vscode.Uri.parse(base64UrlDecode(segments[0]));
   } catch {
     return null;
   }

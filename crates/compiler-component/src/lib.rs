@@ -11,7 +11,7 @@
 #[rustfmt::skip]
 mod bindings;
 
-use crate::bindings::wast::compiler::types::{
+use crate::bindings::wast::types::types::{
     FuncSource as BindFuncSource, PrimitiveType as BindPrimitiveType, TypeSource as BindTypeSource,
     WastComponent, WastError, WastFunc as BindWastFunc, WastTypeDef as BindWastTypeDef,
     WitType as BindWitType,
@@ -113,7 +113,7 @@ fn component_to_db(c: WastComponent) -> WastDb {
             def: type_def(td),
         })
         .collect();
-    WastDb { funcs, types }
+    WastDb::new(funcs, types)
 }
 
 // ---------------------------------------------------------------------------

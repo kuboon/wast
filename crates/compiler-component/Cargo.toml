@@ -19,3 +19,6 @@ package = "wast:compiler"
 [package.metadata.component.target]
 path = "../../wit-compiler"
 world = "compiler-world"
+
+[package.metadata.component.target.dependencies]
+"wast:types" = { path = "../../wit-types" }

@@ -13,10 +13,14 @@ jobs:
     runs-on: ubuntu-latest
     env:
       HOME: /root
+      # mise hits unauthenticated GitHub API rate limits without a token
+      GITHUB_TOKEN: ${{ github.token }}
     defaults:
       run:
         shell: bash
     container:
+      # NOTE: prefer pinning to a <short-sha> tag (published by the
+      # "Publish Devcontainer Image" workflow) for reproducible CI.
       image: ghcr.io/kuboon/wast/wast-dev-container:latest
       credentials:
         username: ${{ github.actor }}

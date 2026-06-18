@@ -19,6 +19,7 @@ fn load(db: &WastDb) -> (Engine, Component) {
 fn strlen_of_string_param() {
     // strlen(s: string) -> u32  { StringLen(s) }
     let db = WastDb {
+        version: WastDb::CURRENT_VERSION,
         funcs: vec![WastFuncRow {
             uid: "strlen".into(),
             func: WastFunc {

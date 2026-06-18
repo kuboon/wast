@@ -24,6 +24,7 @@ fn db_classify_f32() -> WastDb {
     //     err(v) -> v,        // f32 binding read; needs f32.reinterpret_i32
     //   }
     WastDb {
+        version: WastDb::CURRENT_VERSION,
         funcs: vec![WastFuncRow {
             uid: "classify".into(),
             func: WastFunc {

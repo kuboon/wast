@@ -21,6 +21,7 @@ fn string_literal_compile_time_len() {
     // hello_len() -> u32  { StringLen(StringLiteral(b"hello")) }
     // Folded to `i32.const 5` at compile time — no memory access required.
     let db = WastDb {
+        version: WastDb::CURRENT_VERSION,
         funcs: vec![WastFuncRow {
             uid: "hello_len".into(),
             func: WastFunc {
@@ -54,6 +55,7 @@ fn literal_passed_across_call_boundary() {
     // slot from its string param. Exported `literal_count() -> u32` pushes
     // a StringLiteral as the arg, exercising actual (ptr, len) passing.
     let db = WastDb {
+        version: WastDb::CURRENT_VERSION,
         funcs: vec![
             WastFuncRow {
                 uid: "count".into(),
@@ -102,6 +104,7 @@ fn literal_passed_across_call_boundary() {
 fn multibyte_utf8_literal() {
     // StringLiteral of a multi-byte UTF-8 sequence. Length = byte count.
     let db = WastDb {
+        version: WastDb::CURRENT_VERSION,
         funcs: vec![WastFuncRow {
             uid: "jp_len".into(),
             func: WastFunc {

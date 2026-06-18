@@ -21,6 +21,16 @@ pub enum ArithOp {
 }
 
 /// Intermediate representation for wast body instructions.
+///
+/// # Serialization compatibility
+///
+/// Serialized bodies (see [`serialize_body`] / [`deserialize_body`]) encode
+/// each variant by its **positional index** (postcard). Therefore variants in
+/// this enum may only ever be APPENDED at the end — never inserted in the
+/// middle, reordered, or removed — or every previously persisted body would
+/// silently re-interpret as the wrong instructions. The golden-bytes test
+/// `test_golden_serialized_bytes` pins the current layout; if it fails after
+/// you touched this enum, you broke the on-disk format.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Instruction {
     // Control flow (WAT-inherited)
@@ -280,6 +290,13 @@ fn detect_patterns(instr: &Instruction, index: usize, matches: &mut Vec<PatternM
                 detect_patterns(child, i, matches);
             }
         }
+        Instruction::MatchVariant { arms, .. } => {
+            for arm in arms {
+                for (i, child) in arm.body.iter().enumerate() {
+                    detect_patterns(child, i, matches);
+                }
+            }
+        }
         _ => {}
     }
 }
@@ -421,14 +438,45 @@ fn is_try_pattern(condition: &Instruction, then_body: &[Instruction]) -> bool {
     is_err_condition && then_returns
 }
 
+/// Current on-disk body format version. The serialized form is a single
+/// version byte followed by the postcard encoding of `Vec<Instruction>`.
+pub const BODY_FORMAT_VERSION: u8 = 1;
+
 /// Serialize a slice of instructions into a compact binary format.
-pub fn serialize_body(instructions: &[Instruction]) -> Vec<u8> {
-    postcard::to_allocvec(instructions).expect("serialization should not fail")
+///
+/// Layout: `[BODY_FORMAT_VERSION, <postcard(Vec<Instruction>)>...]`.
+pub fn try_serialize_body(instructions: &[Instruction]) -> Result<Vec<u8>, String> {
+    let payload = postcard::to_allocvec(instructions)
+        .map_err(|e| format!("body serialization failed: {e}"))?;
+    let mut out = Vec::with_capacity(payload.len() + 1);
+    out.push(BODY_FORMAT_VERSION);
+    out.extend_from_slice(&payload);
+    Ok(out)
 }
 
-/// Deserialize instructions from the binary format produced by [`serialize_body`].
+/// Infallible wrapper around [`try_serialize_body`], kept for existing
+/// callers (syntax plugins). Postcard serialization of `Instruction` cannot
+/// realistically fail, but new code should prefer [`try_serialize_body`].
+pub fn serialize_body(instructions: &[Instruction]) -> Vec<u8> {
+    try_serialize_body(instructions).expect("body serialization should not fail")
+}
+
+/// Deserialize instructions from the binary format produced by
+/// [`serialize_body`]. The first byte is the format version; any value other
+/// than [`BODY_FORMAT_VERSION`] is rejected with a clear error.
 pub fn deserialize_body(data: &[u8]) -> Result<Vec<Instruction>, String> {
-    postcard::from_bytes(data).map_err(|e| format!("deserialization failed: {e}"))
+    match data.split_first() {
+        Option::None => {
+            Err("body deserialization failed: empty body (missing format-version byte)".to_string())
+        }
+        Some((&BODY_FORMAT_VERSION, payload)) => {
+            postcard::from_bytes(payload).map_err(|e| format!("body deserialization failed: {e}"))
+        }
+        Some((&other, _)) => Err(format!(
+            "body deserialization failed: unsupported body format version {other} \
+             (this build supports version {BODY_FORMAT_VERSION})"
+        )),
+    }
 }
 
 #[cfg(test)]
@@ -834,5 +882,114 @@ mod tests {
     fn test_deserialize_invalid_data() {
         let result = deserialize_body(&[0xFF, 0xFF, 0xFF]);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_deserialize_empty_body_errors() {
+        let result = deserialize_body(&[]);
+        let msg = result.unwrap_err();
+        assert!(msg.contains("missing format-version byte"), "{msg}");
+    }
+
+    #[test]
+    fn test_deserialize_unknown_version_errors() {
+        // Version 0 (pre-versioning data) and a future version must both be
+        // rejected with a clear message instead of being mis-decoded.
+        for bad_version in [0u8, 2, 0xFF] {
+            let mut data = vec![bad_version];
+            data.extend(postcard::to_allocvec::<Vec<Instruction>>(&vec![]).unwrap());
+            let msg = deserialize_body(&data).unwrap_err();
+            assert!(
+                msg.contains(&format!("unsupported body format version {bad_version}")),
+                "{msg}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_serialized_body_starts_with_version_byte() {
+        let bytes = serialize_body(&[Instruction::Nop]);
+        assert_eq!(bytes[0], BODY_FORMAT_VERSION);
+    }
+
+    /// Golden-bytes test: pins the exact serialized encoding of a body that
+    /// covers early, middle, and late `Instruction` variants (incl.
+    /// `ResourceDrop`, variant index 32). If this fails, the enum's variant
+    /// order changed and every persisted body in the wild is now corrupt —
+    /// variants may only be APPENDED, never inserted/reordered/removed.
+    #[test]
+    fn test_golden_serialized_bytes() {
+        let body = vec![
+            Instruction::Const { value: 7 },
+            Instruction::LocalSet {
+                uid: "x".into(),
+                value: Box::new(Instruction::Arithmetic {
+                    op: ArithOp::Add,
+                    lhs: Box::new(Instruction::LocalGet { uid: "x".into() }),
+                    rhs: Box::new(Instruction::Const { value: 1 }),
+                }),
+            },
+            Instruction::Call {
+                func_uid: "callee".into(),
+                args: vec![("a".into(), Instruction::Const { value: 2 })],
+            },
+            Instruction::RecordLiteral {
+                fields: vec![(
+                    "f".into(),
+                    Instruction::StringLiteral {
+                        bytes: b"hi".to_vec(),
+                    },
+                )],
+            },
+            Instruction::MatchVariant {
+                value: Box::new(Instruction::LocalGet { uid: "v".into() }),
+                arms: vec![MatchArm {
+                    case: "c".into(),
+                    binding: Some("b".into()),
+                    body: vec![Instruction::Return],
+                }],
+            },
+            Instruction::ResourceDrop {
+                resource: "r".into(),
+                handle: Box::new(Instruction::LocalGet { uid: "h".into() }),
+            },
+            Instruction::Nop,
+        ];
+        let bytes = serialize_body(&body);
+        let expected: Vec<u8> = vec![
+            1, // format version
+            7, // 7 instructions
+            9, 14, // Const(7)
+            8, 1, 120, 11, 0, 7, 1, 120, 9, 2, // LocalSet x = x + 1
+            6, 6, 99, 97, 108, 108, 101, 101, 1, 1, 97, 9, 4, // Call callee(a: 2)
+            24, 1, 1, 102, 19, 2, 104, 105, // RecordLiteral { f: "hi" }
+            26, 7, 1, 118, 1, 1, 99, 1, 1, 98, 1, 5, // MatchVariant v { c(b) => return }
+            32, 1, 114, 7, 1, 104, // ResourceDrop r, handle = h
+            33,  // Nop
+        ];
+        assert_eq!(bytes, expected);
+        assert_eq!(deserialize_body(&bytes).unwrap(), body);
+    }
+
+    #[test]
+    fn test_detect_patterns_recurses_into_match_variant_arms() {
+        // A Try pattern nested inside a MatchVariant arm must be detected.
+        let body = vec![Instruction::MatchVariant {
+            value: Box::new(Instruction::LocalGet { uid: "v".into() }),
+            arms: vec![MatchArm {
+                case: "c".into(),
+                binding: Option::None,
+                body: vec![Instruction::If {
+                    condition: Box::new(Instruction::IsErr {
+                        value: Box::new(Instruction::LocalGet { uid: "r".into() }),
+                    }),
+                    then_body: vec![Instruction::Return],
+                    else_body: vec![],
+                }],
+            }],
+        }];
+        let result = analyze(&body);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].pattern, Pattern::Try);
     }
 }

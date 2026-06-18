@@ -25,6 +25,7 @@ fn unwrap_or_on_option() {
     // unwrap-or(o: option<u32>, default: u32) -> u32
     //   { match o { some(x) => x, none => default } }
     let db = WastDb {
+        version: WastDb::CURRENT_VERSION,
         funcs: vec![WastFuncRow {
             uid: "unwrap_or".into(),
             func: WastFunc {
@@ -72,6 +73,7 @@ fn unwrap_or_default_on_result() {
     // unwrap-or-default(r: result<u32, u32>, default: u32) -> u32
     //   { match r { ok(x) => x, err(_) => default } }
     let db = WastDb {
+        version: WastDb::CURRENT_VERSION,
         funcs: vec![WastFuncRow {
             uid: "unwrap_or_default".into(),
             func: WastFunc {
@@ -118,6 +120,7 @@ fn match_result_exposes_err_value() {
     // err-or-zero(r: result<u32, u32>) -> u32
     //   { match r { ok(_) => 0, err(e) => e } }
     let db = WastDb {
+        version: WastDb::CURRENT_VERSION,
         funcs: vec![WastFuncRow {
             uid: "err_or_zero".into(),
             func: WastFunc {
