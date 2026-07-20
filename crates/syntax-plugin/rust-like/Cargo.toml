@@ -19,7 +19,7 @@ package = "wast:core"
 
 [package.metadata.component.target]
 path = "../../../wit"
-world = "syntax-plugin-world"
+world = "syntax-renderer-world"
 
 [package.metadata.component.target.dependencies]
 "wast:types" = { path = "../../../wit-types" }

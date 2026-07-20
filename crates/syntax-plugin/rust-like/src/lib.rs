@@ -4,7 +4,6 @@ mod bindings;
 
 use std::collections::BTreeMap;
 use wast_pattern_analyzer::{ArithOp, CompareOp, Instruction};
-use wast_syntax_core::scaffold::{self, ExistingIndex, UidGen, split_top_level};
 use wast_syntax_core::wit_types::*;
 use wast_syntax_core::{RenderContext, TypePrinter, convert};
 
@@ -67,10 +66,6 @@ fn format_type_ref(type_ref: &WitTypeRef, ctx: &RenderContext) -> String {
     wast_syntax_core::resolve_type_ref(type_ref, ctx, &RustTypePrinter)
 }
 
-fn format_wit_type_native(t: &wast_types::WitType, ctx: &RenderContext) -> String {
-    wast_syntax_core::format_wit_type(t, ctx, &RustTypePrinter)
-}
-
 fn primitive_name(p: &wast_types::PrimitiveType) -> &'static str {
     use wast_types::PrimitiveType as P;
     match p {
@@ -83,25 +78,6 @@ fn primitive_name(p: &wast_types::PrimitiveType) -> &'static str {
         P::Bool => "bool",
         P::Char => "char",
         P::String => "String",
-    }
-}
-
-fn primitive_name_binding(p: &PrimitiveType) -> &'static str {
-    primitive_name(&convert::primitive(p))
-}
-
-fn parse_primitive(s: &str) -> Option<PrimitiveType> {
-    match s {
-        "u32" => Some(PrimitiveType::U32),
-        "u64" => Some(PrimitiveType::U64),
-        "i32" => Some(PrimitiveType::I32),
-        "i64" => Some(PrimitiveType::I64),
-        "f32" => Some(PrimitiveType::F32),
-        "f64" => Some(PrimitiveType::F64),
-        "bool" => Some(PrimitiveType::Bool),
-        "char" => Some(PrimitiveType::Char),
-        "String" => Some(PrimitiveType::String),
-        _ => None,
     }
 }
 
@@ -532,179 +508,10 @@ fn func_to_text(func_uid: &str, func: &WastFunc, ctx: &RenderContext) -> Result<
 }
 
 // ---------------------------------------------------------------------------
-// from_text — parser
-// ---------------------------------------------------------------------------
-
-struct ParsedFunc {
-    name: String,
-    params: Vec<(String, String)>,
-    result_type: Option<String>,
-}
-
-fn parse_type_ref_str(
-    s: &str,
-    types: &[(TypeUid, WastTypeDef)],
-    ctx: &RenderContext,
-) -> WitTypeRef {
-    let s = s.trim();
-    if parse_primitive(s).is_some() {
-        for (uid, td) in types {
-            if let WitType::Primitive(p) = &td.definition {
-                if primitive_name_binding(p) == s {
-                    return uid.clone();
-                }
-            }
-        }
-        for (uid, name) in &ctx.type_names {
-            if name == s {
-                return uid.clone();
-            }
-        }
-        return s.to_string();
-    }
-    for (uid, name) in &ctx.type_names {
-        if name == s {
-            return uid.clone();
-        }
-    }
-    // Fall back to matching the rendered form of each existing type so
-    // round-tripping `Option<u32>` lands back at the original `opt_u32`
-    // uid instead of inventing a brand-new type ref.
-    for (uid, td) in types {
-        if format_wit_type_native(&convert::wit_type(&td.definition), ctx) == s {
-            return uid.clone();
-        }
-    }
-    s.to_string()
-}
-
-/// Parse a signature like `name(p1: type1, p2: type2) -> ret`
-fn parse_signature(sig: &str) -> Option<ParsedFunc> {
-    let sig = sig.trim();
-
-    let paren_open = sig.find('(')?;
-    let name = sig[..paren_open].trim().to_string();
-    if name.is_empty() {
-        return None;
-    }
-
-    let rest = &sig[paren_open + 1..];
-    let paren_close = rest.find(')')?;
-    let params_str = &rest[..paren_close];
-    let after_params = rest[paren_close + 1..].trim();
-
-    let params: Vec<(String, String)> = if params_str.trim().is_empty() {
-        vec![]
-    } else {
-        split_top_level(params_str, ',')
-            .into_iter()
-            .map(|p| {
-                let p = p.trim();
-                if let Some(colon) = p.find(':') {
-                    (
-                        p[..colon].trim().to_string(),
-                        p[colon + 1..].trim().to_string(),
-                    )
-                } else {
-                    (p.to_string(), "unknown".to_string())
-                }
-            })
-            .collect()
-    };
-
-    let result_type = if after_params.starts_with("->") {
-        Some(after_params[2..].trim().to_string())
-    } else {
-        None
-    };
-
-    Some(ParsedFunc {
-        name,
-        params,
-        result_type,
-    })
-}
-
-// ---------------------------------------------------------------------------
-// Lexically-aware body scanning
-// ---------------------------------------------------------------------------
-
-/// Cross-line lexical state for [`rust_brace_delta`].
-#[derive(Default)]
-struct RustLexState {
-    in_block_comment: bool,
-}
-
-/// Net brace depth change of a Rust-like source line, ignoring braces in
-/// string literals, char literals, `//` line comments and `/* … */` block
-/// comments (block-comment state carries across lines).
-///
-/// A naive per-char count treated `let s = "}";` or `// {` as real braces
-/// and lost track of a function's closing brace.
-fn rust_brace_delta(line: &str, state: &mut RustLexState) -> i32 {
-    let bytes = line.as_bytes();
-    let mut depth = 0i32;
-    let mut i = 0;
-    while i < bytes.len() {
-        if state.in_block_comment {
-            if bytes[i] == b'*' && i + 1 < bytes.len() && bytes[i + 1] == b'/' {
-                state.in_block_comment = false;
-                i += 2;
-            } else {
-                i += 1;
-            }
-            continue;
-        }
-        match bytes[i] {
-            b'"' => {
-                i += 1;
-                while i < bytes.len() {
-                    if bytes[i] == b'\\' {
-                        i += 2;
-                        continue;
-                    }
-                    if bytes[i] == b'"' {
-                        break;
-                    }
-                    i += 1;
-                }
-                i += 1; // past closing quote (or end of line)
-            }
-            b'\'' => {
-                // Char literal ('x' or '\x'); a lone quote (lifetime) is
-                // left alone.
-                if i + 2 < bytes.len() && bytes[i + 1] != b'\\' && bytes[i + 2] == b'\'' {
-                    i += 3;
-                } else if i + 3 < bytes.len() && bytes[i + 1] == b'\\' && bytes[i + 3] == b'\'' {
-                    i += 4;
-                } else {
-                    i += 1;
-                }
-            }
-            b'/' if i + 1 < bytes.len() && bytes[i + 1] == b'/' => break,
-            b'/' if i + 1 < bytes.len() && bytes[i + 1] == b'*' => {
-                state.in_block_comment = true;
-                i += 2;
-            }
-            b'{' => {
-                depth += 1;
-                i += 1;
-            }
-            b'}' => {
-                depth -= 1;
-                i += 1;
-            }
-            _ => i += 1,
-        }
-    }
-    depth
-}
-
-// ---------------------------------------------------------------------------
 // Guest implementation
 // ---------------------------------------------------------------------------
 
-impl bindings::exports::wast::core::syntax_plugin::Guest for Component {
+impl bindings::exports::wast::core::syntax_renderer::Guest for Component {
     fn to_text(component: WastComponent) -> Result<String, Vec<WastError>> {
         let native_syms = convert::syms(&component.syms);
         let native_types = convert::type_list(&component.types);
@@ -726,293 +533,6 @@ impl bindings::exports::wast::core::syntax_plugin::Guest for Component {
         }
         Ok(parts.join("\n\n"))
     }
-
-    fn from_text(text: String, existing: WastComponent) -> Result<WastComponent, Vec<WastError>> {
-        let native_syms = convert::syms(&existing.syms);
-        let native_types = convert::type_list(&existing.types);
-        let ctx = RenderContext::new(&native_syms, &native_types);
-
-        // Reverse map: display_name -> uid (funcs). The *local* reverse
-        // map is built per function — see `scaffold::func_rev_local`.
-        let rev_func = ExistingIndex::reverse(&ctx.func_names);
-        let index = ExistingIndex::new(&existing);
-        let mut uid_gen = UidGen::new(index.used_uids.clone());
-
-        let mut errors: Vec<WastError> = Vec::new();
-        let mut funcs: Vec<(FuncUid, WastFunc)> = Vec::new();
-        let mut new_syms_internal: Vec<SymEntry> = existing.syms.internal.clone();
-        let new_syms_local: Vec<SymEntry> = existing.syms.local.clone();
-
-        let lines: Vec<&str> = text.lines().collect();
-        let mut i = 0;
-
-        while i < lines.len() {
-            let line = lines[i].trim();
-
-            if line.is_empty() {
-                i += 1;
-                continue;
-            }
-
-            // Parse: extern "wast" { fn name(params) -> result; }
-            if line.starts_with("extern") && line.contains("\"wast\"") {
-                // Could be single-line or multi-line extern block
-                // Collect all lines until closing }
-                let mut block = String::new();
-                if line.contains('}') {
-                    // Single line: extern "wast" { fn name(params) -> result; }
-                    block = line.to_string();
-                    i += 1;
-                } else {
-                    // Multi-line
-                    i += 1;
-                    while i < lines.len() {
-                        let l = lines[i].trim();
-                        if l == "}" {
-                            i += 1;
-                            break;
-                        }
-                        if !l.is_empty() {
-                            block.push_str(l);
-                            block.push('\n');
-                        }
-                        i += 1;
-                    }
-                }
-
-                // Extract fn declarations from the block
-                let fn_decls: Vec<&str> = if block.starts_with("extern") {
-                    // Single-line form: extract between { and }
-                    if let (Some(open), Some(close)) = (block.find('{'), block.rfind('}')) {
-                        let inner = block[open + 1..close].trim();
-                        vec![inner]
-                    } else {
-                        vec![]
-                    }
-                } else {
-                    // Multi-line: each line is a fn decl
-                    block.lines().collect()
-                };
-
-                for decl in fn_decls {
-                    let decl = decl.trim().trim_end_matches(';').trim();
-                    if let Some(fn_start) = decl.find("fn ") {
-                        let sig_str = &decl[fn_start + 3..];
-                        match parse_signature(sig_str) {
-                            Some(parsed) => {
-                                let (func_uid, source_uid) = scaffold::resolve_func_uid(
-                                    &parsed.name,
-                                    &rev_func,
-                                    &index,
-                                    &mut uid_gen,
-                                );
-                                let existing_func = index.find(&source_uid, &func_uid);
-                                let rev_local =
-                                    scaffold::func_rev_local(&ctx.local_names, existing_func);
-
-                                let params =
-                                    scaffold::resolve_params(&parsed.params, &rev_local, |t| {
-                                        parse_type_ref_str(t, &existing.types, &ctx)
-                                    });
-                                let result = parsed
-                                    .result_type
-                                    .as_ref()
-                                    .map(|r| parse_type_ref_str(r, &existing.types, &ctx));
-
-                                let body = existing_func.and_then(|f| f.body.clone());
-
-                                funcs.push((
-                                    func_uid,
-                                    WastFunc {
-                                        source: FuncSource::Imported(source_uid),
-                                        params,
-                                        result,
-                                        body,
-                                    },
-                                ));
-                            }
-                            None => {
-                                errors.push(WastError {
-                                    message: format!(
-                                        "parse_error: cannot parse extern fn: {}",
-                                        decl
-                                    ),
-                                    location: Some(format!("line {}", i)),
-                                });
-                            }
-                        }
-                    }
-                }
-                continue;
-            }
-
-            // Parse: #[export] followed by fn
-            if line == "#[export]" {
-                i += 1;
-                while i < lines.len() && lines[i].trim().is_empty() {
-                    i += 1;
-                }
-                if i < lines.len() && lines[i].trim().starts_with("fn ") {
-                    let fn_line = lines[i].trim();
-                    let sig_str = fn_line["fn ".len()..].trim_end_matches('{').trim();
-                    match parse_signature(sig_str) {
-                        Some(parsed) => {
-                            // Consume body until the matching closing }
-                            // (lexically aware — see `rust_brace_delta`).
-                            i += 1;
-                            let mut brace_depth = 1;
-                            let mut lex = RustLexState::default();
-                            while i < lines.len() && brace_depth > 0 {
-                                brace_depth += rust_brace_delta(lines[i], &mut lex);
-                                i += 1;
-                            }
-
-                            let (func_uid, source_uid) = scaffold::resolve_func_uid(
-                                &parsed.name,
-                                &rev_func,
-                                &index,
-                                &mut uid_gen,
-                            );
-                            let existing_func = index.find(&source_uid, &func_uid);
-                            let rev_local =
-                                scaffold::func_rev_local(&ctx.local_names, existing_func);
-
-                            let params =
-                                scaffold::resolve_params(&parsed.params, &rev_local, |t| {
-                                    parse_type_ref_str(t, &existing.types, &ctx)
-                                });
-                            let result = parsed
-                                .result_type
-                                .as_ref()
-                                .map(|r| parse_type_ref_str(r, &existing.types, &ctx));
-
-                            let body = existing_func.and_then(|f| f.body.clone());
-
-                            scaffold::ensure_func_sym(
-                                &source_uid,
-                                &parsed.name,
-                                &mut new_syms_internal,
-                            );
-
-                            funcs.push((
-                                func_uid,
-                                WastFunc {
-                                    source: FuncSource::Exported(source_uid),
-                                    params,
-                                    result,
-                                    body,
-                                },
-                            ));
-                        }
-                        None => {
-                            errors.push(WastError {
-                                message: format!(
-                                    "parse_error: cannot parse fn after #[export]: {}",
-                                    fn_line
-                                ),
-                                location: Some(format!("line {}", i)),
-                            });
-                            i += 1;
-                        }
-                    }
-                } else {
-                    errors.push(WastError {
-                        message: "parse_error: expected 'fn' after '#[export]'".to_string(),
-                        location: Some(format!("line {}", i + 1)),
-                    });
-                }
-                continue;
-            }
-
-            // Parse: fn name(params) -> result { ... } (internal)
-            if line.starts_with("fn ") {
-                let sig_str = line["fn ".len()..].trim_end_matches('{').trim();
-                match parse_signature(sig_str) {
-                    Some(parsed) => {
-                        // Consume body until the matching closing }
-                        // (lexically aware — see `rust_brace_delta`).
-                        i += 1;
-                        let mut brace_depth = 1;
-                        let mut lex = RustLexState::default();
-                        while i < lines.len() && brace_depth > 0 {
-                            brace_depth += rust_brace_delta(lines[i], &mut lex);
-                            i += 1;
-                        }
-
-                        let (func_uid, source_uid) = scaffold::resolve_func_uid(
-                            &parsed.name,
-                            &rev_func,
-                            &index,
-                            &mut uid_gen,
-                        );
-                        let existing_func = index.find(&source_uid, &func_uid);
-                        let rev_local = scaffold::func_rev_local(&ctx.local_names, existing_func);
-
-                        let params = scaffold::resolve_params(&parsed.params, &rev_local, |t| {
-                            parse_type_ref_str(t, &existing.types, &ctx)
-                        });
-                        let result = parsed
-                            .result_type
-                            .as_ref()
-                            .map(|r| parse_type_ref_str(r, &existing.types, &ctx));
-
-                        let body = existing_func.and_then(|f| f.body.clone());
-
-                        scaffold::ensure_func_sym(
-                            &source_uid,
-                            &parsed.name,
-                            &mut new_syms_internal,
-                        );
-
-                        funcs.push((
-                            func_uid,
-                            WastFunc {
-                                source: FuncSource::Internal(source_uid),
-                                params,
-                                result,
-                                body,
-                            },
-                        ));
-                    }
-                    None => {
-                        errors.push(WastError {
-                            message: format!("parse_error: cannot parse fn: {}", line),
-                            location: Some(format!("line {}", i + 1)),
-                        });
-                        i += 1;
-                    }
-                }
-                continue;
-            }
-
-            // Skip comment lines
-            if line.starts_with("//") {
-                i += 1;
-                continue;
-            }
-
-            // Unrecognized line
-            errors.push(WastError {
-                message: format!("parse_error: unexpected line: {}", line),
-                location: Some(format!("line {}", i + 1)),
-            });
-            i += 1;
-        }
-
-        if !errors.is_empty() {
-            return Err(errors);
-        }
-
-        Ok(WastComponent {
-            funcs,
-            types: existing.types,
-            syms: Syms {
-                wit_syms: existing.syms.wit_syms,
-                internal: new_syms_internal,
-                local: new_syms_local,
-            },
-        })
-    }
 }
 
 bindings::export!(Component with_types_in bindings);
@@ -1020,7 +540,7 @@ bindings::export!(Component with_types_in bindings);
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bindings::exports::wast::core::syntax_plugin::Guest;
+    use bindings::exports::wast::core::syntax_renderer::Guest;
 
     fn make_test_component() -> WastComponent {
         WastComponent {
@@ -1151,72 +671,7 @@ mod tests {
     }
 
     #[test]
-    fn test_roundtrip_to_text_from_text_to_text() {
-        let comp = make_test_component();
-        let text1 = Component::to_text(comp.clone()).unwrap();
-
-        let parsed = Component::from_text(text1.clone(), comp.clone());
-        assert!(parsed.is_ok(), "from_text failed: {:?}", parsed.err());
-        let parsed = parsed.unwrap();
-
-        assert_eq!(parsed.funcs.len(), comp.funcs.len(), "func count mismatch");
-
-        let text2 = Component::to_text(parsed).unwrap();
-        assert_eq!(text1, text2, "roundtrip text mismatch");
-    }
-
-    #[test]
-    fn test_from_text_preserves_body() {
-        let comp = make_test_component();
-        let expected = comp
-            .funcs
-            .iter()
-            .find(|(uid, _)| uid == "f1")
-            .unwrap()
-            .1
-            .body
-            .clone();
-        let text = Component::to_text(comp.clone()).unwrap();
-        let parsed = Component::from_text(text, comp).unwrap();
-
-        let f1 = parsed.funcs.iter().find(|(uid, _)| uid == "f1");
-        assert!(f1.is_some(), "f1 should exist");
-        assert_eq!(f1.unwrap().1.body, expected, "body should be preserved");
-    }
-
-    #[test]
-    fn test_from_text_preserves_func_source_kinds() {
-        let comp = make_test_component();
-        let text = Component::to_text(comp.clone()).unwrap();
-        let parsed = Component::from_text(text, comp).unwrap();
-
-        let has_internal = parsed
-            .funcs
-            .iter()
-            .any(|(_, f)| matches!(f.source, FuncSource::Internal(_)));
-        let has_imported = parsed
-            .funcs
-            .iter()
-            .any(|(_, f)| matches!(f.source, FuncSource::Imported(_)));
-        let has_exported = parsed
-            .funcs
-            .iter()
-            .any(|(_, f)| matches!(f.source, FuncSource::Exported(_)));
-
-        assert!(has_internal, "should have internal func");
-        assert!(has_imported, "should have imported func");
-        assert!(has_exported, "should have exported func");
-    }
-
-    #[test]
-    fn test_from_text_error_on_invalid_input() {
-        let comp = make_test_component();
-        let result = Component::from_text("this is not valid syntax".to_string(), comp);
-        assert!(result.is_err(), "should return error for invalid input");
-    }
-
-    #[test]
-    fn test_empty_component_roundtrip() {
+    fn test_empty_component_to_text() {
         let comp = WastComponent {
             funcs: vec![],
             types: vec![],
@@ -1226,25 +681,16 @@ mod tests {
                 local: vec![],
             },
         };
-        let text = Component::to_text(comp.clone()).unwrap();
+        let text = Component::to_text(comp).unwrap();
         assert_eq!(text, "", "empty component should produce empty text");
-
-        let parsed = Component::from_text(text, comp);
-        assert!(parsed.is_ok());
-        assert_eq!(parsed.unwrap().funcs.len(), 0);
     }
 
     // -----------------------------------------------------------------------
-    // Body roundtrip tests
+    // Body rendering tests
     //
-    // rust-like's `from_text` doesn't currently parse body content — it
-    // counts brace nesting from the `fn ... {` opener and skips until the
-    // matching `}`, then restores the body bytes from the `existing`
-    // component. These tests lock in that contract: to_text → from_text
-    // (with same component as `existing`) → to_text produces identical
-    // text. A future milestone would replace the skip-and-restore with a
-    // real recursive-descent parser; until then, these tests guarantee
-    // round-trippable preservation across a representative IR sample.
+    // rust-like is a renderer-only plugin: there is no from_text, so these
+    // tests only assert that every instruction shape renders successfully
+    // (and deterministically — two renders of the same component agree).
     // -----------------------------------------------------------------------
 
     fn make_body_component(instructions: Vec<Instruction>) -> WastComponent {
@@ -1304,22 +750,17 @@ mod tests {
         }
     }
 
-    fn assert_body_roundtrip(instructions: Vec<Instruction>) {
+    fn assert_body_renders(instructions: Vec<Instruction>) {
         let comp = make_body_component(instructions);
         let text1 = Component::to_text(comp.clone()).unwrap();
-        let parsed = Component::from_text(text1.clone(), comp);
-        assert!(parsed.is_ok(), "from_text failed: {:?}", parsed.err());
-        let text2 = Component::to_text(parsed.unwrap()).unwrap();
-        assert_eq!(
-            text1, text2,
-            "body roundtrip text mismatch:\n--- expected ---\n{}\n--- actual ---\n{}",
-            text1, text2
-        );
+        assert!(!text1.is_empty(), "render produced empty text");
+        let text2 = Component::to_text(comp).unwrap();
+        assert_eq!(text1, text2, "render is not deterministic");
     }
 
     #[test]
-    fn test_body_roundtrip_simple_instructions() {
-        assert_body_roundtrip(vec![
+    fn test_body_renders_simple_instructions() {
+        assert_body_renders(vec![
             Instruction::LocalSet {
                 uid: "v1".into(),
                 value: Box::new(Instruction::Const { value: 42 }),
@@ -1329,16 +770,16 @@ mod tests {
     }
 
     #[test]
-    fn test_body_roundtrip_call() {
-        assert_body_roundtrip(vec![Instruction::Call {
+    fn test_body_renders_call() {
+        assert_body_renders(vec![Instruction::Call {
             func_uid: "f1".into(),
             args: vec![("p1".into(), Instruction::Const { value: 10 })],
         }]);
     }
 
     #[test]
-    fn test_body_roundtrip_arithmetic() {
-        assert_body_roundtrip(vec![Instruction::LocalSet {
+    fn test_body_renders_arithmetic() {
+        assert_body_renders(vec![Instruction::LocalSet {
             uid: "v1".into(),
             value: Box::new(Instruction::Arithmetic {
                 op: ArithOp::Add,
@@ -1349,8 +790,8 @@ mod tests {
     }
 
     #[test]
-    fn test_body_roundtrip_compare() {
-        assert_body_roundtrip(vec![Instruction::LocalSet {
+    fn test_body_renders_compare() {
+        assert_body_renders(vec![Instruction::LocalSet {
             uid: "v1".into(),
             value: Box::new(Instruction::Compare {
                 op: CompareOp::Lt,
@@ -1361,8 +802,8 @@ mod tests {
     }
 
     #[test]
-    fn test_body_roundtrip_if_else() {
-        assert_body_roundtrip(vec![Instruction::If {
+    fn test_body_renders_if_else() {
+        assert_body_renders(vec![Instruction::If {
             condition: Box::new(Instruction::Compare {
                 op: CompareOp::Eq,
                 lhs: Box::new(Instruction::LocalGet { uid: "p1".into() }),
@@ -1374,8 +815,8 @@ mod tests {
     }
 
     #[test]
-    fn test_body_roundtrip_loop() {
-        assert_body_roundtrip(vec![Instruction::Loop {
+    fn test_body_renders_loop() {
+        assert_body_renders(vec![Instruction::Loop {
             label: Some("loop0".into()),
             body: vec![
                 Instruction::BrIf {
@@ -1394,16 +835,16 @@ mod tests {
     }
 
     #[test]
-    fn test_body_roundtrip_block() {
-        assert_body_roundtrip(vec![Instruction::Block {
+    fn test_body_renders_block() {
+        assert_body_renders(vec![Instruction::Block {
             label: Some("done".into()),
             body: vec![Instruction::Nop, Instruction::Return],
         }]);
     }
 
     #[test]
-    fn test_body_roundtrip_wit_types() {
-        assert_body_roundtrip(vec![
+    fn test_body_renders_wit_types() {
+        assert_body_renders(vec![
             Instruction::Some {
                 value: Box::new(Instruction::Const { value: 7 }),
             },
@@ -1421,8 +862,8 @@ mod tests {
     }
 
     #[test]
-    fn test_body_roundtrip_match_option() {
-        assert_body_roundtrip(vec![Instruction::MatchOption {
+    fn test_body_renders_match_option() {
+        assert_body_renders(vec![Instruction::MatchOption {
             value: Box::new(Instruction::LocalGet { uid: "v4".into() }),
             some_binding: "v2".into(),
             some_body: vec![Instruction::LocalGet { uid: "v2".into() }],
@@ -1431,8 +872,8 @@ mod tests {
     }
 
     #[test]
-    fn test_body_roundtrip_match_result() {
-        assert_body_roundtrip(vec![Instruction::MatchResult {
+    fn test_body_renders_match_result() {
+        assert_body_renders(vec![Instruction::MatchResult {
             value: Box::new(Instruction::LocalGet { uid: "v3".into() }),
             ok_binding: "v2".into(),
             ok_body: vec![Instruction::LocalGet { uid: "v2".into() }],
@@ -1442,8 +883,8 @@ mod tests {
     }
 
     #[test]
-    fn test_body_roundtrip_nested_if_in_loop() {
-        assert_body_roundtrip(vec![Instruction::Loop {
+    fn test_body_renders_nested_if_in_loop() {
+        assert_body_renders(vec![Instruction::Loop {
             label: Some("outer".into()),
             body: vec![
                 Instruction::If {
@@ -1478,9 +919,9 @@ mod tests {
     }
 
     #[test]
-    fn test_body_roundtrip_string_literal_with_braces() {
-        // The body skip must not count braces *inside string literals*.
-        assert_body_roundtrip(vec![
+    fn test_body_renders_string_literal_with_braces() {
+        // Braces inside string literals must render verbatim.
+        assert_body_renders(vec![
             Instruction::LocalSet {
                 uid: "v1".into(),
                 value: Box::new(Instruction::StringLiteral {
@@ -1495,45 +936,5 @@ mod tests {
             },
             Instruction::Return,
         ]);
-    }
-
-    #[test]
-    fn test_body_skip_ignores_strings_and_comments() {
-        let comp = make_test_component();
-        // The first fn's body contains a stray close brace in a string and
-        // an open brace in a comment; both must be ignored so the second
-        // fn is still found.
-        let text = concat!(
-            "fn my_func(param_one: u32) -> u32 {\n",
-            "    let s = \"}\";\n",
-            "    // {\n",
-            "    /* { */\n",
-            "    param_one\n",
-            "}\n",
-            "\n",
-            "#[export]\n",
-            "fn exported_fn() -> u32 {\n",
-            "    7\n",
-            "}\n",
-        );
-        let parsed = Component::from_text(text.to_string(), comp).unwrap();
-        assert_eq!(parsed.funcs.len(), 2, "both fns must be found");
-        assert!(parsed.funcs.iter().any(|(uid, _)| uid == "f1"));
-        assert!(parsed.funcs.iter().any(|(uid, _)| uid == "f3"));
-    }
-
-    #[test]
-    fn test_rust_brace_delta_lexing() {
-        let mut st = RustLexState::default();
-        assert_eq!(rust_brace_delta("let s = \"}\";", &mut st), 0);
-        assert_eq!(rust_brace_delta("// }", &mut st), 0);
-        assert_eq!(rust_brace_delta("let c = '}';", &mut st), 0);
-        assert_eq!(rust_brace_delta("if x { /* } */", &mut st), 1);
-        assert!(!st.in_block_comment);
-        assert_eq!(rust_brace_delta("/* start", &mut st), 0);
-        assert!(st.in_block_comment);
-        assert_eq!(rust_brace_delta("} still comment", &mut st), 0);
-        assert_eq!(rust_brace_delta("end */ }", &mut st), -1);
-        assert!(!st.in_block_comment);
     }
 }

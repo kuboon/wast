@@ -11,11 +11,20 @@ Components. On-disk storage is `wast.json` (current) with a future migration to
 `wast.db` (SQLite).
 
 ```
-text <──syntax plugin──> partial/full WastComponent
-partial WastComponent <──partial manager──> full WastComponent
+WastComponent ──syntax renderer──> text (read-only projection, any syntax)
+text <──syntax editor──> partial/full WastComponent   (write syntaxes only)
+partial WastComponent <──partial manager──> full WastComponent  (structured write path)
 WastComponent <──wast-codec──> bytes(wast.json, world.wit, syms.en.yaml)
 [wast.json, world.wit] --compiler--> wasm component
 ```
+
+Reading and writing are asymmetric: every syntax plugin exports
+`syntax-renderer` (`to-text`); only designated write syntaxes (raw,
+ts-like) also export `syntax-editor` (`from-text`). Human-facing display
+syntaxes (ruby-like, rust-like) are renderer-only — read-only views for
+review/diff. Edits land on the IR through the structured write path
+(partial-manager extract/merge), which is also the intended interface for
+LLM agents.
 
 The Rust crates are compiled to wasm components (`cargo component`), transpiled
 with jco where a JS host needs them, and consumed by two hosts: the VS Code
@@ -26,7 +35,7 @@ extension (`packages/vscode-extension/`) and the web demo
 
 | Path | What |
 |---|---|
-| `wit/wast-core.wit` | `wast:core` package — `syntax-plugin` and `partial-manager` interfaces |
+| `wit/wast-core.wit` | `wast:core` package — `syntax-renderer`, `syntax-editor`, and `partial-manager` interfaces |
 | `wit-types/types.wit` | `wast:types` package — shared type vocabulary (`wast-component`, `wast-error`, …) `use`d by every other WIT package |
 | `wit-codec/codec.wit` | `wast:codec` package — `compile-wit` / `read` / `write` / `merge` |
 | `wit-compiler/compiler.wit` | `wast:compiler` package — `compile(component, world-wit) -> result<list<u8>, wast-error>` |
@@ -37,7 +46,7 @@ extension (`packages/vscode-extension/`) and the web demo
 | `crates/compiler-component/` | WIT wrapper component around the `wast-compiler` rlib |
 | `crates/syntax-plugin/{raw,ruby-like,ts-like,rust-like}/` | The 4 reference syntax-plugin components |
 | `crates/syntax-plugin/internal/pattern-analyzer/` | Rlib: `Instruction` IR, body (de)serialization, control-flow pattern detection (while/for/for-in/try) |
-| `crates/syntax-plugin/internal/syntax-core/` | Rlib: Rust scaffolding for plugins — shared `wit_types` bindings, `convert`, `RenderContext`, `TypePrinter`, `scaffold` from_text helpers |
+| `crates/syntax-plugin/internal/syntax-core/` | Rlib: Rust scaffolding for plugins — shared `wit_types` bindings, `convert`, `RenderContext`, `TypePrinter`, `scaffold` editor-side (from_text) helpers |
 | `crates/demo-gen/` | Legacy generator for web-demo milestone demos (see Tech debt) |
 | `packages/vscode-extension/` | VS Code extension: TreeView, editable `wast://` virtual docs, compile command |
 | `packages/web-demo/` | Browser playground (jco-transpiled components), deployed to GitHub Pages |
@@ -49,14 +58,20 @@ extension (`packages/vscode-extension/`) and the web demo
 - All four WIT packages share one type vocabulary: the **`wast:types`** package
   in `wit-types/types.wit`. `wast:core`, `wast:codec`, and `wast:compiler`
   `use wast:types/types@0.1.0.{…}` — one definition, no copies to drift.
-- `syntax-plugin.to-text` returns `result<string, list<wast-error>>` (plugins
-  must fail rather than render lossy placeholders); `from-text` returns
-  `result<wast-component, list<wast-error>>`.
+- The plugin contract is split into two interfaces:
+  **`syntax-renderer`** (`to-text: func(component) -> result<string,
+  list<wast-error>>`; plugins must fail rather than render lossy
+  placeholders) and **`syntax-editor`** (`from-text: func(text, existing) ->
+  result<wast-component, list<wast-error>>`). Two worlds:
+  `syntax-renderer-world` (renderer only — read-only plugins) and
+  `syntax-plugin-world` (renderer + editor — write-capable plugins).
+  Hosts feature-detect editor support by the presence of the
+  `syntax-editor` export and treat renderer-only views as read-only.
 - Rust crates bind the shared types once via `wast_syntax_core::wit_types` and
   remap their generated bindings onto it with
   `[package.metadata.component.bindings] with = { "wast:types/types@0.1.0" = "wast_syntax_core::wit_types" }`.
-- The WIT `syntax-plugin` interface is the language-agnostic contract — anyone
-  can implement it in any language that targets WASM Components.
+- The WIT interfaces are the language-agnostic contract — anyone can
+  implement them in any language that targets WASM Components.
 
 ## Storage and encoding formats
 
@@ -73,9 +88,10 @@ extension (`packages/vscode-extension/`) and the web demo
   byte-oriented: hosts pass full file contents in/out, because vscode-web's
   workspace fs has no partial r/w.
 - **`world.wit` + `wast.json` + `syms.en.yaml` are SOURCE CODE** —
-  hand-authored, or edited via the VS Code extension's text-pane round-trip
-  (`from_text` → `merge` → `codec.write`). Never design build-time generators
-  that emit them. The canonical shared sample lives at `packages/sample-wast/`.
+  hand-authored, or edited via a write syntax's text-pane round-trip
+  (`from_text` → `merge` → `codec.write`) or the structured write path.
+  Never design build-time generators that emit them. The canonical shared
+  sample lives at `packages/sample-wast/`.
 
 Historical note: the WASI-fs-based `crates/file-manager/` was retired 2026-04 —
 jco couldn't transpile its WASI fs deps and vscode-web has no partial-access
@@ -89,8 +105,9 @@ fs API, so the byte-oriented codec model fits both web and desktop hosts.
 | **wit** | Interface boundary and type definitions (integrated into WastComponent) |
 | **syms** | Human display names only (not needed for wasm generation). Per-language files |
 | **wast-codec** | WastComponent ↔ wast.json bytes (future wast.db SQLite). world.wit consistency validation. Byte-oriented, host-driven I/O |
-| **partial-manager** | extract / merge (stage 2 validation) |
-| **syntax-plugin** | wast ↔ text bidirectional conversion (stage 1 validation). New UID generation |
+| **partial-manager** | extract / merge (stage 2 validation). The structured write path: agents and tools edit the IR through extract → modify → merge, no text parsing involved |
+| **syntax-renderer** | wast → text rendering (every plugin; read-only projection) |
+| **syntax-editor** | text → wast parsing (write syntaxes only; stage 1 validation, new UID generation) |
 | **wast-syntax-core** | Optional Rust scaffolding for Rust plugins. Not part of the WIT contract. See [docs/PLUGIN-AUTHORING.md](docs/PLUGIN-AUTHORING.md) |
 | **CLI / Editor** | User operations and workflow control |
 
@@ -125,22 +142,26 @@ string/list (params, returns, literals), nested compounds, resources
 (exported + imported), heterogeneous narrows/widens. Remaining gaps are listed
 in [crates/compiler/PLAN.md](crates/compiler/PLAN.md).
 
-### Syntax plugin from_text status
+### Syntax plugin editor/renderer status
 
-- **raw**, **ts-like**: full body parsers (S-expression / recursive descent) —
-  structural round-trip of signatures *and* bodies.
-- **ruby-like**, **rust-like**: signatures parse; bodies are preserved from
-  the `existing` component (depth-aware body skip). Real body parsers are
-  future work (see their `PLAN.md`s).
+- **raw**, **ts-like** (`syntax-plugin-world`): renderer + editor. Full body
+  parsers (S-expression / recursive descent) — structural round-trip of
+  signatures *and* bodies.
+- **ruby-like**, **rust-like** (`syntax-renderer-world`): renderer-only.
+  They project the IR as read-only text for review/diff and never parse
+  text back. This is by design, not a gap: display syntaxes don't need a
+  parser because edits flow through the structured write path.
 
 ### VS Code extension status
 
 Bundles 7 components into `dist/components/` (4 syntax plugins,
 partial-manager, codec, compiler). TreeView over workspace `wast.json` files;
-editable `wast://` virtual docs via `FileSystemProvider` (save runs
-`from_text` → `merge` → `codec.write`); fs.watch refresh; `WAST: Compile
-current component` writes `<dir>/dist/<name>.wasm`. Runs on Node (desktop)
-hosts; vscode-web support is future work (see
+`wast://` virtual docs via `FileSystemProvider`. Panes rendered by an
+editor-capable plugin (raw, ts-like) are editable — save runs `from_text` →
+`merge` → `codec.write`; renderer-only plugins (ruby-like, rust-like) get
+read-only panes (`stat()` reports `FilePermission.Readonly`). fs.watch
+refresh; `WAST: Compile current component` writes `<dir>/dist/<name>.wasm`.
+Runs on Node (desktop) hosts; vscode-web support is future work (see
 [packages/vscode-extension/PLAN.md](packages/vscode-extension/PLAN.md)).
 
 ## Development commands
@@ -180,6 +201,10 @@ inside the devcontainer image. `.github/workflows/deploy-pages.yml` builds
 - **Minimize identifier change cost** — UIDs are stable, display names are in syms
 - **WastComponent is the central type** — partial and full share the same type definition
 - **Syntax plugins are stateless** — called fresh each time
+- **Rendering is universal, parsing is exceptional** — every syntax renders
+  (read-only projection for review/diff); only designated write syntaxes
+  parse. New display syntaxes must NOT grow parsers — edits go through the
+  structured write path (partial-manager extract/merge on the IR)
 - **The compiler IR is a high-level semantic representation** — never a core
   opcode list; anything `wit-component` can do is delegated to `wit-component`
 

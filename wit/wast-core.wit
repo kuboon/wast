@@ -1,9 +1,26 @@
 package wast:core@0.1.0;
 
-interface syntax-plugin {
+/// Read-only projection: render a wast-component as surface text.
+///
+/// Every syntax plugin implements this. A renderer must fail (rather than
+/// render a lossy placeholder) when it cannot faithfully render — e.g. a
+/// body that does not deserialize.
+interface syntax-renderer {
   use wast:types/types@0.1.0.{wast-component, wast-error};
 
   to-text: func(component: wast-component) -> result<string, list<wast-error>>;
+}
+
+/// Optional write path: parse surface text back into a wast-component.
+///
+/// Only plugins whose syntax is a supported *write* format implement this.
+/// Human-facing display syntaxes are renderer-only — edits flow through the
+/// structured write path (partial-manager extract/merge on the IR) instead
+/// of a per-syntax parser. Hosts detect editor support by the presence of
+/// this interface's export and treat renderer-only views as read-only.
+interface syntax-editor {
+  use wast:types/types@0.1.0.{wast-component, wast-error};
+
   from-text: func(text: string, existing: wast-component) -> result<wast-component, list<wast-error>>;
 }
 
@@ -19,8 +36,15 @@ interface partial-manager {
   merge: func(partial: wast-component, full: wast-component) -> result<wast-component, list<wast-error>>;
 }
 
+/// A read-only syntax plugin: renders text, never parses it.
+world syntax-renderer-world {
+  export syntax-renderer;
+}
+
+/// A full syntax plugin: renders text and parses it back.
 world syntax-plugin-world {
-  export syntax-plugin;
+  export syntax-renderer;
+  export syntax-editor;
 }
 
 world partial-manager-world {

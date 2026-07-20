@@ -75,6 +75,14 @@ export class WastFileSystemProvider implements vscode.FileSystemProvider {
     return newest;
   }
 
+  /** The currently configured syntax plugin, or undefined if not loaded. */
+  private configuredPlugin() {
+    const pluginId = vscode.workspace
+      .getConfiguration("wast")
+      .get<SyntaxPluginId>("syntaxPlugin", "ruby-like");
+    return { pluginId, plugin: this.runtime.syntaxPlugins[pluginId] };
+  }
+
   async stat(uri: vscode.Uri): Promise<vscode.FileStat> {
     // Report the real ctime/mtime of the underlying wast.json (and syms)
     // via workspace.fs so VS Code's own modified-since tracking works —
@@ -93,7 +101,19 @@ export class WastFileSystemProvider implements vscode.FileSystemProvider {
         vscode.Uri.joinPath(dirUri, "wast.json"),
       );
       const mtime = (await this.underlyingMtime(dirUri, lang)) ?? st.mtime;
-      return { type: vscode.FileType.File, ctime: st.ctime, mtime, size: st.size };
+      // Renderer-only plugins have no from_text: their views are read-only
+      // projections, so tell VS Code up front instead of failing the save.
+      const { plugin } = this.configuredPlugin();
+      const permissions = plugin?.fromText
+        ? undefined
+        : vscode.FilePermission.Readonly;
+      return {
+        type: vscode.FileType.File,
+        ctime: st.ctime,
+        mtime,
+        size: st.size,
+        permissions,
+      };
     } catch {
       throw vscode.FileSystemError.FileNotFound(
         `wast.json not found in ${dirUri.fsPath}`,
@@ -187,7 +207,22 @@ export class WastFileSystemProvider implements vscode.FileSystemProvider {
 
     const cfg = vscode.workspace.getConfiguration("wast");
     const lang = cfg.get<string>("symsLanguage", "en");
-    const pluginId = cfg.get<SyntaxPluginId>("syntaxPlugin", "ruby-like");
+    const { pluginId, plugin } = this.configuredPlugin();
+
+    // Renderer-only plugins can't parse text back — their panes are
+    // read-only projections (stat() already reports Readonly; this guard
+    // covers saves raced against a settings change).
+    if (plugin && !plugin.fromText) {
+      throw saveError("from_text", [
+        {
+          message:
+            `syntax plugin '${pluginId}' is a read-only renderer — ` +
+            "edit through a write-capable syntax (e.g. raw, ts-like) " +
+            "or the structured tools instead.",
+          location: null,
+        },
+      ]);
+    }
 
     // Conflict check: if wast.json / syms changed on disk after this view
     // was last rendered, a blind save would merge the pane text into the
@@ -230,8 +265,8 @@ export class WastFileSystemProvider implements vscode.FileSystemProvider {
       ]);
     }
 
-    const plugin = this.runtime.syntaxPlugins[pluginId];
-    if (!plugin) {
+    const fromText = plugin?.fromText;
+    if (!fromText) {
       throw saveError("setup", [
         { message: `syntax plugin '${pluginId}' not loaded`, location: null },
       ]);
@@ -243,7 +278,7 @@ export class WastFileSystemProvider implements vscode.FileSystemProvider {
     // Stage 1: parse pane text into a partial WastComponent.
     let parsed: WastComponent;
     try {
-      parsed = plugin.fromText(text, full);
+      parsed = fromText(text, full);
     } catch (err) {
       throw saveError("from_text", extractErrors(err));
     }

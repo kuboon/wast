@@ -109,7 +109,13 @@
             "ts-like",
             "rust-like"
           ],
-          "description": "Syntax plugin for text conversion"
+          "description": "Syntax plugin for the wast:// text panes. raw and ts-like support editing; ruby-like and rust-like are read-only renderers.",
+          "enumDescriptions": [
+            "S-expression — editable (full from-text)",
+            "Ruby-like — read-only renderer",
+            "TypeScript-like — editable (full from-text)",
+            "Rust-like — read-only renderer"
+          ]
         }
       }
     }

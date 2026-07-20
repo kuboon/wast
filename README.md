@@ -6,17 +6,25 @@ types identified only by stable, meaningless UIDs, with a typed instruction
 IR for bodies — serialized to `wast.json` alongside a `world.wit` interface
 and per-language `syms.*.yaml` files that hold nothing but human display
 names. Pluggable *syntax plugins* render the same component as Ruby-like,
-TypeScript-like, Rust-like, or raw S-expression text and parse edits back,
-so the surface syntax (and every identifier's display name, per language) is
-a view, not the source of truth. A compiler turns `wast.json` + `world.wit`
-directly into a runnable WASM Component — display names are never needed to
-produce code.
+TypeScript-like, Rust-like, or raw S-expression text, so the surface syntax
+(and every identifier's display name, per language) is a view, not the
+source of truth. A compiler turns `wast.json` + `world.wit` directly into a
+runnable WASM Component — display names are never needed to produce code.
+
+Reading and writing are asymmetric by design. Every syntax plugin is a
+**renderer** (`to-text`); only designated write syntaxes (currently raw and
+ts-like) are also **editors** (`from-text`). Human-facing syntaxes like
+ruby-like and rust-like are read-only projections — for reviewing and
+diffing — while edits land on the IR through a structured write path
+(`partial-manager` extract/merge), the natural interface for LLM agents
+that generate most changes.
 
 ## Architecture
 
 ```
-text  <──syntax plugin──>  partial/full WastComponent
-partial WastComponent  <──partial-manager──>  full WastComponent
+WastComponent  ──syntax renderer──>  text (read-only projection, any syntax)
+text  <──syntax editor──>  partial/full WastComponent   (write syntaxes only)
+partial WastComponent  <──partial-manager──>  full WastComponent  (structured write path)
 WastComponent  <──wast-codec──>  bytes (wast.json, world.wit, syms.en.yaml)
 [wast.json, world.wit]  ──compiler──>  .wasm Component
 ```
@@ -27,8 +35,9 @@ The core is a Rust workspace whose crates are built as WASM Components
 two hosts:
 
 - the **VS Code extension** (`packages/vscode-extension/`) — tree view over
-  `wast.json` files, editable virtual documents (`wast://`) with a
-  `from_text → merge → write` save flow, and a compile command, and
+  `wast.json` files, virtual documents (`wast://`) that are editable under
+  write syntaxes (`from_text → merge → write` save flow) and read-only under
+  display syntaxes, and a compile command, and
 - the **web demo** (`packages/web-demo/`) — a browser playground using
   jco-transpiled components, deployed to GitHub Pages:
   <https://kuboon.github.io/wast/>.
@@ -79,7 +88,7 @@ pnpm test
 | `crates/wast-codec/` | `WastComponent` ↔ `wast.json` / `syms.en.yaml` codec component |
 | `crates/partial-manager/` | Extract/merge partial components |
 | `crates/compiler/` + `crates/compiler-component/` | wast → wasm Component compiler (rlib + WIT wrapper component) |
-| `crates/syntax-plugin/{raw,ruby-like,ts-like,rust-like}/` | The 4 reference syntax plugins |
+| `crates/syntax-plugin/{raw,ruby-like,ts-like,rust-like}/` | The 4 reference syntax plugins (raw + ts-like editable, ruby-like + rust-like read-only renderers) |
 | `crates/syntax-plugin/internal/` | Shared plugin libraries (`pattern-analyzer` IR, `syntax-core` scaffolding) |
 | `packages/vscode-extension/` | VS Code extension |
 | `packages/web-demo/` | Browser playground ([live](https://kuboon.github.io/wast/)) |

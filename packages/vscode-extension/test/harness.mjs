@@ -31,7 +31,15 @@ async function loadPlugins() {
   const out = {};
   for (const id of PLUGIN_IDS) {
     const mod = await importPath(componentsRoot, id, id.replace(/-/g, "_") + ".js");
-    out[id] = mod.syntaxPlugin;
+    // Every plugin exports syntax-renderer (toText); write-capable plugins
+    // also export syntax-editor (fromText). Renderer-only plugins get no
+    // fromText — same shape the extension's wasm-loader builds.
+    out[id] = {
+      toText: (component) => mod.syntaxRenderer.toText(component),
+      ...(mod.syntaxEditor
+        ? { fromText: (text, existing) => mod.syntaxEditor.fromText(text, existing) }
+        : {}),
+    };
   }
   return out;
 }

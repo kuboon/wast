@@ -3,20 +3,41 @@
 This guide explains what it takes to ship a new `wast` syntax plugin —
 e.g. `python-like`, `swift-like`, or any surface syntax of your choice.
 
+**New plugins should be renderers.** A syntax plugin's job is to *project*
+a `wast-component` as readable text — for humans reviewing and diffing
+code. Parsing text back is the exception, not the rule: edits to a wast
+program flow through the structured write path (`partial-manager`
+extract/merge on the IR, or an editor-capable write syntax), so a display
+syntax never needs a parser. Do not grow one.
+
 ## The contract
 
-A syntax plugin is a WASM Component that exports the
-**`wast:core/syntax-plugin`** interface (defined in `wit/wast-core.wit`):
+The plugin boundary is two WIT interfaces (defined in `wit/wast-core.wit`):
 
 ```wit
-interface syntax-plugin {
+interface syntax-renderer {
   use wast:types/types@0.1.0.{wast-component, wast-error};
   to-text:   func(component: wast-component)
                 -> result<string, list<wast-error>>;
+}
+
+interface syntax-editor {
+  use wast:types/types@0.1.0.{wast-component, wast-error};
   from-text: func(text: string, existing: wast-component)
                 -> result<wast-component, list<wast-error>>;
 }
 ```
+
+and two worlds:
+
+- **`syntax-renderer-world`** — exports only `syntax-renderer`. This is
+  what a new plugin targets. Hosts render its text as a **read-only**
+  view (the VS Code extension marks the pane readonly; the web demo
+  disables Sync).
+- **`syntax-plugin-world`** — exports both interfaces. Only designated
+  write syntaxes target this (today: `raw` and `ts-like`). Hosts
+  feature-detect editability by the presence of the `syntax-editor`
+  export.
 
 The shared `types` interface lives in its own package
 (`wit-types/types.wit`, package `wast:types`) and is `use`d by
@@ -33,7 +54,7 @@ out-of-experimental), eventually wast itself. The shared `WastComponent`
 data shape (defined as WIT records and variants) is what every plugin
 sees.
 
-## What a plugin must do
+## What a renderer must do
 
 ### `to_text(component)`
 
@@ -51,41 +72,50 @@ of text in the plugin's surface syntax. Typical work:
 
 Returns `result<string, list<wast-error>>`. A plugin must **fail** (not
 render a lossy placeholder) when it cannot faithfully render — e.g. a
-body that does not deserialize — otherwise the next `from_text` would
-silently drop content.
+body that does not deserialize — otherwise the reader would silently see
+incomplete code.
 
-### `from_text(text, existing)`
+Rendering must also be **deterministic**: the same component renders to
+the same text, so diffs of rendered text are meaningful.
 
-Parse a text string back into a `wast-component`. The `existing`
-component is provided as a hint — when the user hasn't edited a
-particular func / type, the plugin should preserve the original entry
-(uid + body bytes) verbatim rather than inventing fresh uids.
+## Write syntaxes: `from_text(text, existing)`
+
+Only applies to plugins targeting `syntax-plugin-world`. Parse a text
+string back into a `wast-component`. The `existing` component is
+provided as a hint — when the user hasn't edited a particular func /
+type, the plugin should preserve the original entry (uid + body bytes)
+verbatim rather than inventing fresh uids.
 
 Returns a `result<wast-component, list<wast-error>>`. Errors carry a
 human-readable message and an optional location.
 
+Adding a new write syntax is a project-level decision, not a plugin
+checklist item: a parser must handle broken intermediate states, keep
+uid identity stable through edits, and stay lossless — the exact costs
+the renderer-only rule exists to avoid.
+
 ## Rust plugins: `wast-syntax-core`
 
 The 4 reference plugins under `crates/syntax-plugin/{raw,ruby-like,
-ts-like,rust-like}/` are written in Rust. They share two internal
-helper crates:
+ts-like,rust-like}/` are written in Rust (`raw` and `ts-like` are
+editors; `ruby-like` and `rust-like` are renderer-only). They share two
+internal helper crates:
 
 - **`wast-pattern-analyzer`** — defines the `Instruction` tree and
   `serialize_body` / `deserialize_body`. Used by every plugin and by
   `compiler` / `partial-manager` / `demo-gen` too.
-- **`wast-syntax-core`** — Rust scaffolding for the plugin-specific
-  half: `wit_types` (the one shared Rust projection of the
-  `wast:types/types` WIT interface — plugins remap their generated
-  bindings onto it via `[package.metadata.component.bindings] with`),
-  `convert` (wit_types → `wast-types` serde shapes), `RenderContext`
-  (uid → display-name maps), `TypePrinter` trait (per-plugin lexical
-  choices for each `wit-type` variant), `format_wit_type` /
-  `resolve_type_ref` walkers, and the `scaffold` module
-  (`ExistingIndex`, collision-free `UidGen`, per-function reverse local
-  maps, signature/param resolution helpers shared by every plugin's
-  `from_text`).
+- **`wast-syntax-core`** — Rust scaffolding: `wit_types` (the one shared
+  Rust projection of the `wast:types/types` WIT interface — plugins
+  remap their generated bindings onto it via
+  `[package.metadata.component.bindings] with`), `convert` (wit_types →
+  `wast-types` serde shapes), `RenderContext` (uid → display-name maps),
+  `TypePrinter` trait (per-plugin lexical choices for each `wit-type`
+  variant), `format_wit_type` / `resolve_type_ref` walkers, and the
+  `scaffold` module (editor-side helpers: `ExistingIndex`, collision-free
+  `UidGen`, per-function reverse local maps, signature/param resolution —
+  renderer-only plugins don't need it).
 
-A typical Rust plugin's `to_text` looks like:
+A typical Rust renderer's `to_text` looks like:
 
 ```rust
 use wast_syntax_core::wit_types::*; // the shared bindings types
@@ -118,6 +148,10 @@ impl TypePrinter for MyTypePrinter {
 Each plugin's `Cargo.toml` carries
 
 ```toml
+[package.metadata.component.target]
+path = "../../../wit"
+world = "syntax-renderer-world"   # editors: "syntax-plugin-world"
+
 [package.metadata.component.target.dependencies]
 "wast:types" = { path = "../../../wit-types" }
 
@@ -152,18 +186,18 @@ logic in their language. The pieces to port are small:
 A Go or TinyGo plugin would lift the `wast-syntax-core` patterns into
 Go interfaces; a JS plugin into class methods; etc. None of this changes
 the `.wasm` artifact contract — the host still calls
-`to_text(component)` and `from_text(text, existing)` on the component.
+`to_text(component)` on the component's `syntax-renderer` export.
 
 ## Plugins written in wast itself
 
 A long-term goal: the IR types and functions are themselves expressible
 in wast, so a plugin author can edit a `.wast.json` file describing
-their `to_text` / `from_text` implementation. When this lands, the
-visitor pattern collapses into wast's own variant pattern-matching and
-recursion primitives — no helper crate needed, since the operations
-are first-class in the language.
+their `to_text` implementation. When this lands, the visitor pattern
+collapses into wast's own variant pattern-matching and recursion
+primitives — no helper crate needed, since the operations are
+first-class in the language.
 
-## Checklist for shipping a Rust plugin
+## Checklist for shipping a Rust renderer
 
 1. New crate at `crates/syntax-plugin/<name>/` with the standard
    `Cargo.toml` (cdylib, depends on `wit-bindgen`, `wit-bindgen-rt`,
@@ -171,14 +205,16 @@ are first-class in the language.
    use the serde-native shapes directly — with
    `package.metadata.component.target` pointing at `wit/` plus the
    `wast:types` target dependency and the `bindings.with` remap shown
-   above, and world `syntax-plugin-world`).
+   above, and world **`syntax-renderer-world`**).
 2. `src/lib.rs`:
    - `struct MyTypePrinter; impl TypePrinter for MyTypePrinter { ... }`.
-   - `to_text` / `from_text` Guest impl wiring `RenderContext` to
-     `func_to_text` and `parse_func` helpers.
-   - Body rendering and parsing — surface-specific.
+   - `impl bindings::exports::wast::core::syntax_renderer::Guest` wiring
+     `RenderContext` to a `func_to_text` helper.
+   - Body rendering — surface-specific.
 3. Tests under `#[cfg(test)] mod tests` — at minimum: signature
-   round-trip, body-preservation round-trip, sym-rename round-trip.
+   rendering, body rendering of each instruction shape, deterministic
+   render (two renders agree), error on undeserializable body.
 4. If you want the demo to render your plugin, add an entry to the
    `targets` array in `packages/web-demo/scripts/build-plugins.mjs` and
-   the `PLUGINS` array in `packages/web-demo/src/main.js`.
+   the `PLUGINS` array in `packages/web-demo/src/main.js` (with the
+   read-only capability line).
