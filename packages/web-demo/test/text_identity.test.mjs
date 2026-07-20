@@ -21,20 +21,27 @@ try {
 const wastComponent = codec.read(wastJsonBytes, symsBytes);
 
 const PLUGINS = [
-  { id: "raw", path: "raw/raw.js" },
-  { id: "ruby-like", path: "ruby-like/ruby_like.js" },
-  { id: "ts-like", path: "ts-like/ts_like.js" },
-  { id: "rust-like", path: "rust-like/rust_like.js" },
+  { id: "raw", path: "raw/raw.js", editable: true },
+  { id: "ruby-like", path: "ruby-like/ruby_like.js", editable: false },
+  { id: "ts-like", path: "ts-like/ts_like.js", editable: true },
+  { id: "rust-like", path: "rust-like/rust_like.js", editable: false },
 ];
 
 let failures = 0;
 for (const p of PLUGINS) {
   const m = await import(`${root}/public/plugins/${p.path}`);
-  const plugin = m.syntaxPlugin;
-  const t1 = plugin.toText(wastComponent);
-  const parsed = plugin.fromText(t1, wastComponent);
-  const t2 = plugin.toText(parsed);
   try {
+    if (!p.editable) {
+      // Renderer-only: two renders of the same component must agree.
+      const t1 = m.syntaxRenderer.toText(wastComponent);
+      const t2 = m.syntaxRenderer.toText(wastComponent);
+      assert.equal(t1, t2, `${p.id}: render is not deterministic`);
+      console.log(`✓ ${p.id}: deterministic render (read-only)`);
+      continue;
+    }
+    const t1 = m.syntaxRenderer.toText(wastComponent);
+    const parsed = m.syntaxEditor.fromText(t1, wastComponent);
+    const t2 = m.syntaxRenderer.toText(parsed);
     assert.equal(t1, t2, `${p.id}: text differs after no-op sync`);
     console.log(`✓ ${p.id}: text identity round-trip`);
   } catch (err) {

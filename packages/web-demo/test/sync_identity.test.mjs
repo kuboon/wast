@@ -44,17 +44,40 @@ function summarize(wc) {
 }
 
 const PLUGINS = [
-  { id: "raw", path: "raw/raw.js", supportsFromText: true },
-  { id: "ruby-like", path: "ruby-like/ruby_like.js", supportsFromText: true },
-  { id: "ts-like", path: "ts-like/ts_like.js", supportsFromText: true },
-  { id: "rust-like", path: "rust-like/rust_like.js", supportsFromText: true },
+  { id: "raw", path: "raw/raw.js", editable: true },
+  { id: "ruby-like", path: "ruby-like/ruby_like.js", editable: false },
+  { id: "ts-like", path: "ts-like/ts_like.js", editable: true },
+  { id: "rust-like", path: "rust-like/rust_like.js", editable: false },
 ];
 
 let failures = 0;
 
 for (const p of PLUGINS) {
   const m = await import(`${root}/public/plugins/${p.path}`);
-  const plugin = m.syntaxPlugin;
+
+  if (!p.editable) {
+    // Renderer-only plugin: must render, must NOT export syntax-editor.
+    try {
+      assert.ok(m.syntaxRenderer, `${p.id}: missing syntax-renderer export`);
+      assert.equal(
+        m.syntaxEditor,
+        undefined,
+        `${p.id}: renderer-only plugin unexpectedly exports syntax-editor`,
+      );
+      const text = m.syntaxRenderer.toText(wastComponent);
+      assert.ok(text.length > 0, `${p.id}: empty render`);
+      console.log(`✓ ${p.id}: renderer-only (renders, no editor export)`);
+    } catch (err) {
+      console.error(`✗ ${p.id}: ${err.message}`);
+      failures++;
+    }
+    continue;
+  }
+
+  const plugin = {
+    toText: (c) => m.syntaxRenderer.toText(c),
+    fromText: (t, e) => m.syntaxEditor.fromText(t, e),
+  };
 
   const before = summarize(wastComponent);
   const text = plugin.toText(wastComponent);
@@ -85,5 +108,5 @@ if (failures > 0) {
   console.error(`\n${failures} plugin(s) failed`);
   process.exit(1);
 } else {
-  console.log("\nall plugins identity-roundtrip");
+  console.log("\nall editable plugins identity-roundtrip; renderers render");
 }

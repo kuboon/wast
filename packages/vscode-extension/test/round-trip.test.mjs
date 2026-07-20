@@ -33,8 +33,25 @@ test("every syntax plugin renders the fixture without crashing", () => {
   }
 });
 
-test("ruby-like round-trip: toText → fromText → merge preserves all funcs/types", () => {
-  const plugin = runtime.plugins["ruby-like"];
+test("editor/renderer split: raw + ts-like are editable, ruby-like + rust-like are read-only", () => {
+  for (const id of ["raw", "ts-like"]) {
+    assert.equal(
+      typeof runtime.plugins[id].fromText,
+      "function",
+      `${id} should export syntax-editor`,
+    );
+  }
+  for (const id of ["ruby-like", "rust-like"]) {
+    assert.equal(
+      runtime.plugins[id].fromText,
+      undefined,
+      `${id} should be renderer-only (no syntax-editor export)`,
+    );
+  }
+});
+
+test("ts-like round-trip: toText → fromText → merge preserves all funcs/types", () => {
+  const plugin = runtime.plugins["ts-like"];
   const text = plugin.toText(fixture.component);
 
   let parsed;
@@ -56,7 +73,7 @@ test("ruby-like round-trip: toText → fromText → merge preserves all funcs/ty
 });
 
 test("full save flow round-trip: merged → codec.write → codec.read is identity", () => {
-  const plugin = runtime.plugins["ruby-like"];
+  const plugin = runtime.plugins["ts-like"];
   const text = plugin.toText(fixture.component);
   const parsed = plugin.fromText(text, fixture.component);
   const merged = runtime.partialManager.merge(parsed, fixture.component);
@@ -99,7 +116,7 @@ test("compiler.compile produces a wasm component from the committed sample", () 
 });
 
 test("signature change is rejected at merge stage (not silently accepted)", () => {
-  const plugin = runtime.plugins["ruby-like"];
+  const plugin = runtime.plugins["ts-like"];
   // Narrow to a single internal helper so the rendered text has a known
   // signature substring we can corrupt.
   const partial = runtime.partialManager.extract(fixture.component, [
@@ -107,8 +124,8 @@ test("signature change is rejected at merge stage (not silently accepted)", () =
   ]);
   const text = plugin.toText(partial);
 
-  const corrupted = text.replace("(u32) -> u32", "(bool) -> u32");
-  assert.notEqual(corrupted, text, "test setup: no '(u32) -> u32' substring found");
+  const corrupted = text.replace("(x: u32): u32", "(x: bool): u32");
+  assert.notEqual(corrupted, text, "test setup: no '(x: u32): u32' substring found");
 
   const parsed = plugin.fromText(corrupted, partial);
 

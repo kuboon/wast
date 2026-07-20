@@ -1375,7 +1375,7 @@ fn parse_signature(sig: &str) -> Option<ParsedFunc> {
 // Guest implementation
 // ---------------------------------------------------------------------------
 
-impl bindings::exports::wast::core::syntax_plugin::Guest for Component {
+impl bindings::exports::wast::core::syntax_renderer::Guest for Component {
     fn to_text(component: WastComponent) -> Result<String, Vec<WastError>> {
         let native_syms = convert::syms(&component.syms);
         let native_types = convert::type_list(&component.types);
@@ -1397,7 +1397,9 @@ impl bindings::exports::wast::core::syntax_plugin::Guest for Component {
         }
         Ok(parts.join("\n\n"))
     }
+}
 
+impl bindings::exports::wast::core::syntax_editor::Guest for Component {
     fn from_text(text: String, existing: WastComponent) -> Result<WastComponent, Vec<WastError>> {
         let native_syms = convert::syms(&existing.syms);
         let native_types = convert::type_list(&existing.types);
@@ -1808,7 +1810,8 @@ bindings::export!(Component with_types_in bindings);
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bindings::exports::wast::core::syntax_plugin::Guest;
+    use bindings::exports::wast::core::syntax_editor::Guest as _;
+    use bindings::exports::wast::core::syntax_renderer::Guest as _;
 
     fn make_test_component() -> WastComponent {
         WastComponent {

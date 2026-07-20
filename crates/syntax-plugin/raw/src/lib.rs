@@ -1618,7 +1618,7 @@ fn from_text_inner(text: &str, existing: &WastComponent) -> Result<WastComponent
 // Guest implementation
 // ---------------------------------------------------------------------------
 
-impl bindings::exports::wast::core::syntax_plugin::Guest for Component {
+impl bindings::exports::wast::core::syntax_renderer::Guest for Component {
     fn to_text(component: WastComponent) -> Result<String, Vec<WastError>> {
         let mut parts: Vec<String> = Vec::new();
         let mut errors: Vec<WastError> = Vec::new();
@@ -1651,7 +1651,9 @@ impl bindings::exports::wast::core::syntax_plugin::Guest for Component {
         parts.push(")".to_string());
         Ok(parts.join("\n"))
     }
+}
 
+impl bindings::exports::wast::core::syntax_editor::Guest for Component {
     fn from_text(text: String, existing: WastComponent) -> Result<WastComponent, Vec<WastError>> {
         from_text_inner(&text, &existing).map_err(|e| {
             vec![WastError {
@@ -1667,7 +1669,8 @@ bindings::export!(Component with_types_in bindings);
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bindings::exports::wast::core::syntax_plugin::Guest;
+    use bindings::exports::wast::core::syntax_editor::Guest as _;
+    use bindings::exports::wast::core::syntax_renderer::Guest as _;
 
     fn make_empty_syms() -> Syms {
         Syms {

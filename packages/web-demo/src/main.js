@@ -182,25 +182,25 @@ const PLUGINS = [
     id: "raw",
     label: "raw",
     module: "raw/raw.js",
-    capability: "S-expression — full structural roundtrip (signature + body)",
+    capability: "S-expression — editable, full structural roundtrip (signature + body)",
   },
   {
     id: "ruby-like",
     label: "ruby-like",
     module: "ruby-like/ruby_like.js",
-    capability: "signature edits roundtrip · body edits dropped (preservation)",
+    capability: "read-only renderer — edits flow through a write-capable syntax",
   },
   {
     id: "ts-like",
     label: "ts-like",
     module: "ts-like/ts_like.js",
-    capability: "signature + body edits roundtrip (v0.16-era IR)",
+    capability: "editable — signature + body edits roundtrip",
   },
   {
     id: "rust-like",
     label: "rust-like",
     module: "rust-like/rust_like.js",
-    capability: "signature edits roundtrip · body edits dropped (preservation)",
+    capability: "read-only renderer — edits flow through a write-capable syntax",
   },
 ];
 
@@ -217,7 +217,15 @@ async function initPluginShowcase() {
           import.meta.url,
         ).href
       );
-      pluginMods[p.id] = m.syntaxPlugin;
+      // Every plugin exports syntax-renderer (toText); only write-capable
+      // plugins also export syntax-editor (fromText). Renderer-only
+      // plugins get no fromText — the pane's Sync reports read-only.
+      pluginMods[p.id] = {
+        toText: (comp) => m.syntaxRenderer.toText(comp),
+        ...(m.syntaxEditor
+          ? { fromText: (text, existing) => m.syntaxEditor.fromText(text, existing) }
+          : {}),
+      };
     } catch (err) {
       console.warn(`plugin ${p.id} load failed:`, err);
     }
@@ -297,10 +305,10 @@ async function initPluginShowcase() {
       "This is ",
       h("strong", {}, "one wast component"),
       " with 12 functions that call each other. Toggle which ones appear, rename any, or ",
-      h("strong", {}, "edit a pane and click Sync"),
+      h("strong", {}, "edit an editable pane and click Sync"),
       " to round-trip through ",
       h("code", {}, "from_text"),
-      " — the other panes will reflect your changes via the IR. The four plugins are WASM Components themselves, transpiled by ",
+      " — the other panes will reflect your changes via the IR. ruby-like and rust-like are read-only renderers: they project the same IR but never parse text back. The four plugins are WASM Components themselves, transpiled by ",
       h("code", {}, "jco"),
       " and loaded as ES modules.",
     ]),
@@ -378,11 +386,16 @@ async function initPluginShowcase() {
       const ta = h("textarea", { class: "pane-text", spellcheck: "false" });
       ta.rows = 14;
       const errBox = h("div", { class: "pane-errors" });
+      const editable = Boolean(pluginMods[p.id]?.fromText);
       const sync = h(
         "button",
         { type: "button", class: "pane-sync" },
-        "Sync from this pane →",
+        editable ? "Sync from this pane →" : "read-only view",
       );
+      if (!editable) {
+        ta.readOnly = true;
+        sync.disabled = true;
+      }
       try {
         const plugin = pluginMods[p.id];
         if (!plugin) throw new Error("plugin module not loaded");
@@ -397,7 +410,7 @@ async function initPluginShowcase() {
         const plugin = pluginMods[p.id];
         if (!plugin || !plugin.fromText) {
           showErrors(errBox, "plugin", [
-            { message: `${p.id} does not implement from_text` },
+            { message: `${p.id} is a read-only renderer (no syntax-editor export)` },
           ]);
           return;
         }

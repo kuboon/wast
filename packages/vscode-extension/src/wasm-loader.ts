@@ -24,7 +24,9 @@ export interface WastError {
 
 export interface SyntaxPlugin {
   toText(component: WastComponent): string;
-  fromText(text: string, existing: WastComponent): WastComponent;
+  /** Absent for renderer-only plugins — their views are read-only and
+   *  edits flow through the structured write path instead. */
+  fromText?(text: string, existing: WastComponent): WastComponent;
 }
 
 export interface PartialManager {
@@ -102,11 +104,27 @@ async function doLoad(context: vscode.ExtensionContext): Promise<LoadedRuntime> 
     "components",
   );
 
+  // jco names each exported interface: `syntax-renderer` → syntaxRenderer
+  // (every plugin), `syntax-editor` → syntaxEditor (write-capable plugins
+  // only). Renderer-only plugins simply lack the syntaxEditor export.
+  interface PluginModule {
+    syntaxRenderer: { toText(component: WastComponent): string };
+    syntaxEditor?: {
+      fromText(text: string, existing: WastComponent): WastComponent;
+    };
+  }
+
   const syntaxPlugins = {} as Record<SyntaxPluginId, SyntaxPlugin>;
   for (const id of PLUGIN_IDS) {
     const modUri = vscode.Uri.joinPath(componentsRoot, id, pluginModuleName(id));
-    const m = await importModule<{ syntaxPlugin: SyntaxPlugin }>(modUri);
-    syntaxPlugins[id] = m.syntaxPlugin;
+    const m = await importModule<PluginModule>(modUri);
+    const editor = m.syntaxEditor;
+    syntaxPlugins[id] = {
+      toText: (component) => m.syntaxRenderer.toText(component),
+      ...(editor
+        ? { fromText: (text, existing) => editor.fromText(text, existing) }
+        : {}),
+    };
   }
 
   const pmUri = vscode.Uri.joinPath(
