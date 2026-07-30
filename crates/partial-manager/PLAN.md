@@ -1,21 +1,24 @@
 # partial-manager — Future Work
 
-Current extract/merge semantics are described in AGENTS.md
-("partial-manager semantics"). With the renderer/editor split,
-extract/merge is the project's **structured write path**: display
-syntaxes are read-only, so IR edits that don't go through a write syntax
-(raw, ts-like) land here.
+Current extract/merge semantics (including body validation and the error-code
+contract) are described in AGENTS.md ("partial-manager semantics"). With the
+renderer/editor split, extract/merge is the project's **structured write
+path**: display syntaxes are read-only, and edits arrive as `ir-json`
+documents from `packages/mcp-server/` or an editor-capable syntax.
 
 ## Remaining
 
-- **First-class agent write interface** — expose extract → modify → merge
-  as a tool surface for LLM agents (e.g. an MCP server wrapping the
-  component): `extract` hands the agent a partial (target funcs + callee
-  signatures), the agent returns a modified partial with bodies as an
-  `Instruction` tree in a structured format (JSON), and `merge` validates
-  signatures/uids before committing. Needs: a JSON (de)serialization of
-  `Instruction` bodies (today they're opaque postcard bytes at this
-  boundary) and merge error messages written for machine consumption.
-- **Body-level validation at merge** — merge currently checks signatures
-  and uid conflicts; deserialize and type-check bodies too, so a bad
-  structured edit is rejected at the boundary instead of at compile time.
+- **Type-level body validation** — merge now checks structure (bodies
+  deserialize, calls name the callee's params, locals are defined). It does
+  not check *types*: a `RecordGet` on a non-record, an arg whose type doesn't
+  match the param, an `Arithmetic` on a string. Those still surface only at
+  compile time. Doing it here needs the type-resolution logic the compiler's
+  `resolve_type` already has, so the honest options are to share that rlib or
+  to accept the split.
+- **Deletion in a partial** — merge only adds and replaces, so a func can't
+  be removed through the write path (dropping it from a document means
+  "unchanged", which is what makes minimal edits possible). Removing a func
+  needs an explicit signal plus a check that nothing still calls it.
+- **Extract by type** — `extract` targets funcs. An agent working on a type
+  has to know which funcs mention it; targeting a type uid and pulling in its
+  users would be the natural counterpart.

@@ -104,13 +104,15 @@
           "type": "string",
           "default": "ruby-like",
           "enum": [
+            "ir-json",
             "raw",
             "ruby-like",
             "ts-like",
             "rust-like"
           ],
-          "description": "Syntax plugin for the wast:// text panes. raw and ts-like support editing; ruby-like and rust-like are read-only renderers.",
+          "description": "Syntax plugin for the wast:// text panes. ir-json, raw and ts-like support editing; ruby-like and rust-like are read-only renderers.",
           "enumDescriptions": [
+            "IR as JSON — editable, explicit uids and structural bodies (the structured write path)",
             "S-expression — editable (full from-text)",
             "Ruby-like — read-only renderer",
             "TypeScript-like — editable (full from-text)",

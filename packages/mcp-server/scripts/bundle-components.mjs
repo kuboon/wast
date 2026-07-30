@@ -1,8 +1,8 @@
 #!/usr/bin/env node
-// Build the wasm components the extension needs (5 syntax plugins +
-// partial-manager + wast-codec + compiler) and jco-transpile each into
-// dist/components/<id>/. The extension imports these at activation time
-// via Node's bare-specifier resolution (preview2-shim is a runtime dep).
+// Build the wasm components the MCP server drives and jco-transpile each
+// into dist/components/<id>/. Same set as the VS Code extension: the write
+// path needs ir-json + partial-manager + codec + compiler, and the
+// read-only renderers back the `wast_render` tool.
 
 import { mkdir, rm } from "node:fs/promises";
 import { dirname, join } from "node:path";

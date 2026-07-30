@@ -120,6 +120,12 @@ pub enum Instruction {
 
     // String operations
     StringLiteral {
+        /// UTF-8 bytes of the literal. Serializes as a plain string in
+        /// human-readable formats (JSON — see [`body_to_json`]) and as raw
+        /// bytes in binary ones (postcard — the on-disk body format), so the
+        /// JSON write path reads `"bytes": "hello"` without changing a
+        /// single persisted byte.
+        #[serde(with = "string_bytes")]
         bytes: Vec<u8>,
     },
     StringLen {
@@ -189,6 +195,43 @@ pub enum Instruction {
 
     // Other
     Nop,
+}
+
+/// Format-adaptive representation for [`Instruction::StringLiteral`]'s bytes.
+///
+/// Binary formats (postcard) get the raw `Vec<u8>` — byte-for-byte what the
+/// derive produced before this module existed, which is what keeps the
+/// on-disk body format stable. Human-readable formats (JSON) get a string
+/// when the bytes are valid UTF-8, falling back to the numeric array
+/// otherwise so the value is never lossy.
+mod string_bytes {
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+    pub fn serialize<S: Serializer>(bytes: &[u8], serializer: S) -> Result<S::Ok, S::Error> {
+        if serializer.is_human_readable() {
+            if let Ok(text) = core::str::from_utf8(bytes) {
+                return serializer.serialize_str(text);
+            }
+        }
+        bytes.to_vec().serialize(serializer)
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Vec<u8>, D::Error> {
+        if !deserializer.is_human_readable() {
+            return Vec::<u8>::deserialize(deserializer);
+        }
+        /// Either surface JSON form: `"hi"` or `[104, 105]`.
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum Repr {
+            Text(String),
+            Bytes(Vec<u8>),
+        }
+        Ok(match Repr::deserialize(deserializer)? {
+            Repr::Text(text) => text.into_bytes(),
+            Repr::Bytes(bytes) => bytes,
+        })
+    }
 }
 
 /// One arm of a `MatchVariant`. `binding` is the local name the payload gets
@@ -477,6 +520,27 @@ pub fn deserialize_body(data: &[u8]) -> Result<Vec<Instruction>, String> {
              (this build supports version {BODY_FORMAT_VERSION})"
         )),
     }
+}
+
+/// Convert a serialized body into its JSON instruction-tree form.
+///
+/// This is the read half of the structured write path: hosts and agents edit
+/// bodies as JSON instruction trees rather than opaque postcard bytes. The
+/// output is a JSON array of instructions, pretty-printed.
+pub fn body_to_json(data: &[u8]) -> Result<String, String> {
+    let instructions = deserialize_body(data)?;
+    serde_json::to_string_pretty(&instructions).map_err(|e| format!("body to JSON failed: {e}"))
+}
+
+/// Convert a JSON instruction tree back into the serialized body format.
+///
+/// The write half of [`body_to_json`]. Rejects malformed JSON and unknown
+/// instruction shapes, so a bad structured edit fails here rather than
+/// producing a body that only breaks at compile time.
+pub fn body_from_json(json: &str) -> Result<Vec<u8>, String> {
+    let instructions: Vec<Instruction> =
+        serde_json::from_str(json).map_err(|e| format!("body from JSON failed: {e}"))?;
+    try_serialize_body(&instructions)
 }
 
 #[cfg(test)]
@@ -969,6 +1033,106 @@ mod tests {
         ];
         assert_eq!(bytes, expected);
         assert_eq!(deserialize_body(&bytes).unwrap(), body);
+    }
+
+    // -----------------------------------------------------------------------
+    // JSON body codec (the structured write path's surface)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_json_roundtrip_matches_postcard_bytes() {
+        let body = vec![
+            Instruction::Call {
+                func_uid: "square".into(),
+                args: vec![("x".into(), Instruction::LocalGet { uid: "a".into() })],
+            },
+            Instruction::MatchOption {
+                value: Box::new(Instruction::LocalGet { uid: "o".into() }),
+                some_binding: "v".into(),
+                some_body: vec![Instruction::LocalGet { uid: "v".into() }],
+                none_body: vec![Instruction::Const { value: 0 }],
+            },
+            Instruction::StringLiteral {
+                bytes: b"hello, wast!".to_vec(),
+            },
+        ];
+        let bytes = serialize_body(&body);
+        let json = body_to_json(&bytes).unwrap();
+        assert_eq!(
+            body_from_json(&json).unwrap(),
+            bytes,
+            "JSON round-trip must reproduce the exact on-disk bytes"
+        );
+    }
+
+    #[test]
+    fn test_json_renders_string_literal_as_text() {
+        // The whole point of the human-readable bytes representation: an
+        // agent editing JSON sees `"bytes": "hi"`, not `[104, 105]`.
+        let bytes = serialize_body(&[Instruction::StringLiteral {
+            bytes: b"hi".to_vec(),
+        }]);
+        let json = body_to_json(&bytes).unwrap();
+        assert!(json.contains("\"bytes\": \"hi\""), "{json}");
+        assert!(
+            !json.contains("104"),
+            "bytes must not leak as numbers: {json}"
+        );
+    }
+
+    #[test]
+    fn test_json_accepts_byte_array_for_non_utf8_literal() {
+        // Invalid UTF-8 has no string form, so it falls back to the numeric
+        // array — and that form must parse back.
+        let bytes = serialize_body(&[Instruction::StringLiteral {
+            bytes: vec![0xff, 0xfe],
+        }]);
+        let json = body_to_json(&bytes).unwrap();
+        assert!(json.contains("255"), "{json}");
+        assert_eq!(body_from_json(&json).unwrap(), bytes);
+    }
+
+    #[test]
+    fn test_json_body_is_agent_writable_by_hand() {
+        // A hand-written instruction tree (what an LLM would emit) must
+        // deserialize — externally-tagged variants, unit variants as bare
+        // strings, string literals as text.
+        let json = r#"[
+          {"LocalSet": {"uid": "acc", "value": {"Const": {"value": 1}}}},
+          {"If": {
+            "condition": {"Compare": {"op": "Lt",
+              "lhs": {"LocalGet": {"uid": "acc"}},
+              "rhs": {"Const": {"value": 10}}}},
+            "then_body": [{"StringLiteral": {"bytes": "small"}}],
+            "else_body": ["Return"]
+          }},
+          "Nop"
+        ]"#;
+        let bytes = body_from_json(json).unwrap();
+        let instrs = deserialize_body(&bytes).unwrap();
+        assert_eq!(instrs.len(), 3);
+        assert!(matches!(instrs[2], Instruction::Nop));
+        let Instruction::If { then_body, .. } = &instrs[1] else {
+            panic!("expected If, got {:?}", instrs[1]);
+        };
+        assert_eq!(
+            then_body[0],
+            Instruction::StringLiteral {
+                bytes: b"small".to_vec()
+            }
+        );
+    }
+
+    #[test]
+    fn test_json_rejects_unknown_instruction() {
+        let err = body_from_json(r#"[{"Teleport": {"to": "moon"}}]"#).unwrap_err();
+        assert!(err.contains("body from JSON failed"), "{err}");
+    }
+
+    #[test]
+    fn test_body_to_json_rejects_corrupt_body() {
+        let err = body_to_json(&[0xFF, 1, 2]).unwrap_err();
+        assert!(err.contains("unsupported body format version"), "{err}");
     }
 
     #[test]

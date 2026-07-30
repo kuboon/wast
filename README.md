@@ -12,12 +12,14 @@ source of truth. A compiler turns `wast.json` + `world.wit` directly into a
 runnable WASM Component — display names are never needed to produce code.
 
 Reading and writing are asymmetric by design. Every syntax plugin is a
-**renderer** (`to-text`); only designated write syntaxes (currently raw and
-ts-like) are also **editors** (`from-text`). Human-facing syntaxes like
-ruby-like and rust-like are read-only projections — for reviewing and
-diffing — while edits land on the IR through a structured write path
-(`partial-manager` extract/merge), the natural interface for LLM agents
-that generate most changes.
+**renderer** (`to-text`); only designated write syntaxes are also **editors**
+(`from-text`). Human-facing syntaxes like ruby-like and rust-like are
+read-only projections — for reviewing and diffing — while edits land on the
+IR through a **structured write path**: `ir-json` renders the IR as JSON with
+uids explicit and bodies as instruction trees, and `partial-manager` merges
+edits back with validation. No parser sits between an edit and the program,
+which is what makes it a sane target for the agents that now write most code.
+[`packages/mcp-server`](packages/mcp-server/) exposes that path as MCP tools.
 
 ## Architecture
 
@@ -29,18 +31,26 @@ WastComponent  <──wast-codec──>  bytes (wast.json, world.wit, syms.en.ya
 [wast.json, world.wit]  ──compiler──>  .wasm Component
 ```
 
+The write path in one line:
+
+```
+extract → ir-json.to-text → (edit the JSON) → ir-json.from-text → merge → codec.write
+```
+
 The core is a Rust workspace whose crates are built as WASM Components
 (`cargo component`) against a small set of WIT contracts (`wast:types`,
 `wast:core`, `wast:codec`, `wast:compiler`). Those components are consumed by
-two hosts:
+three hosts:
 
 - the **VS Code extension** (`packages/vscode-extension/`) — tree view over
   `wast.json` files, virtual documents (`wast://`) that are editable under
   write syntaxes (`from_text → merge → write` save flow) and read-only under
-  display syntaxes, and a compile command, and
+  display syntaxes, and a compile command,
 - the **web demo** (`packages/web-demo/`) — a browser playground using
   jco-transpiled components, deployed to GitHub Pages:
-  <https://kuboon.github.io/wast/>.
+  <https://kuboon.github.io/wast/>, and
+- the **MCP server** (`packages/mcp-server/`) — the structured write path as
+  agent tools: read funcs as JSON, edit the IR, write it back validated.
 
 Because the plugin boundary is a WIT interface, a syntax plugin can be
 written in any language that targets WASM Components — see
@@ -86,12 +96,14 @@ pnpm test
 | `wit/`, `wit-types/`, `wit-codec/`, `wit-compiler/` | WIT contracts (`wast:core`, shared `wast:types`, `wast:codec`, `wast:compiler`) |
 | `crates/wast-types/` | Shared serde types; defines the `wast.json` schema |
 | `crates/wast-codec/` | `WastComponent` ↔ `wast.json` / `syms.en.yaml` codec component |
-| `crates/partial-manager/` | Extract/merge partial components |
+| `crates/partial-manager/` | Extract/merge partial components, with body validation |
 | `crates/compiler/` + `crates/compiler-component/` | wast → wasm Component compiler (rlib + WIT wrapper component) |
-| `crates/syntax-plugin/{raw,ruby-like,ts-like,rust-like}/` | The 4 reference syntax plugins (raw + ts-like editable, ruby-like + rust-like read-only renderers) |
+| `crates/syntax-plugin/ir-json/` | The IR as JSON — the structured write surface |
+| `crates/syntax-plugin/{raw,ruby-like,ts-like,rust-like}/` | The 4 language-flavored reference plugins (raw + ts-like editable, ruby-like + rust-like read-only renderers) |
 | `crates/syntax-plugin/internal/` | Shared plugin libraries (`pattern-analyzer` IR, `syntax-core` scaffolding) |
 | `packages/vscode-extension/` | VS Code extension |
 | `packages/web-demo/` | Browser playground ([live](https://kuboon.github.io/wast/)) |
+| `packages/mcp-server/` | MCP server for the structured write path ([README](packages/mcp-server/README.md)) |
 | `packages/sample-wast/` | Canonical hand-authored sample component |
 | `docs/PLUGIN-AUTHORING.md` | Guide to writing a new syntax plugin |
 | `AGENTS.md` | Current-state guide for contributors and AI agents |

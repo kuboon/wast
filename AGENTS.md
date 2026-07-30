@@ -19,17 +19,33 @@ WastComponent <──wast-codec──> bytes(wast.json, world.wit, syms.en.yaml)
 ```
 
 Reading and writing are asymmetric: every syntax plugin exports
-`syntax-renderer` (`to-text`); only designated write syntaxes (raw,
+`syntax-renderer` (`to-text`); only designated write syntaxes (ir-json, raw,
 ts-like) also export `syntax-editor` (`from-text`). Human-facing display
 syntaxes (ruby-like, rust-like) are renderer-only — read-only views for
-review/diff. Edits land on the IR through the structured write path
-(partial-manager extract/merge), which is also the intended interface for
-LLM agents.
+review/diff.
+
+**The structured write path** is how edits actually land, and it's what
+agents use:
+
+```
+extract(full, targets) → partial ──ir-json.to-text──> JSON document (uids + instruction trees)
+                                        ↓ (edit)
+merge(partial, full) <──ir-json.from-text── edited JSON document
+        ↓ (validates signatures, uids, and bodies)
+codec.write → wast.json + syms.<lang>.yaml
+```
+
+Nothing in that loop parses a language. `ir-json` renders the IR with uids
+left explicit and bodies left as instruction trees, so identity is recorded
+rather than inferred and a body edit can't be a syntax error.
+`packages/mcp-server/` exposes exactly this loop as MCP tools.
 
 The Rust crates are compiled to wasm components (`cargo component`), transpiled
-with jco where a JS host needs them, and consumed by two hosts: the VS Code
-extension (`packages/vscode-extension/`) and the web demo
-(`packages/web-demo/`).
+with jco where a JS host needs them, and consumed by three hosts: the VS Code
+extension (`packages/vscode-extension/`), the web demo
+(`packages/web-demo/`), and the MCP server (`packages/mcp-server/`). The
+build+transpile plumbing the Node hosts share lives in
+`scripts/lib/components.mjs`.
 
 ## Workspace layout
 
@@ -44,13 +60,16 @@ extension (`packages/vscode-extension/`) and the web demo
 | `crates/partial-manager/` | Extract/merge component (see semantics below) |
 | `crates/compiler/` | wast → wasm Component compiler (rlib) |
 | `crates/compiler-component/` | WIT wrapper component around the `wast-compiler` rlib |
-| `crates/syntax-plugin/{raw,ruby-like,ts-like,rust-like}/` | The 4 reference syntax-plugin components |
-| `crates/syntax-plugin/internal/pattern-analyzer/` | Rlib: `Instruction` IR, body (de)serialization, control-flow pattern detection (while/for/for-in/try) |
+| `crates/syntax-plugin/ir-json/` | The IR as JSON: the structured write surface (renderer + editor) |
+| `crates/syntax-plugin/{raw,ruby-like,ts-like,rust-like}/` | The 4 language-flavored reference syntax-plugin components |
+| `crates/syntax-plugin/internal/pattern-analyzer/` | Rlib: `Instruction` IR, body (de)serialization (postcard + JSON), control-flow pattern detection (while/for/for-in/try) |
 | `crates/syntax-plugin/internal/syntax-core/` | Rlib: Rust scaffolding for plugins — shared `wit_types` bindings, `convert`, `RenderContext`, `TypePrinter`, `scaffold` editor-side (from_text) helpers |
 | `crates/demo-gen/` | Legacy generator for web-demo milestone demos (see Tech debt) |
 | `packages/vscode-extension/` | VS Code extension: TreeView, editable `wast://` virtual docs, compile command |
 | `packages/web-demo/` | Browser playground (jco-transpiled components), deployed to GitHub Pages |
+| `packages/mcp-server/` | MCP server exposing the structured write path as agent tools ([README](packages/mcp-server/README.md)) |
 | `packages/sample-wast/` | Canonical hand-authored sample (`wast.json` + `world.wit` + `syms.en.yaml`) |
+| `scripts/lib/components.mjs` | Shared cargo-component build + jco transpile helper for the host bundles |
 | `docs/PLUGIN-AUTHORING.md` | How to write a new syntax plugin |
 
 ## WIT contract
@@ -83,7 +102,12 @@ extension (`packages/vscode-extension/`) and the web demo
   **format-version byte** (`BODY_FORMAT_VERSION = 1`) followed by the
   `postcard` encoding of `Vec<Instruction>` (see
   `crates/syntax-plugin/internal/pattern-analyzer/`). Decoders reject unknown
-  versions.
+  versions. The same `Instruction` derive also produces the **JSON** form the
+  structured write path edits (`body_to_json` / `body_from_json`); postcard
+  and JSON differ only where `serialize_with`-style adaptation makes JSON
+  readable (a `StringLiteral`'s bytes render as a string in JSON, raw bytes in
+  postcard). One definition, two encodings — the golden-bytes test pins the
+  postcard side so the JSON surface can never shift the on-disk format.
 - **`wast.db`** — future SQLite format (same logical schema). The codec is
   byte-oriented: hosts pass full file contents in/out, because vscode-web's
   workspace fs has no partial r/w.
@@ -105,9 +129,10 @@ fs API, so the byte-oriented codec model fits both web and desktop hosts.
 | **wit** | Interface boundary and type definitions (integrated into WastComponent) |
 | **syms** | Human display names only (not needed for wasm generation). Per-language files |
 | **wast-codec** | WastComponent ↔ wast.json bytes (future wast.db SQLite). world.wit consistency validation. Byte-oriented, host-driven I/O |
-| **partial-manager** | extract / merge (stage 2 validation). The structured write path: agents and tools edit the IR through extract → modify → merge, no text parsing involved |
+| **partial-manager** | extract / merge (stage 2 validation, including body validation). The structured write path: agents and tools edit the IR through extract → modify → merge, no text parsing involved |
 | **syntax-renderer** | wast → text rendering (every plugin; read-only projection) |
 | **syntax-editor** | text → wast parsing (write syntaxes only; stage 1 validation, new UID generation) |
+| **mcp-server** | Exposes extract → ir-json edit → merge → compile as MCP tools. Owns path containment (everything stays under the server root) and nothing else |
 | **wast-syntax-core** | Optional Rust scaffolding for Rust plugins. Not part of the WIT contract. See [docs/PLUGIN-AUTHORING.md](docs/PLUGIN-AUTHORING.md) |
 | **CLI / Editor** | User operations and workflow control |
 
@@ -119,8 +144,23 @@ the partial can't prove all callers are visible); targets *with*
 `include_caller` keep their original source and pull their direct callers in
 (with bodies); callees are added as signature-only `Imported(uid)` stubs.
 `merge(partial, full)` verifies `Imported`/`Exported` signatures against
-`full`, replaces/adds `Internal` funcs, and errors on `signature_mismatch`,
-`missing_dependency`, or `uid_conflict`.
+`full`, replaces/adds `Internal` funcs, and validates every body the partial
+contributes (calls resolve to a real func and name its params exactly; locals
+are params, assignment targets, or match bindings) — deliberately only the
+partial's own funcs, so pre-existing breakage elsewhere doesn't fail an
+unrelated edit.
+
+Every error message starts with a stable machine-readable `snake_case` code
+followed by `": "`, with the uid in `location`. Codes may be added but never
+renamed — agents parse them. The set: `signature_mismatch`, `uid_conflict`,
+`missing_dependency`, `caller_not_included`, `invalid_body`, `unknown_local`,
+`call_arity_mismatch`, `call_arg_unknown`, `call_arg_duplicate`. The
+`ir-json` editor adds `parse_error`, `unsupported_version`, and
+`duplicate_uid` on its side of the boundary.
+
+Note that the compiler resolves call arguments **by name** against the
+callee's params, so an arg-name mismatch is a body that would only fail at
+compile time — which is why merge checks it.
 
 ### Compiler pipeline (condensed)
 
@@ -144,6 +184,11 @@ in [crates/compiler/PLAN.md](crates/compiler/PLAN.md).
 
 ### Syntax plugin editor/renderer status
 
+- **ir-json** (`syntax-plugin-world`): renderer + editor, and the surface the
+  structured write path uses. Renders the IR as JSON with uids explicit and
+  bodies as instruction trees; `from_text` needs no parser beyond
+  `serde_json`. Omitted fields mean "unchanged" (body, display name, whole
+  funcs), which is what lets a caller send a minimal edit.
 - **raw**, **ts-like** (`syntax-plugin-world`): renderer + editor. Full body
   parsers (S-expression / recursive descent) — structural round-trip of
   signatures *and* bodies.
@@ -154,7 +199,7 @@ in [crates/compiler/PLAN.md](crates/compiler/PLAN.md).
 
 ### VS Code extension status
 
-Bundles 7 components into `dist/components/` (4 syntax plugins,
+Bundles 8 components into `dist/components/` (5 syntax plugins,
 partial-manager, codec, compiler). TreeView over workspace `wast.json` files;
 `wast://` virtual docs via `FileSystemProvider`. Panes rendered by an
 editor-capable plugin (raw, ts-like) are editable — save runs `from_text` →
@@ -163,6 +208,18 @@ read-only panes (`stat()` reports `FilePermission.Readonly`). fs.watch
 refresh; `WAST: Compile current component` writes `<dir>/dist/<name>.wasm`.
 Runs on Node (desktop) hosts; vscode-web support is future work (see
 [packages/vscode-extension/PLAN.md](packages/vscode-extension/PLAN.md)).
+
+### MCP server status
+
+`packages/mcp-server/` bundles the same 8 components and exposes six tools
+over stdio: `wast_list_components`, `wast_list_funcs`, `wast_read`,
+`wast_write`, `wast_compile`, `wast_render`. Written against the SDK's
+low-level `Server` with plain JSON Schema (no zod dependency); tool handlers
+live in `src/tools.mjs` as plain functions over `{root, runtime}` so tests
+drive them without a transport. Every path argument is resolved inside the
+server root and refused if it escapes. See
+[its README](packages/mcp-server/README.md) for the tool contract and the
+error-code table.
 
 ## Development commands
 
@@ -178,6 +235,8 @@ mise run test-component     # cargo test --workspace (depends on build)
 mise run test-ts            # pnpm test (depends on build)
 mise run ci                 # build + both test tasks (what CI runs)
 mise run bundle-components  # rebuild the vscode-extension component bundle
+# the MCP server has its own bundle:
+pnpm --filter @wast/mcp-server build
 
 # direct
 cargo component build --workspace   # build all wasm components
@@ -205,6 +264,12 @@ inside the devcontainer image. `.github/workflows/deploy-pages.yml` builds
   (read-only projection for review/diff); only designated write syntaxes
   parse. New display syntaxes must NOT grow parsers — edits go through the
   structured write path (partial-manager extract/merge on the IR)
+- **Identity is recorded, never inferred** — the write surface carries uids
+  explicitly, so a rename is a syms edit and no layer has to guess whether an
+  edit was a rename or a delete-plus-create
+- **Validate at the boundary, not at compile time** — merge rejects a
+  structurally broken body (unknown local, wrong call args) with a coded
+  error, so a bad edit fails where it was made
 - **The compiler IR is a high-level semantic representation** — never a core
   opcode list; anything `wit-component` can do is delegated to `wit-component`
 

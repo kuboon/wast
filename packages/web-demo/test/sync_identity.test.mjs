@@ -44,6 +44,7 @@ function summarize(wc) {
 }
 
 const PLUGINS = [
+  { id: "ir-json", path: "ir-json/ir_json.js", editable: true },
   { id: "raw", path: "raw/raw.js", editable: true },
   { id: "ruby-like", path: "ruby-like/ruby_like.js", editable: false },
   { id: "ts-like", path: "ts-like/ts_like.js", editable: true },

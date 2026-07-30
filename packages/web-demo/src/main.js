@@ -179,6 +179,13 @@ async function main() {
 
 const PLUGINS = [
   {
+    id: "ir-json",
+    label: "ir-json",
+    module: "ir-json/ir_json.js",
+    capability:
+      "the IR as JSON — editable, explicit uids and structural bodies (the agent write path)",
+  },
+  {
     id: "raw",
     label: "raw",
     module: "raw/raw.js",
@@ -308,7 +315,7 @@ async function initPluginShowcase() {
       h("strong", {}, "edit an editable pane and click Sync"),
       " to round-trip through ",
       h("code", {}, "from_text"),
-      " — the other panes will reflect your changes via the IR. ruby-like and rust-like are read-only renderers: they project the same IR but never parse text back. The four plugins are WASM Components themselves, transpiled by ",
+      " — the other panes will reflect your changes via the IR. ruby-like and rust-like are read-only renderers: they project the same IR but never parse text back. ir-json is the IR itself, uids and all — the surface agents write through. The five plugins are WASM Components themselves, transpiled by ",
       h("code", {}, "jco"),
       " and loaded as ES modules.",
     ]),
