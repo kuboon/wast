@@ -88,7 +88,7 @@ export const TOOLS = [
   {
     name: "wast_write",
     description:
-      "Apply an edited wast_read document. Validated before anything is written: signatures, uid conflicts, and bodies (calls must name the callee's params exactly; locals must be params, assignment targets, or match bindings). Errors start with a machine-readable code. Omitting a field means \"leave it alone\": drop `body` to edit only a signature, drop `name` to keep a display name, drop a func entirely to leave it untouched. Renaming is a `name` edit — never change a uid to rename something.",
+      "Apply an edited wast_read document. Validated before anything is written: signatures, uid conflicts, and bodies (calls must name the callee's params exactly; locals must be params, assignment targets, or match bindings). Errors start with a machine-readable code. Omitting a field means \"leave it alone\": drop `body` to edit only a signature, drop `name` to keep a display name, drop a func entirely to leave it untouched. The signature fields (source, wit_name, params, result) are required and unknown fields are rejected, so a typo can't silently vanish; use \"result\": null for a func returning nothing. Renaming is a `name` edit — never change a uid to rename something.",
     inputSchema: {
       type: "object",
       properties: {

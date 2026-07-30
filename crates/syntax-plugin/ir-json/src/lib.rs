@@ -52,12 +52,18 @@
 //! | Omitted | Effect |
 //! |---|---|
 //! | `funcs` / `types` / `wit_syms` | inherited from `existing` |
-//! | a func's `body` | body bytes preserved from `existing` |
+//! | a func's `body` | body bytes preserved from `existing` (imports stay body-less) |
 //! | `name` (func/type/param) or a `locals` entry | existing display name kept |
 //! | `uid` on a new entry | a fresh collision-free uid is generated |
 //!
 //! An explicit empty string clears a display name; an explicit empty body
 //! (`"body": []`) clears the body.
+//!
+//! The signature fields — `source`, `wit_name`, `params`, `result` — are all
+//! **required**, and unknown fields are rejected. Because omission carries
+//! meaning here, a typo'd or forgotten key would otherwise look exactly like
+//! a deliberate omission: the edit would vanish and the write would still
+//! report success.
 
 #[allow(warnings)]
 #[rustfmt::skip]
@@ -80,7 +86,12 @@ const DOC_VERSION: u32 = 1;
 // Document model
 // ---------------------------------------------------------------------------
 
+/// Unknown fields are rejected everywhere in this document. Omission is
+/// meaningful here (it means "unchanged"), so a misspelled key would
+/// otherwise be silently indistinguishable from a deliberate omission — the
+/// edit would vanish and the write would report success.
 #[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct Doc {
     version: u32,
     /// `None` (key absent) inherits `existing`'s types; `Some` replaces them.
@@ -88,7 +99,8 @@ struct Doc {
     types: Option<Vec<DocType>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     funcs: Option<Vec<DocFunc>>,
-    /// WIT-path → display name (`syms.wit_syms`).
+    /// WIT-path → display name (`syms.wit_syms`). Keys are unique WIT paths,
+    /// so a map is lossless here and keeps the rendering deterministic.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     wit_syms: Option<BTreeMap<String, String>>,
 }
@@ -101,7 +113,32 @@ enum SourceKind {
     Exported,
 }
 
+/// A key that must be present, whose value may be `null`.
+///
+/// Needed because serde answers a *missing* key by handing the field a
+/// deserializer that can only say "none" — so any field that asks for an
+/// option (`Option<T>`, or a newtype that forwards to one) silently accepts
+/// an absent key. For `result` that would mean a forgotten key erases a
+/// return type. Asking for `any` instead makes a missing key an error while
+/// still accepting an explicit `null`; serializing stays a bare `"u32"`.
+#[derive(Serialize)]
+#[serde(transparent)]
+struct Required(Option<String>);
+
+impl<'de> Deserialize<'de> for Required {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        match serde_json::Value::deserialize(deserializer)? {
+            serde_json::Value::Null => Ok(Required(std::option::Option::None)),
+            serde_json::Value::String(s) => Ok(Required(Some(s))),
+            other => Err(serde::de::Error::custom(format!(
+                "expected a type uid or null, found {other}"
+            ))),
+        }
+    }
+}
+
 #[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct DocFunc {
     /// Absent on a newly-added func — a fresh uid is generated for it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -114,8 +151,10 @@ struct DocFunc {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     name: Option<String>,
     params: Vec<DocParam>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    result: Option<String>,
+    /// Return type, or `null` for none. Required — like `params`, it is part
+    /// of the signature, and letting it default would make a forgotten key
+    /// silently erase a return type.
+    result: Required,
     /// Display names for body-local uids (`syms.local`): uid → name.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     locals: BTreeMap<String, String>,
@@ -125,6 +164,7 @@ struct DocFunc {
 }
 
 #[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct DocParam {
     uid: String,
     #[serde(rename = "type")]
@@ -134,6 +174,7 @@ struct DocParam {
 }
 
 #[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct DocType {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     uid: Option<String>,
@@ -334,7 +375,7 @@ fn to_text_inner(component: &WastComponent) -> Result<String, Vec<WastError>> {
                     name: sym_of(&component.syms.local, param_uid).map(str::to_string),
                 })
                 .collect(),
-            result: func.result.clone(),
+            result: Required(func.result.clone()),
             locals,
             body,
         });
@@ -475,12 +516,20 @@ fn from_text_inner(text: &str, existing: WastComponent) -> Result<WastComponent,
                             }
                         }
                     }
-                    // Body omitted → keep whatever the component already had.
-                    std::option::Option::None => existing
-                        .funcs
-                        .iter()
-                        .find(|(fid, _)| *fid == uid)
-                        .and_then(|(_, f)| f.body.clone()),
+                    // Body omitted → keep whatever the component already had,
+                    // *except* for imports. `extract` deliberately strips the
+                    // bodies of callee stubs (the partial only carries their
+                    // signature) and `merge` never writes an import's body
+                    // back, so re-attaching one here would drag a func this
+                    // edit doesn't own into merge's body validation.
+                    std::option::Option::None => match doc_func.source {
+                        SourceKind::Imported => std::option::Option::None,
+                        SourceKind::Internal | SourceKind::Exported => existing
+                            .funcs
+                            .iter()
+                            .find(|(fid, _)| *fid == uid)
+                            .and_then(|(_, f)| f.body.clone()),
+                    },
                 };
 
                 apply_sym(&mut syms_internal, &uid, doc_func.name.as_ref());
@@ -500,7 +549,7 @@ fn from_text_inner(text: &str, existing: WastComponent) -> Result<WastComponent,
                             .iter()
                             .map(|p| (p.uid.clone(), p.ty.clone()))
                             .collect(),
-                        result: doc_func.result.clone(),
+                        result: doc_func.result.0.clone(),
                         body,
                     },
                 ));
@@ -772,7 +821,7 @@ mod tests {
           "version": 1,
           "funcs": [
             {"uid": "square", "source": "internal", "wit_name": "square",
-             "params": [], "body": []}
+             "params": [], "result": null, "body": []}
           ]
         }"#;
         let parsed = Component::from_text(json.to_string(), sample()).unwrap();
@@ -789,7 +838,7 @@ mod tests {
         let json = r#"{
           "version": 1,
           "funcs": [
-            {"uid": "square", "source": "internal", "wit_name": "square", "params": []}
+            {"uid": "square", "source": "internal", "wit_name": "square", "params": [], "result": null}
           ]
         }"#;
         let kept = Component::from_text(json.to_string(), sample()).unwrap();
@@ -802,7 +851,7 @@ mod tests {
           "version": 1,
           "funcs": [
             {"uid": "square", "source": "internal", "wit_name": "square",
-             "name": "", "params": []}
+             "name": "", "params": [], "result": null}
           ]
         }"#;
         let cleared = Component::from_text(cleared_json.to_string(), sample()).unwrap();
@@ -818,7 +867,8 @@ mod tests {
           "version": 1,
           "funcs": [
             {"uid": "square", "source": "internal", "wit_name": "square",
-             "name": "squared", "params": [{"uid": "x", "type": "u32", "name": "value"}]}
+             "name": "squared", "params": [{"uid": "x", "type": "u32", "name": "value"}],
+             "result": "u32"}
           ]
         }"#;
         let parsed = Component::from_text(json.to_string(), sample()).unwrap();
@@ -850,7 +900,7 @@ mod tests {
         let json = r#"{
           "version": 1,
           "funcs": [
-            {"source": "internal", "wit_name": "helper", "params": [], "body": ["Nop"]}
+            {"source": "internal", "wit_name": "helper", "params": [], "result": null, "body": ["Nop"]}
           ]
         }"#;
         let parsed = Component::from_text(json.to_string(), sample()).unwrap();
@@ -908,6 +958,71 @@ mod tests {
     }
 
     #[test]
+    fn omitted_body_on_an_import_stays_absent() {
+        // `extract` strips bodies from callee stubs and `merge` never writes
+        // an import's body back. Inheriting one from `existing` would hand
+        // merge a body belonging to a func this edit doesn't own, and its
+        // validation would then judge it.
+        let json = r#"{
+          "version": 1,
+          "funcs": [
+            {"uid": "square", "source": "imported", "wit_name": "square",
+             "params": [{"uid": "x", "type": "u32"}], "result": "u32"}
+          ]
+        }"#;
+        let parsed = Component::from_text(json.to_string(), sample()).unwrap();
+        assert_eq!(
+            parsed.funcs[0].1.body,
+            std::option::Option::None,
+            "an import must not resurrect the body from `existing`"
+        );
+    }
+
+    #[test]
+    fn rejects_unknown_fields() {
+        // Omission means "unchanged" here, so a typo'd key must be an error
+        // rather than a silently dropped edit.
+        for json in [
+            r#"{"version": 1, "func": []}"#,
+            r#"{"version": 1, "funcs": [{"uid": "f", "source": "internal",
+                 "wit_name": "f", "params": [], "result": null,
+                 "bodies": ["Nop"]}]}"#,
+            r#"{"version": 1, "funcs": [{"uid": "f", "source": "internal",
+                 "wit_name": "f", "params": [{"uid": "p", "type": "u32", "nane": "p"}],
+                 "result": null}]}"#,
+        ] {
+            let errs = Component::from_text(json.to_string(), sample()).unwrap_err();
+            assert!(
+                errs[0].message.starts_with("parse_error:"),
+                "{json} → {errs:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_a_func_missing_its_result_field() {
+        // `result` is part of the signature like `params`: defaulting it would
+        // let a forgotten key erase a return type.
+        let json = r#"{
+          "version": 1,
+          "funcs": [
+            {"uid": "square", "source": "internal", "wit_name": "square",
+             "params": [{"uid": "x", "type": "u32"}]}
+          ]
+        }"#;
+        let errs = Component::from_text(json.to_string(), sample()).unwrap_err();
+        assert!(errs[0].message.starts_with("parse_error:"), "{errs:?}");
+    }
+
+    #[test]
+    fn renders_result_explicitly_for_void_funcs() {
+        // `result` is required on the way in, so it has to be present on the
+        // way out — including for funcs that return nothing.
+        let text = Component::to_text(sample()).unwrap();
+        assert!(text.contains("\"result\": null"), "{text}");
+    }
+
+    #[test]
     fn rejects_unknown_document_version() {
         let errs = Component::from_text(r#"{"version": 99, "funcs": []}"#.to_string(), sample())
             .unwrap_err();
@@ -929,7 +1044,7 @@ mod tests {
           "version": 1,
           "funcs": [
             {"uid": "square", "source": "internal", "wit_name": "square",
-             "params": [], "body": [{"Teleport": {"to": "moon"}}]}
+             "params": [], "result": null, "body": [{"Teleport": {"to": "moon"}}]}
           ]
         }"#;
         let errs = Component::from_text(json.to_string(), sample()).unwrap_err();
@@ -941,8 +1056,8 @@ mod tests {
         let json = r#"{
           "version": 1,
           "funcs": [
-            {"uid": "f", "source": "internal", "wit_name": "f", "params": []},
-            {"uid": "f", "source": "internal", "wit_name": "f", "params": []}
+            {"uid": "f", "source": "internal", "wit_name": "f", "params": [], "result": null},
+            {"uid": "f", "source": "internal", "wit_name": "f", "params": [], "result": null}
           ]
         }"#;
         let errs = Component::from_text(json.to_string(), sample()).unwrap_err();

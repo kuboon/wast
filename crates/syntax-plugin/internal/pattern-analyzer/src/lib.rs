@@ -121,10 +121,10 @@ pub enum Instruction {
     // String operations
     StringLiteral {
         /// UTF-8 bytes of the literal. Serializes as a plain string in
-        /// human-readable formats (JSON — see [`body_to_json`]) and as raw
-        /// bytes in binary ones (postcard — the on-disk body format), so the
-        /// JSON write path reads `"bytes": "hello"` without changing a
-        /// single persisted byte.
+        /// human-readable formats (JSON — the structured write path's
+        /// surface) and as raw bytes in binary ones (postcard — the on-disk
+        /// body format), so an agent editing JSON reads `"bytes": "hello"`
+        /// without changing a single persisted byte.
         #[serde(with = "string_bytes")]
         bytes: Vec<u8>,
     },
@@ -262,6 +262,94 @@ pub enum Pattern {
     ForIn { index_uid: String, list_uid: String },
     /// if (is_err) + return -> try / ?
     Try,
+}
+
+/// Visit every *direct* child of `instr`, mutably.
+///
+/// The match is EXHAUSTIVE on purpose (no wildcard arm): adding a variant to
+/// [`Instruction`] must fail compilation here so every walker built on this
+/// is updated with it. A `_ => {}` arm is how nested nodes get silently
+/// skipped — which, for a walk that rewrites bodies, means a body that
+/// quietly doesn't compile.
+pub fn for_each_child_mut(instr: &mut Instruction, visit: &mut dyn FnMut(&mut Instruction)) {
+    match instr {
+        Instruction::Block { body, .. } | Instruction::Loop { body, .. } => {
+            body.iter_mut().for_each(visit)
+        }
+        Instruction::If {
+            condition,
+            then_body,
+            else_body,
+        } => {
+            visit(condition);
+            then_body.iter_mut().for_each(&mut *visit);
+            else_body.iter_mut().for_each(visit);
+        }
+        Instruction::BrIf { condition, .. } => visit(condition),
+        Instruction::Call { args, .. } => args.iter_mut().for_each(|(_, arg)| visit(arg)),
+        Instruction::LocalSet { value, .. }
+        | Instruction::Some { value }
+        | Instruction::Ok { value }
+        | Instruction::Err { value }
+        | Instruction::IsErr { value }
+        | Instruction::StringLen { value }
+        | Instruction::ListLen { value }
+        | Instruction::RecordGet { value, .. }
+        | Instruction::TupleGet { value, .. } => visit(value),
+        Instruction::Compare { lhs, rhs, .. } | Instruction::Arithmetic { lhs, rhs, .. } => {
+            visit(lhs);
+            visit(rhs);
+        }
+        Instruction::MatchOption {
+            value,
+            some_body,
+            none_body,
+            ..
+        } => {
+            visit(value);
+            some_body.iter_mut().for_each(&mut *visit);
+            none_body.iter_mut().for_each(visit);
+        }
+        Instruction::MatchResult {
+            value,
+            ok_body,
+            err_body,
+            ..
+        } => {
+            visit(value);
+            ok_body.iter_mut().for_each(&mut *visit);
+            err_body.iter_mut().for_each(visit);
+        }
+        Instruction::MatchVariant { value, arms } => {
+            visit(value);
+            for arm in arms {
+                arm.body.iter_mut().for_each(&mut *visit);
+            }
+        }
+        Instruction::ListLiteral { values } | Instruction::TupleLiteral { values } => {
+            values.iter_mut().for_each(visit)
+        }
+        Instruction::RecordLiteral { fields } => {
+            fields.iter_mut().for_each(|(_, value)| visit(value))
+        }
+        Instruction::VariantCtor { value, .. } => {
+            if let Some(value) = value {
+                visit(value);
+            }
+        }
+        Instruction::ResourceNew { rep, .. } => visit(rep),
+        Instruction::ResourceRep { handle, .. } | Instruction::ResourceDrop { handle, .. } => {
+            visit(handle)
+        }
+        Instruction::Br { .. }
+        | Instruction::Return
+        | Instruction::LocalGet { .. }
+        | Instruction::Const { .. }
+        | Instruction::None
+        | Instruction::StringLiteral { .. }
+        | Instruction::FlagsCtor { .. }
+        | Instruction::Nop => {}
+    }
 }
 
 /// Analyze a wast function body and detect high-level control flow patterns.
@@ -520,27 +608,6 @@ pub fn deserialize_body(data: &[u8]) -> Result<Vec<Instruction>, String> {
              (this build supports version {BODY_FORMAT_VERSION})"
         )),
     }
-}
-
-/// Convert a serialized body into its JSON instruction-tree form.
-///
-/// This is the read half of the structured write path: hosts and agents edit
-/// bodies as JSON instruction trees rather than opaque postcard bytes. The
-/// output is a JSON array of instructions, pretty-printed.
-pub fn body_to_json(data: &[u8]) -> Result<String, String> {
-    let instructions = deserialize_body(data)?;
-    serde_json::to_string_pretty(&instructions).map_err(|e| format!("body to JSON failed: {e}"))
-}
-
-/// Convert a JSON instruction tree back into the serialized body format.
-///
-/// The write half of [`body_to_json`]. Rejects malformed JSON and unknown
-/// instruction shapes, so a bad structured edit fails here rather than
-/// producing a body that only breaks at compile time.
-pub fn body_from_json(json: &str) -> Result<Vec<u8>, String> {
-    let instructions: Vec<Instruction> =
-        serde_json::from_str(json).map_err(|e| format!("body from JSON failed: {e}"))?;
-    try_serialize_body(&instructions)
 }
 
 #[cfg(test)]
@@ -1036,8 +1103,20 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // JSON body codec (the structured write path's surface)
+    // JSON encoding (the structured write path's surface)
+    //
+    // `ir-json` serializes `Vec<Instruction>` with serde_json and embeds the
+    // result in a larger document, so these exercise the encoding the same
+    // way rather than through a wrapper.
     // -----------------------------------------------------------------------
+
+    fn to_json(body: &[Instruction]) -> String {
+        serde_json::to_string_pretty(body).unwrap()
+    }
+
+    fn from_json(json: &str) -> Vec<Instruction> {
+        serde_json::from_str(json).unwrap()
+    }
 
     #[test]
     fn test_json_roundtrip_matches_postcard_bytes() {
@@ -1057,9 +1136,9 @@ mod tests {
             },
         ];
         let bytes = serialize_body(&body);
-        let json = body_to_json(&bytes).unwrap();
+        let json = to_json(&body);
         assert_eq!(
-            body_from_json(&json).unwrap(),
+            serialize_body(&from_json(&json)),
             bytes,
             "JSON round-trip must reproduce the exact on-disk bytes"
         );
@@ -1069,10 +1148,9 @@ mod tests {
     fn test_json_renders_string_literal_as_text() {
         // The whole point of the human-readable bytes representation: an
         // agent editing JSON sees `"bytes": "hi"`, not `[104, 105]`.
-        let bytes = serialize_body(&[Instruction::StringLiteral {
+        let json = to_json(&[Instruction::StringLiteral {
             bytes: b"hi".to_vec(),
         }]);
-        let json = body_to_json(&bytes).unwrap();
         assert!(json.contains("\"bytes\": \"hi\""), "{json}");
         assert!(
             !json.contains("104"),
@@ -1084,12 +1162,12 @@ mod tests {
     fn test_json_accepts_byte_array_for_non_utf8_literal() {
         // Invalid UTF-8 has no string form, so it falls back to the numeric
         // array — and that form must parse back.
-        let bytes = serialize_body(&[Instruction::StringLiteral {
+        let body = vec![Instruction::StringLiteral {
             bytes: vec![0xff, 0xfe],
-        }]);
-        let json = body_to_json(&bytes).unwrap();
+        }];
+        let json = to_json(&body);
         assert!(json.contains("255"), "{json}");
-        assert_eq!(body_from_json(&json).unwrap(), bytes);
+        assert_eq!(from_json(&json), body);
     }
 
     #[test]
@@ -1108,8 +1186,7 @@ mod tests {
           }},
           "Nop"
         ]"#;
-        let bytes = body_from_json(json).unwrap();
-        let instrs = deserialize_body(&bytes).unwrap();
+        let instrs = from_json(json);
         assert_eq!(instrs.len(), 3);
         assert!(matches!(instrs[2], Instruction::Nop));
         let Instruction::If { then_body, .. } = &instrs[1] else {
@@ -1125,14 +1202,9 @@ mod tests {
 
     #[test]
     fn test_json_rejects_unknown_instruction() {
-        let err = body_from_json(r#"[{"Teleport": {"to": "moon"}}]"#).unwrap_err();
-        assert!(err.contains("body from JSON failed"), "{err}");
-    }
-
-    #[test]
-    fn test_body_to_json_rejects_corrupt_body() {
-        let err = body_to_json(&[0xFF, 1, 2]).unwrap_err();
-        assert!(err.contains("unsupported body format version"), "{err}");
+        let err = serde_json::from_str::<Vec<Instruction>>(r#"[{"Teleport": {"to": "moon"}}]"#)
+            .unwrap_err();
+        assert!(err.to_string().contains("Teleport"), "{err}");
     }
 
     #[test]

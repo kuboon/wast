@@ -103,11 +103,12 @@ build+transpile plumbing the Node hosts share lives in
   `postcard` encoding of `Vec<Instruction>` (see
   `crates/syntax-plugin/internal/pattern-analyzer/`). Decoders reject unknown
   versions. The same `Instruction` derive also produces the **JSON** form the
-  structured write path edits (`body_to_json` / `body_from_json`); postcard
-  and JSON differ only where `serialize_with`-style adaptation makes JSON
-  readable (a `StringLiteral`'s bytes render as a string in JSON, raw bytes in
-  postcard). One definition, two encodings — the golden-bytes test pins the
-  postcard side so the JSON surface can never shift the on-disk format.
+  structured write path edits (`ir-json` serializes `Vec<Instruction>` with
+  serde_json); postcard and JSON differ only where format-adaptive
+  serialization makes JSON readable (a `StringLiteral`'s bytes render as a
+  string in JSON, raw bytes in postcard). One definition, two encodings — the
+  golden-bytes test pins the postcard side so the JSON surface can never
+  shift the on-disk format.
 - **`wast.db`** — future SQLite format (same logical schema). The codec is
   byte-oriented: hosts pass full file contents in/out, because vscode-web's
   workspace fs has no partial r/w.

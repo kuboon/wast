@@ -27,7 +27,7 @@ function symOf(entries, uid) {
 
 /** Read a component off disk and decode it into the shape the components take. */
 async function open(ctx, { component, lang = "en" }) {
-  const dir = resolveComponentDir(ctx.root, component);
+  const dir = await resolveComponentDir(ctx.root, component);
   const files = await readComponentFiles(dir, lang);
   let decoded;
   try {

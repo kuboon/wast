@@ -5,7 +5,7 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { cp, mkdtemp, readFile } from "node:fs/promises";
+import { cp, mkdtemp, readdir, readFile, symlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -240,6 +240,59 @@ test("paths outside the server root are refused", async () => {
     const error = await fails(ctx, "wast_list_funcs", { component });
     assert.match(error, /outside the server root|must be relative/, `${component}: ${error}`);
   }
+});
+
+test("a symlink pointing out of the root is refused too", async () => {
+  // `resolve` is lexical, so a link planted inside the root would otherwise
+  // pass the containment check and be read and written through.
+  const ctx = await freshRoot();
+  const outside = await mkdtemp(join(tmpdir(), "wast-mcp-outside-"));
+  await cp(sampleWast, join(outside, "secret"), { recursive: true });
+  await symlink(join(outside, "secret"), join(ctx.root, "link"));
+
+  const error = await fails(ctx, "wast_list_funcs", { component: "link" });
+  assert.match(error, /outside the server root/, error);
+});
+
+test("a rejected write leaves no scratch files behind", async () => {
+  const ctx = await freshRoot();
+  const doc = await ok(ctx, "wast_read", { component: "sample", funcs: ["square"] });
+  doc.funcs.find((f) => f.uid === "square").body = [{ LocalGet: { uid: "nope" } }];
+  await fails(ctx, "wast_write", { component: "sample", document: doc });
+
+  const entries = await readdir(join(ctx.root, "sample"));
+  assert.deepEqual(
+    entries.filter((e) => e.startsWith(".") || e.endsWith(".tmp")),
+    [],
+    `unexpected leftovers: ${entries.join(", ")}`,
+  );
+});
+
+test("a successful write leaves no scratch files behind", async () => {
+  const ctx = await freshRoot();
+  const doc = await ok(ctx, "wast_read", { component: "sample", funcs: ["square"] });
+  await ok(ctx, "wast_write", { component: "sample", document: doc });
+
+  const entries = await readdir(join(ctx.root, "sample"));
+  assert.deepEqual(
+    entries.filter((e) => e.startsWith(".") || e.endsWith(".tmp")),
+    [],
+    `unexpected leftovers: ${entries.join(", ")}`,
+  );
+});
+
+test("an extracted callee stub does not drag its body into validation", async () => {
+  // `extract` gives `square` to the document as a signature-only import.
+  // Re-attaching full's body to it on the way back would put a func this
+  // edit doesn't own under merge's body validation.
+  const ctx = await freshRoot();
+  const doc = await ok(ctx, "wast_read", { component: "sample", funcs: ["cube"] });
+  const stub = doc.funcs.find((f) => f.uid === "square");
+  assert.equal(stub.source, "imported");
+  assert.equal(stub.body, undefined);
+
+  const result = await ok(ctx, "wast_write", { component: "sample", document: doc });
+  assert.equal(result.compile.ok, true);
 });
 
 test("a missing component reports which file is absent", async () => {

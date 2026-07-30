@@ -98,6 +98,12 @@ signature; drop `name` to keep a display name; drop a func from `funcs`
 entirely and it is untouched. An explicit `""` clears a name, and `[]` clears
 a body. Leave `uid` off a brand-new func and one is generated.
 
+The signature fields — `source`, `wit_name`, `params`, `result` — are
+**required**, and unknown fields are rejected. Because omission carries
+meaning here, a typo'd or forgotten key would otherwise be indistinguishable
+from a deliberate omission: the edit would vanish and the write would still
+report success. Use `"result": null` for a func that returns nothing.
+
 ## What `wast_write` checks
 
 Errors start with a stable machine-readable code, so a failed write tells you

@@ -304,6 +304,12 @@ fn validate_partial_bodies(
     let mut errors: Vec<WastError> = Vec::new();
 
     for (uid, pfunc) in &partial.funcs {
+        // Imported entries are signature-only: merge checks their signature
+        // against `full` and never writes their body back. Judging a body
+        // here would fail an edit over a func the partial doesn't own.
+        if matches!(pfunc.source, FuncSource::Imported(_)) {
+            continue;
+        }
         let Some(ref body) = pfunc.body else { continue };
 
         let instructions = match wast_pattern_analyzer::deserialize_body(body) {

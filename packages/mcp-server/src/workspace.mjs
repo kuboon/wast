@@ -1,7 +1,7 @@
 // Filesystem side: find wast components under a root, read and write their
 // source files, and keep every path inside the root.
 
-import { readdir, readFile, stat, writeFile, mkdir } from "node:fs/promises";
+import { readdir, readFile, realpath, rename, rm, writeFile, mkdir } from "node:fs/promises";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
 
 /** Files that make up a component on disk. */
@@ -29,17 +29,36 @@ export class WorkspaceError extends Error {}
  * The server hands agents write access to whatever is under `root`; without
  * this check a `../..` in a tool argument would reach the rest of the disk.
  */
-export function resolveComponentDir(root, component) {
+export async function resolveComponentDir(root, component) {
   if (typeof component !== "string" || component.trim() === "") {
     throw new WorkspaceError("`component` must be a non-empty path relative to the server root");
   }
   if (isAbsolute(component)) {
     throw new WorkspaceError("`component` must be relative to the server root, not absolute");
   }
+
+  const contains = (base, path) => {
+    const rel = relative(base, path);
+    return rel === "" || (rel !== ".." && !rel.startsWith(".." + sep) && !isAbsolute(rel));
+  };
+
   const dir = resolve(root, component);
-  const rel = relative(root, dir);
-  if (rel.startsWith("..") || rel.split(sep).includes("..")) {
+  if (!contains(root, dir)) {
     throw new WorkspaceError(`'${component}' resolves outside the server root`);
+  }
+
+  // `resolve` is lexical, so the check above says nothing about symlinks: a
+  // link planted inside the root pointing out of it would still be read and
+  // written through. Re-check the real paths. A directory that doesn't exist
+  // yet can't be a link, and its absence surfaces as a clearer error later.
+  try {
+    const [realRoot, realDir] = await Promise.all([realpath(root), realpath(dir)]);
+    if (!contains(realRoot, realDir)) {
+      throw new WorkspaceError(`'${component}' resolves outside the server root via a symlink`);
+    }
+  } catch (err) {
+    if (err instanceof WorkspaceError) throw err;
+    // ENOENT and friends: nothing to resolve, so nothing to escape through.
   }
   return dir;
 }
@@ -95,17 +114,39 @@ export async function readComponentFiles(dir, lang = "en") {
   };
 }
 
-/** Persist what `codec.write` produced. Returns the files actually written. */
+/**
+ * Persist what `codec.write` produced. Returns the files actually written.
+ *
+ * Each file is staged next to its destination and renamed into place, so a
+ * failure mid-write can't leave a truncated `wast.json` behind — that file is
+ * the entire program, and `writeFile` truncates before it writes. Both
+ * payloads are staged before either rename lands, which keeps `wast.json` and
+ * its syms file from disagreeing when the second write is the one that fails.
+ */
 export async function writeComponentFiles(dir, files, lang = "en") {
-  const written = [];
-  await writeFile(join(dir, WAST_JSON), files.wastJson);
-  written.push(WAST_JSON);
+  const staged = [{ name: WAST_JSON, data: files.wastJson }];
   if (files.symsEnYaml !== null && files.symsEnYaml !== undefined) {
-    const name = `syms.${lang}.yaml`;
-    await writeFile(join(dir, name), files.symsEnYaml);
-    written.push(name);
+    staged.push({ name: `syms.${lang}.yaml`, data: files.symsEnYaml });
   }
-  return written;
+
+  const temps = [];
+  try {
+    for (const { name, data } of staged) {
+      const temp = join(dir, `.${name}.tmp`);
+      await writeFile(temp, data);
+      temps.push({ temp, final: join(dir, name) });
+    }
+    for (const { temp, final } of temps) {
+      await rename(temp, final);
+    }
+  } finally {
+    // Anything still staged means a write or rename failed; don't leave the
+    // scratch files behind.
+    await Promise.all(
+      temps.map(({ temp }) => rm(temp, { force: true }).catch(() => {})),
+    );
+  }
+  return staged.map(({ name }) => name);
 }
 
 /** Write a compiled component next to its source, as `dist/<dirname>.wasm`. */
@@ -118,16 +159,3 @@ export async function writeCompiled(dir, wasm) {
   return path;
 }
 
-/** Newest mtime across a component's source files, for change detection. */
-export async function sourceMtime(dir, lang = "en") {
-  let newest = 0;
-  for (const name of [WAST_JSON, `syms.${lang}.yaml`]) {
-    try {
-      const st = await stat(join(dir, name));
-      newest = Math.max(newest, st.mtimeMs);
-    } catch {
-      // absent — syms is optional
-    }
-  }
-  return newest;
-}
