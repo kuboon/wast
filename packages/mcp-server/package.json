@@ -1,0 +1,23 @@
+{
+  "name": "@wast/mcp-server",
+  "private": true,
+  "type": "module",
+  "version": "0.1.0",
+  "description": "MCP server exposing the wast structured write path (extract → edit IR as JSON → merge → compile)",
+  "bin": {
+    "wast-mcp": "src/server.mjs"
+  },
+  "scripts": {
+    "bundle-components": "node scripts/bundle-components.mjs",
+    "build": "pnpm bundle-components",
+    "test": "node --test 'test/*.test.mjs'",
+    "lint": "echo \"no linter configured yet\""
+  },
+  "dependencies": {
+    "@bytecodealliance/preview2-shim": "^0.17.9",
+    "@modelcontextprotocol/sdk": "^1.30.0"
+  },
+  "devDependencies": {
+    "@bytecodealliance/jco": "^1.19.0"
+  }
+}

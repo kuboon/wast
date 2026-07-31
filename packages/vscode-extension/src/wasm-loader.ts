@@ -15,7 +15,12 @@ import type {
   WastTypeDefWasm,
 } from "./wast-db.js";
 
-export type SyntaxPluginId = "raw" | "ruby-like" | "ts-like" | "rust-like";
+export type SyntaxPluginId =
+  | "ir-json"
+  | "raw"
+  | "ruby-like"
+  | "ts-like"
+  | "rust-like";
 
 export interface WastError {
   message: string;
@@ -64,7 +69,13 @@ export interface LoadedRuntime {
   compiler: Compiler;
 }
 
-const PLUGIN_IDS: SyntaxPluginId[] = ["raw", "ruby-like", "ts-like", "rust-like"];
+const PLUGIN_IDS: SyntaxPluginId[] = [
+  "ir-json",
+  "raw",
+  "ruby-like",
+  "ts-like",
+  "rust-like",
+];
 
 function pluginModuleName(id: SyntaxPluginId): string {
   // jco --name uses snake_case; bundle script passes id.replace(/-/g, "_")

@@ -1688,120 +1688,27 @@ fn fixup_call_args(
     params_by_func: &BTreeMap<String, Vec<String>>,
 ) -> bool {
     let mut changed = false;
-    match instr {
-        Instruction::Call { func_uid, args } => {
-            if let Some(pnames) = params_by_func.get(func_uid) {
-                for (i, (n, v)) in args.iter_mut().enumerate() {
-                    if n.is_empty()
-                        && let Some(pn) = pnames.get(i)
-                    {
-                        *n = pn.clone();
-                        changed = true;
-                    }
-                    if fixup_call_args(v, params_by_func) {
-                        changed = true;
-                    }
-                }
-            } else {
-                for (_, v) in args.iter_mut() {
-                    if fixup_call_args(v, params_by_func) {
-                        changed = true;
-                    }
-                }
-            }
-        }
-        Instruction::LocalSet { value, .. }
-        | Instruction::Some { value }
-        | Instruction::Ok { value }
-        | Instruction::Err { value }
-        | Instruction::IsErr { value }
-        | Instruction::StringLen { value }
-        | Instruction::ListLen { value } => {
-            if fixup_call_args(value, params_by_func) {
+    if let Instruction::Call { func_uid, args } = instr
+        && let Some(param_names) = params_by_func.get(func_uid)
+    {
+        for (index, (name, _)) in args.iter_mut().enumerate() {
+            if name.is_empty()
+                && let Some(param_name) = param_names.get(index)
+            {
+                *name = param_name.clone();
                 changed = true;
             }
         }
-        Instruction::Arithmetic { lhs, rhs, .. } | Instruction::Compare { lhs, rhs, .. } => {
-            if fixup_call_args(lhs, params_by_func) {
-                changed = true;
-            }
-            if fixup_call_args(rhs, params_by_func) {
-                changed = true;
-            }
-        }
-        Instruction::If {
-            condition,
-            then_body,
-            else_body,
-        } => {
-            if fixup_call_args(condition, params_by_func) {
-                changed = true;
-            }
-            for c in then_body {
-                if fixup_call_args(c, params_by_func) {
-                    changed = true;
-                }
-            }
-            for c in else_body {
-                if fixup_call_args(c, params_by_func) {
-                    changed = true;
-                }
-            }
-        }
-        Instruction::Block { body, .. } | Instruction::Loop { body, .. } => {
-            for c in body {
-                if fixup_call_args(c, params_by_func) {
-                    changed = true;
-                }
-            }
-        }
-        Instruction::BrIf { condition, .. } => {
-            if fixup_call_args(condition, params_by_func) {
-                changed = true;
-            }
-        }
-        Instruction::MatchOption {
-            value,
-            some_body,
-            none_body,
-            ..
-        } => {
-            if fixup_call_args(value, params_by_func) {
-                changed = true;
-            }
-            for c in some_body {
-                if fixup_call_args(c, params_by_func) {
-                    changed = true;
-                }
-            }
-            for c in none_body {
-                if fixup_call_args(c, params_by_func) {
-                    changed = true;
-                }
-            }
-        }
-        Instruction::MatchResult {
-            value,
-            ok_body,
-            err_body,
-            ..
-        } => {
-            if fixup_call_args(value, params_by_func) {
-                changed = true;
-            }
-            for c in ok_body {
-                if fixup_call_args(c, params_by_func) {
-                    changed = true;
-                }
-            }
-            for c in err_body {
-                if fixup_call_args(c, params_by_func) {
-                    changed = true;
-                }
-            }
-        }
-        _ => {}
     }
+    // Recurse via the IR's own exhaustive child walk. Hand-rolling the match
+    // here meant a wildcard arm, and calls nested in list/tuple/record
+    // literals, variant payloads, match arms, and resource ops kept their
+    // empty arg names — bodies the compiler then rejected.
+    wast_pattern_analyzer::for_each_child_mut(instr, &mut |child| {
+        if fixup_call_args(child, params_by_func) {
+            changed = true;
+        }
+    });
     changed
 }
 
@@ -2117,6 +2024,70 @@ mod tests {
             func_uid: "f1".to_string(),
             args: vec![("".to_string(), Instruction::Const { value: 10 })],
         }]);
+    }
+
+    #[test]
+    fn test_call_arg_names_recovered_inside_nested_containers() {
+        // ts-like's surface renders call args positionally, so the parser
+        // leaves their names empty and `fixup_call_args` recovers them from
+        // the callee's signature. It used to stop at container variants, so a
+        // call inside a record/list/tuple/variant/match kept empty names —
+        // and the compiler, which resolves args *by name*, rejected the body.
+        let mut params = BTreeMap::new();
+        params.insert("f1".to_string(), vec!["p1".to_string()]);
+
+        let call = || Instruction::Call {
+            func_uid: "f1".to_string(),
+            args: vec![(String::new(), Instruction::Const { value: 1 })],
+        };
+        let cases = vec![
+            Instruction::RecordLiteral {
+                fields: vec![("field".to_string(), call())],
+            },
+            Instruction::ListLiteral {
+                values: vec![call()],
+            },
+            Instruction::TupleLiteral {
+                values: vec![call()],
+            },
+            Instruction::VariantCtor {
+                case: "c".to_string(),
+                value: Some(Box::new(call())),
+            },
+            Instruction::MatchVariant {
+                value: Box::new(Instruction::LocalGet {
+                    uid: "v".to_string(),
+                }),
+                arms: vec![wast_pattern_analyzer::MatchArm {
+                    case: "c".to_string(),
+                    binding: None,
+                    body: vec![call()],
+                }],
+            },
+            Instruction::ResourceNew {
+                resource: "r".to_string(),
+                rep: Box::new(call()),
+            },
+        ];
+
+        for mut instr in cases {
+            let changed = fixup_call_args(&mut instr, &params);
+            assert!(changed, "expected a fixup in {instr:?}");
+            let mut names = Vec::new();
+            collect_call_arg_names(&instr, &mut names);
+            assert_eq!(names, vec!["p1"], "arg name not recovered in {instr:?}");
+        }
+    }
+
+    /// Every `Call` arg name appearing anywhere in an instruction tree.
+    fn collect_call_arg_names(instr: &Instruction, out: &mut Vec<String>) {
+        if let Instruction::Call { args, .. } = instr {
+            out.extend(args.iter().map(|(n, _)| n.clone()));
+        }
+        let mut copy = instr.clone();
+        wast_pattern_analyzer::for_each_child_mut(&mut copy, &mut |child| {
+            collect_call_arg_names(child, out)
+        });
     }
 
     #[test]

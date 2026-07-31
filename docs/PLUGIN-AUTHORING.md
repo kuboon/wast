@@ -6,9 +6,9 @@ e.g. `python-like`, `swift-like`, or any surface syntax of your choice.
 **New plugins should be renderers.** A syntax plugin's job is to *project*
 a `wast-component` as readable text — for humans reviewing and diffing
 code. Parsing text back is the exception, not the rule: edits to a wast
-program flow through the structured write path (`partial-manager`
-extract/merge on the IR, or an editor-capable write syntax), so a display
-syntax never needs a parser. Do not grow one.
+program flow through the structured write path — `partial-manager`
+extract/merge with [`ir-json`](../crates/syntax-plugin/ir-json/) as the
+surface — so a display syntax never needs a parser. Do not grow one.
 
 ## The contract
 
@@ -94,12 +94,18 @@ checklist item: a parser must handle broken intermediate states, keep
 uid identity stable through edits, and stay lossless — the exact costs
 the renderer-only rule exists to avoid.
 
+`ir-json` is the write syntax that sidesteps those costs entirely, and
+it's worth reading as the reference: because its surface *is* the IR —
+uids explicit, bodies as `Instruction` trees, type definitions rendered by
+`wast-types`' own derive — its `from_text` needs no parser beyond
+`serde_json`, and identity never has to be inferred. That's the bar a new
+write syntax has to clear.
+
 ## Rust plugins: `wast-syntax-core`
 
-The 4 reference plugins under `crates/syntax-plugin/{raw,ruby-like,
-ts-like,rust-like}/` are written in Rust (`raw` and `ts-like` are
-editors; `ruby-like` and `rust-like` are renderer-only). They share two
-internal helper crates:
+The 5 reference plugins under `crates/syntax-plugin/` are written in Rust
+(`ir-json`, `raw`, and `ts-like` are editors; `ruby-like` and `rust-like`
+are renderer-only). They share two internal helper crates:
 
 - **`wast-pattern-analyzer`** — defines the `Instruction` tree and
   `serialize_body` / `deserialize_body`. Used by every plugin and by
@@ -113,7 +119,8 @@ internal helper crates:
   variant), `format_wit_type` / `resolve_type_ref` walkers, and the
   `scaffold` module (editor-side helpers: `ExistingIndex`, collision-free
   `UidGen`, per-function reverse local maps, signature/param resolution —
-  renderer-only plugins don't need it).
+  renderer-only plugins don't need it), plus `convert::back` for the
+  serde-native → WIT-bindings direction.
 
 A typical Rust renderer's `to_text` looks like:
 

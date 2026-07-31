@@ -19,7 +19,7 @@ const pkgRoot = join(here, "..");
 const componentsRoot = join(pkgRoot, "dist", "components");
 const sampleWastDir = join(pkgRoot, "..", "sample-wast");
 
-const PLUGIN_IDS = ["raw", "ruby-like", "ts-like", "rust-like"];
+const PLUGIN_IDS = ["ir-json", "raw", "ruby-like", "ts-like", "rust-like"];
 
 // import() takes URLs, not raw paths — a join()ed Windows path would be
 // mis-parsed (drive letter / backslashes), so go through pathToFileURL.

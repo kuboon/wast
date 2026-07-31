@@ -33,8 +33,8 @@ test("every syntax plugin renders the fixture without crashing", () => {
   }
 });
 
-test("editor/renderer split: raw + ts-like are editable, ruby-like + rust-like are read-only", () => {
-  for (const id of ["raw", "ts-like"]) {
+test("editor/renderer split: ir-json + raw + ts-like are editable, ruby-like + rust-like are read-only", () => {
+  for (const id of ["ir-json", "raw", "ts-like"]) {
     assert.equal(
       typeof runtime.plugins[id].fromText,
       "function",
@@ -112,6 +112,69 @@ test("compiler.compile produces a wasm component from the committed sample", () 
     [wasm[0], wasm[1], wasm[2], wasm[3]],
     [0x00, 0x61, 0x73, 0x6d],
     "output is not a wasm module",
+  );
+});
+
+test("ir-json write path: extract → edit a body as JSON → merge → compile", () => {
+  // The full structured write path an agent drives, end to end on the real
+  // sample: narrow to one func, rewrite its instruction tree in JSON, merge
+  // it back, and prove the result still compiles to a wasm component.
+  const plugin = runtime.plugins["ir-json"];
+  const partial = runtime.partialManager.extract(fixture.component, [
+    { sym: "square", includeCaller: false },
+  ]);
+
+  const doc = JSON.parse(plugin.toText(partial));
+  const square = doc.funcs.find((f) => f.uid === "square");
+  assert.ok(square, "square must be in the extracted document");
+  assert.equal(square.params[0].uid, "x", "uids are explicit in the document");
+
+  // x * x  →  x + x. Editing the tree directly: no parser involved.
+  square.body = [
+    {
+      Arithmetic: {
+        op: "Add",
+        lhs: { LocalGet: { uid: "x" } },
+        rhs: { LocalGet: { uid: "x" } },
+      },
+    },
+  ];
+
+  let merged;
+  try {
+    const parsed = plugin.fromText(JSON.stringify(doc), fixture.component);
+    merged = runtime.partialManager.merge(parsed, fixture.component);
+  } catch (err) {
+    assert.fail(`ir-json write path threw: ${describeError(err)}`);
+  }
+
+  assert.deepEqual(funcUids(merged), funcUids(fixture.component));
+  const wasm = runtime.compiler.compile(merged, fixture.worldWit);
+  assert.deepEqual(
+    [wasm[0], wasm[1], wasm[2], wasm[3]],
+    [0x00, 0x61, 0x73, 0x6d],
+    "edited component must still compile to a wasm component",
+  );
+});
+
+test("ir-json write path: a body referencing an undefined local is rejected at merge", () => {
+  // What the structured path buys: a bad edit fails at the boundary with a
+  // machine-readable code instead of producing a component that only breaks
+  // when the compiler runs.
+  const plugin = runtime.plugins["ir-json"];
+  const partial = runtime.partialManager.extract(fixture.component, [
+    { sym: "square", includeCaller: false },
+  ]);
+  const doc = JSON.parse(plugin.toText(partial));
+  doc.funcs.find((f) => f.uid === "square").body = [
+    { LocalGet: { uid: "does_not_exist" } },
+  ];
+
+  const parsed = plugin.fromText(JSON.stringify(doc), fixture.component);
+  assert.throws(
+    () => runtime.partialManager.merge(parsed, fixture.component),
+    (err) => /unknown_local:/.test(describeError(err)),
+    "merge should reject a body reading an undefined local",
   );
 });
 

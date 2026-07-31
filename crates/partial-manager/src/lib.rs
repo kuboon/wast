@@ -7,7 +7,7 @@ use bindings::wast::types::types::{
     FuncSource, SymEntry, Syms, TypeSource, WastComponent, WastError, WastFunc, WastTypeDef,
     WitType,
 };
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use wast_pattern_analyzer::Instruction;
 
 struct Component;
@@ -16,11 +16,32 @@ struct Component;
 // Helpers
 // ---------------------------------------------------------------------------
 
+/// Build an error. Every message starts with a stable machine-readable
+/// `snake_case` code followed by `": "`, and `location` carries the uid the
+/// error is about — this is the contract agents and hosts parse against, so
+/// codes may be added but never renamed. The current set:
+///
+/// | Code | Meaning |
+/// |---|---|
+/// | `signature_mismatch` | partial's boundary signature disagrees with `full` |
+/// | `uid_conflict` | uid already exists in `full` with an incompatible kind |
+/// | `missing_dependency` | a body calls a func that exists nowhere |
+/// | `caller_not_included` | a signature changed but a caller outside the partial would break |
+/// | `invalid_body` | body bytes don't deserialize |
+/// | `unknown_local` | body reads a local that is never a param, assignment, or binding |
+/// | `call_arity_mismatch` | call passes a different number of args than the callee declares |
+/// | `call_arg_unknown` | call names an arg that isn't one of the callee's params |
+/// | `call_arg_duplicate` | call names the same param twice |
 fn err(msg: impl Into<String>, location: Option<String>) -> WastError {
     WastError {
         message: msg.into(),
         location,
     }
+}
+
+/// Build a coded error: `"<code>: <message>"`.
+fn coded(code: &str, msg: impl AsRef<str>, uid: &str) -> WastError {
+    err(format!("{code}: {}", msg.as_ref()), Some(uid.to_string()))
 }
 
 /// Collect type UIDs directly referenced by a function's params and result.
@@ -100,12 +121,7 @@ fn extract_call_refs(body: &[u8]) -> Result<Vec<String>, String> {
 /// Like [`extract_call_refs`], but wraps deserialization failures in a
 /// `WastError` that names the offending func uid.
 fn call_refs_for(uid: &str, body: &[u8]) -> Result<Vec<String>, WastError> {
-    extract_call_refs(body).map_err(|e| {
-        err(
-            format!("invalid body for func '{uid}': {e}"),
-            Some(uid.to_string()),
-        )
-    })
+    extract_call_refs(body).map_err(|e| coded("invalid_body", format!("func '{uid}': {e}"), uid))
 }
 
 /// Visit every *direct* child instruction of `instr`.
@@ -239,12 +255,8 @@ fn collect_calls(instr: &Instruction, out: &mut Vec<String>) {
 fn collect_local_uids(uid: &str, func: &WastFunc) -> Result<BTreeSet<String>, WastError> {
     let mut locals: BTreeSet<String> = func.params.iter().map(|(name, _)| name.clone()).collect();
     if let Some(ref body) = func.body {
-        let instructions = wast_pattern_analyzer::deserialize_body(body).map_err(|e| {
-            err(
-                format!("invalid body for func '{uid}': {e}"),
-                Some(uid.to_string()),
-            )
-        })?;
+        let instructions = wast_pattern_analyzer::deserialize_body(body)
+            .map_err(|e| coded("invalid_body", format!("func '{uid}': {e}"), uid))?;
         for instr in &instructions {
             walk_instruction(instr, &mut |node| match node {
                 Instruction::LocalSet { uid, .. } => {
@@ -273,6 +285,114 @@ fn collect_local_uids(uid: &str, func: &WastFunc) -> Result<BTreeSet<String>, Wa
         }
     }
     Ok(locals)
+}
+
+/// Validate every body the partial contributes, against the signatures that
+/// are visible once the merge has been applied.
+///
+/// The scope is deliberately the partial's *own* funcs: walking all of `full`
+/// would fail an edit because of pre-existing breakage elsewhere in the
+/// program, which is not this edit's fault. What it catches is the class of
+/// mistake a structured (non-parser) write path makes — a body referring to a
+/// local that doesn't exist, or calling a func with the wrong argument set.
+/// The compiler resolves call args *by name* against the callee's params, so
+/// an arg-name mismatch here is a body that would only fail at compile time.
+fn validate_partial_bodies(
+    partial: &WastComponent,
+    param_uids_by_func: &BTreeMap<String, Vec<String>>,
+) -> Vec<WastError> {
+    let mut errors: Vec<WastError> = Vec::new();
+
+    for (uid, pfunc) in &partial.funcs {
+        // Imported entries are signature-only: merge checks their signature
+        // against `full` and never writes their body back. Judging a body
+        // here would fail an edit over a func the partial doesn't own.
+        if matches!(pfunc.source, FuncSource::Imported(_)) {
+            continue;
+        }
+        let Some(ref body) = pfunc.body else { continue };
+
+        let instructions = match wast_pattern_analyzer::deserialize_body(body) {
+            Ok(instructions) => instructions,
+            Err(e) => {
+                errors.push(coded("invalid_body", format!("func '{uid}': {e}"), uid));
+                continue;
+            }
+        };
+        let defined_locals = match collect_local_uids(uid, pfunc) {
+            Ok(locals) => locals,
+            Err(e) => {
+                errors.push(e);
+                continue;
+            }
+        };
+
+        for instr in &instructions {
+            walk_instruction(instr, &mut |node| match node {
+                Instruction::LocalGet { uid: local } => {
+                    if !defined_locals.contains(local) {
+                        errors.push(coded(
+                            "unknown_local",
+                            format!(
+                                "func '{uid}' reads local '{local}', which is not one of its \
+                                 params, an assignment target, or a match binding"
+                            ),
+                            uid,
+                        ));
+                    }
+                }
+                Instruction::Call { func_uid, args } => {
+                    let Some(params) = param_uids_by_func.get(func_uid) else {
+                        errors.push(coded(
+                            "missing_dependency",
+                            format!("func '{uid}' calls '{func_uid}' which is not found"),
+                            uid,
+                        ));
+                        return;
+                    };
+                    if args.len() != params.len() {
+                        errors.push(coded(
+                            "call_arity_mismatch",
+                            format!(
+                                "func '{uid}' calls '{func_uid}' with {} arg(s) but it declares \
+                                 {} param(s): {}",
+                                args.len(),
+                                params.len(),
+                                params.join(", ")
+                            ),
+                            uid,
+                        ));
+                        return;
+                    }
+                    let mut seen: BTreeSet<&str> = BTreeSet::new();
+                    for (arg_name, _) in args {
+                        if !params.iter().any(|p| p == arg_name) {
+                            errors.push(coded(
+                                "call_arg_unknown",
+                                format!(
+                                    "func '{uid}' calls '{func_uid}' with arg '{arg_name}', which \
+                                     is not one of its params: {}",
+                                    params.join(", ")
+                                ),
+                                uid,
+                            ));
+                        } else if !seen.insert(arg_name.as_str()) {
+                            errors.push(coded(
+                                "call_arg_duplicate",
+                                format!(
+                                    "func '{uid}' passes arg '{arg_name}' to '{func_uid}' twice"
+                                ),
+                                uid,
+                            ));
+                        }
+                    }
+                }
+                _ => {}
+            });
+        }
+    }
+
+    errors
 }
 
 // ---------------------------------------------------------------------------
@@ -488,14 +608,15 @@ fn merge_impl(
                     Ok(calls) => {
                         for called in calls {
                             if sig_changed.contains(called.as_str()) {
-                                errors.push(err(
+                                errors.push(coded(
+                                    "caller_not_included",
                                     format!(
-                                        "conflict: func '{uid}' calls '{called}', whose signature \
-                                         is changed by this partial, but '{uid}' is not included \
-                                         in the partial — re-extract with include-caller so all \
-                                         call sites are revalidated"
+                                        "func '{uid}' calls '{called}', whose signature is changed \
+                                         by this partial, but '{uid}' is not included in the \
+                                         partial — re-extract with include-caller so all call \
+                                         sites are revalidated"
                                     ),
-                                    Some(uid.clone()),
+                                    uid,
                                 ));
                             }
                         }
@@ -620,37 +741,29 @@ fn merge_impl(
         }
     }
 
-    // Check that all func references in partial's internal funcs exist
-    // in either partial or full (missing_dependency check).
-    let all_func_uids: BTreeSet<&str> = full
+    // Body validation. Every func the partial contributes gets its body
+    // checked against the signatures visible after the merge: calls must
+    // resolve to a real func with a matching argument set, and locals must
+    // be defined. Signatures come from `full` (already updated above) with
+    // the partial's own entries layered on top, so a partial that both adds
+    // a callee and calls it validates.
+    let mut param_uids_by_func: BTreeMap<String, Vec<String>> = full
         .funcs
         .iter()
-        .map(|(uid, _)| uid.as_str())
-        .chain(partial.funcs.iter().map(|(uid, _)| uid.as_str()))
+        .map(|(uid, f)| {
+            (
+                uid.clone(),
+                f.params.iter().map(|(p, _)| p.clone()).collect(),
+            )
+        })
         .collect();
     for (uid, pfunc) in &partial.funcs {
-        if !matches!(&pfunc.source, FuncSource::Internal(_)) {
-            continue;
-        }
-        if let Some(ref body) = pfunc.body {
-            match call_refs_for(uid, body) {
-                Err(e) => errors.push(e),
-                Ok(calls) => {
-                    for called in calls {
-                        if !all_func_uids.contains(called.as_str()) {
-                            errors.push(err(
-                                format!(
-                                    "missing_dependency: func '{}' calls '{}' which is not found",
-                                    uid, called
-                                ),
-                                Some(uid.clone()),
-                            ));
-                        }
-                    }
-                }
-            }
-        }
+        param_uids_by_func.insert(
+            uid.clone(),
+            pfunc.params.iter().map(|(p, _)| p.clone()).collect(),
+        );
     }
+    errors.extend(validate_partial_bodies(&partial, &param_uids_by_func));
 
     if !errors.is_empty() {
         return Err(errors);
@@ -1170,7 +1283,7 @@ mod tests {
             &[("x", "i32")],
             Some("i32"),
         );
-        partial_func.1.body = Some(vec![1, 2, 3]); // edited body
+        partial_func.1.body = Some(mk_body_const(1)); // edited body
         let partial = WastComponent {
             funcs: vec![partial_func],
             types: vec![],
@@ -1183,7 +1296,7 @@ mod tests {
             &[("x", "i32")],
             Some("i32"),
         );
-        full_func.1.body = Some(vec![9, 9]); // original body
+        full_func.1.body = Some(mk_body_const(9)); // original body
         let full = WastComponent {
             funcs: vec![full_func],
             types: vec![],
@@ -1193,7 +1306,7 @@ mod tests {
         let merged = merge_impl(partial, full).unwrap();
         assert_eq!(merged.funcs.len(), 1);
         let (_, m) = &merged.funcs[0];
-        assert_eq!(m.body, Some(vec![1, 2, 3]), "body should propagate");
+        assert_eq!(m.body, Some(mk_body_const(1)), "body should propagate");
         assert!(
             matches!(&m.source, FuncSource::Internal(_)),
             "source tag from `full` should be preserved (Internal)"
@@ -1372,6 +1485,25 @@ mod tests {
             })
             .collect();
         wast_pattern_analyzer::serialize_body(&instrs)
+    }
+
+    /// A body calling `func_uid` with one arg per name. Bodies handed to
+    /// `merge` are validated against the callee's params, so a call to a func
+    /// that takes arguments has to actually pass them.
+    fn mk_body_calling_with_args(func_uid: &str, arg_names: &[&str]) -> Vec<u8> {
+        wast_pattern_analyzer::serialize_body(&[Instruction::Call {
+            func_uid: func_uid.to_string(),
+            args: arg_names
+                .iter()
+                .map(|name| (name.to_string(), Instruction::Const { value: 0 }))
+                .collect(),
+        }])
+    }
+
+    /// A minimal well-formed body (used where the test only cares that some
+    /// body is present and distinguishable).
+    fn mk_body_const(value: i64) -> Vec<u8> {
+        wast_pattern_analyzer::serialize_body(&[Instruction::Const { value }])
     }
 
     #[test]
@@ -1673,7 +1805,7 @@ mod tests {
 
     #[test]
     fn merge_internal_sig_change_with_hidden_caller_errors() {
-        let caller_body = mk_body_calling(&["f1"]);
+        let caller_body = mk_body_calling_with_args("f1", &["x"]);
         let mut f2 = mk_func("f2", FuncSource::Internal("f2".into()), &[], None);
         f2.1.body = Some(caller_body);
         let full = WastComponent {
@@ -1703,14 +1835,14 @@ mod tests {
         let errs = merge_impl(partial, full).unwrap_err();
         assert!(
             errs.iter()
-                .any(|e| e.message.contains("conflict") && e.message.contains("f2")),
+                .any(|e| e.message.starts_with("caller_not_included:") && e.message.contains("f2")),
             "hidden caller must be reported: {errs:?}"
         );
     }
 
     #[test]
     fn merge_internal_sig_change_with_included_caller_ok() {
-        let caller_body = mk_body_calling(&["f1"]);
+        let caller_body = mk_body_calling_with_args("f1", &["x"]);
         let mut full_f2 = mk_func("f2", FuncSource::Internal("f2".into()), &[], None);
         full_f2.1.body = Some(caller_body.clone());
         let full = WastComponent {
@@ -1795,6 +1927,212 @@ mod tests {
             "extract error must name the func: {}",
             err.message
         );
+    }
+
+    // ── merge: body validation (the structured write path's safety net) ──
+
+    /// A partial with one func whose body is `instructions`, merged against
+    /// `full`. Used by the body-validation tests below.
+    fn merge_body(instructions: Vec<Instruction>, full: WastComponent) -> Vec<WastError> {
+        let mut f = mk_func(
+            "caller",
+            FuncSource::Internal("caller".into()),
+            &[("p", "u32")],
+            None,
+        );
+        f.1.body = Some(wast_pattern_analyzer::serialize_body(&instructions));
+        let partial = WastComponent {
+            funcs: vec![f],
+            types: vec![],
+            syms: empty_syms(),
+        };
+        merge_impl(partial, full).err().unwrap_or_default()
+    }
+
+    fn full_with_callee(params: &[(&str, &str)]) -> WastComponent {
+        WastComponent {
+            funcs: vec![mk_func(
+                "callee",
+                FuncSource::Internal("callee".into()),
+                params,
+                None,
+            )],
+            types: vec![],
+            syms: empty_syms(),
+        }
+    }
+
+    #[test]
+    fn merge_rejects_unknown_local_read() {
+        let errs = merge_body(
+            vec![Instruction::LocalGet { uid: "typo".into() }],
+            full_with_callee(&[]),
+        );
+        assert!(
+            errs.iter()
+                .any(|e| e.message.starts_with("unknown_local:") && e.message.contains("typo")),
+            "{errs:?}"
+        );
+    }
+
+    #[test]
+    fn merge_accepts_locals_from_params_sets_and_bindings() {
+        // p is a param, acc is assigned, v is a match binding — all defined.
+        let errs = merge_body(
+            vec![
+                Instruction::LocalSet {
+                    uid: "acc".into(),
+                    value: Box::new(Instruction::LocalGet { uid: "p".into() }),
+                },
+                Instruction::MatchOption {
+                    value: Box::new(Instruction::LocalGet { uid: "acc".into() }),
+                    some_binding: "v".into(),
+                    some_body: vec![Instruction::LocalGet { uid: "v".into() }],
+                    none_body: vec![],
+                },
+            ],
+            full_with_callee(&[]),
+        );
+        assert!(errs.is_empty(), "{errs:?}");
+    }
+
+    #[test]
+    fn merge_rejects_call_with_wrong_arity() {
+        let errs = merge_body(
+            vec![Instruction::Call {
+                func_uid: "callee".into(),
+                args: vec![],
+            }],
+            full_with_callee(&[("a", "u32")]),
+        );
+        assert!(
+            errs.iter()
+                .any(|e| e.message.starts_with("call_arity_mismatch:")),
+            "{errs:?}"
+        );
+    }
+
+    #[test]
+    fn merge_rejects_call_with_unknown_arg_name() {
+        // The compiler resolves call args by name, so a wrong (or empty) arg
+        // name is a body that would only fail at compile time.
+        let errs = merge_body(
+            vec![Instruction::Call {
+                func_uid: "callee".into(),
+                args: vec![("wrong".into(), Instruction::Const { value: 1 })],
+            }],
+            full_with_callee(&[("a", "u32")]),
+        );
+        assert!(
+            errs.iter()
+                .any(|e| e.message.starts_with("call_arg_unknown:") && e.message.contains("wrong")),
+            "{errs:?}"
+        );
+    }
+
+    #[test]
+    fn merge_rejects_call_with_duplicate_arg() {
+        let errs = merge_body(
+            vec![Instruction::Call {
+                func_uid: "callee".into(),
+                args: vec![
+                    ("a".into(), Instruction::Const { value: 1 }),
+                    ("a".into(), Instruction::Const { value: 2 }),
+                ],
+            }],
+            full_with_callee(&[("a", "u32"), ("b", "u32")]),
+        );
+        assert!(
+            errs.iter()
+                .any(|e| e.message.starts_with("call_arg_duplicate:")),
+            "{errs:?}"
+        );
+    }
+
+    #[test]
+    fn merge_accepts_well_formed_call() {
+        let errs = merge_body(
+            vec![Instruction::Call {
+                func_uid: "callee".into(),
+                args: vec![("a".into(), Instruction::LocalGet { uid: "p".into() })],
+            }],
+            full_with_callee(&[("a", "u32")]),
+        );
+        assert!(errs.is_empty(), "{errs:?}");
+    }
+
+    #[test]
+    fn merge_validates_nested_call_args() {
+        // A malformed call buried inside a match arm must still be caught.
+        let errs = merge_body(
+            vec![Instruction::MatchOption {
+                value: Box::new(Instruction::LocalGet { uid: "p".into() }),
+                some_binding: "v".into(),
+                some_body: vec![Instruction::Call {
+                    func_uid: "callee".into(),
+                    args: vec![("nope".into(), Instruction::Const { value: 0 })],
+                }],
+                none_body: vec![],
+            }],
+            full_with_callee(&[("a", "u32")]),
+        );
+        assert!(
+            errs.iter()
+                .any(|e| e.message.starts_with("call_arg_unknown:")),
+            "{errs:?}"
+        );
+    }
+
+    #[test]
+    fn merge_validates_exported_func_bodies_too() {
+        // Exported funcs' bodies propagate into `full`, so they get the same
+        // scrutiny as internal ones.
+        let mut f = mk_func("f1", FuncSource::Exported("f1".into()), &[], None);
+        f.1.body = Some(wast_pattern_analyzer::serialize_body(&[
+            Instruction::LocalGet {
+                uid: "ghost".into(),
+            },
+        ]));
+        let partial = WastComponent {
+            funcs: vec![f],
+            types: vec![],
+            syms: empty_syms(),
+        };
+        let full = WastComponent {
+            funcs: vec![mk_func("f1", FuncSource::Exported("f1".into()), &[], None)],
+            types: vec![],
+            syms: empty_syms(),
+        };
+        let errs = merge_impl(partial, full).unwrap_err();
+        assert!(
+            errs.iter().any(|e| e.message.starts_with("unknown_local:")),
+            "{errs:?}"
+        );
+    }
+
+    #[test]
+    fn merge_call_to_func_added_by_same_partial_resolves() {
+        // The partial adds both the callee and its caller — signatures must
+        // come from the partial, not just from `full`.
+        let mut caller = mk_func("caller", FuncSource::Internal("caller".into()), &[], None);
+        caller.1.body = Some(mk_body_calling_with_args("new_callee", &["n"]));
+        let callee = mk_func(
+            "new_callee",
+            FuncSource::Internal("new_callee".into()),
+            &[("n", "u32")],
+            None,
+        );
+        let partial = WastComponent {
+            funcs: vec![caller, callee],
+            types: vec![],
+            syms: empty_syms(),
+        };
+        let full = WastComponent {
+            funcs: vec![],
+            types: vec![],
+            syms: empty_syms(),
+        };
+        assert!(merge_impl(partial, full).is_ok());
     }
 
     #[test]

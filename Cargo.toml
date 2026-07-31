@@ -6,6 +6,7 @@ members = [
     "crates/demo-gen",
     "crates/wast-codec",
     "crates/partial-manager",
+    "crates/syntax-plugin/ir-json",
     "crates/syntax-plugin/ruby-like",
     "crates/syntax-plugin/ts-like",
     "crates/syntax-plugin/rust-like",

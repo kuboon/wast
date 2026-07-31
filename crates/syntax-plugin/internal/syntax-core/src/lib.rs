@@ -437,6 +437,48 @@ pub mod convert {
                 .collect(),
         }
     }
+
+    /// The other direction: serde-native shapes back into WIT bindings.
+    ///
+    /// Plugins whose surface *is* the serde shape (ir-json renders
+    /// `wast-types` structures verbatim) need this to rebuild a
+    /// `wast-component` from parsed input.
+    pub mod back {
+        use super::{bind, native};
+
+        pub fn primitive(p: &native::PrimitiveType) -> bind::PrimitiveType {
+            match p {
+                native::PrimitiveType::U32 => bind::PrimitiveType::U32,
+                native::PrimitiveType::U64 => bind::PrimitiveType::U64,
+                native::PrimitiveType::I32 => bind::PrimitiveType::I32,
+                native::PrimitiveType::I64 => bind::PrimitiveType::I64,
+                native::PrimitiveType::F32 => bind::PrimitiveType::F32,
+                native::PrimitiveType::F64 => bind::PrimitiveType::F64,
+                native::PrimitiveType::Bool => bind::PrimitiveType::Bool,
+                native::PrimitiveType::Char => bind::PrimitiveType::Char,
+                native::PrimitiveType::String => bind::PrimitiveType::String,
+            }
+        }
+
+        pub fn wit_type(t: &native::WitType) -> bind::WitType {
+            match t {
+                native::WitType::Primitive(p) => bind::WitType::Primitive(primitive(p)),
+                native::WitType::Option(uid) => bind::WitType::Option(uid.clone()),
+                native::WitType::Result(ok, err) => {
+                    bind::WitType::Result((ok.clone(), err.clone()))
+                }
+                native::WitType::List(uid) => bind::WitType::List(uid.clone()),
+                native::WitType::Record(fields) => bind::WitType::Record(fields.clone()),
+                native::WitType::Variant(cases) => bind::WitType::Variant(cases.clone()),
+                native::WitType::Tuple(refs) => bind::WitType::Tuple(refs.clone()),
+                native::WitType::Enum(cases) => bind::WitType::Enum(cases.clone()),
+                native::WitType::Flags(cases) => bind::WitType::Flags(cases.clone()),
+                native::WitType::Resource => bind::WitType::Resource,
+                native::WitType::Own(t) => bind::WitType::Own(t.clone()),
+                native::WitType::Borrow(t) => bind::WitType::Borrow(t.clone()),
+            }
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------

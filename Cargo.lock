@@ -2280,6 +2280,7 @@ version = "0.1.0"
 dependencies = [
  "postcard",
  "serde",
+ "serde_json",
 ]
 
 [[package]]
@@ -2289,6 +2290,19 @@ dependencies = [
  "wast-pattern-analyzer",
  "wast-types",
  "wit-bindgen 0.55.0",
+]
+
+[[package]]
+name = "wast-syntax-ir-json"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "wast-pattern-analyzer",
+ "wast-syntax-core",
+ "wast-types",
+ "wit-bindgen 0.55.0",
+ "wit-bindgen-rt",
 ]
 
 [[package]]
