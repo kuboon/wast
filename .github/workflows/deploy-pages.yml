@@ -7,11 +7,14 @@ on:
     paths:
       - "crates/**"
       - "packages/web-demo/**"
+      - "mise.toml"
       - ".github/workflows/deploy-pages.yml"
   pull_request:
+    # GitHub Actions' YAML parser has no anchors/aliases, so this list is a copy.
     paths:
       - "crates/**"
       - "packages/web-demo/**"
+      - "mise.toml"
       - ".github/workflows/deploy-pages.yml"
 
 # A reusable workflow runs with the CALLER's token permissions, so these have to
@@ -29,8 +32,8 @@ jobs:
     # URL on the PR. Concurrency (group: pages) is defined by the callee.
     uses: kuboon/workflows/.github/workflows/github-page-with-preview.yaml@main
     with:
-      # Runs on a bare ubuntu runner rather than the devcontainer image, so the
-      # toolchain is set up here: mise for rust/node/pnpm, then cargo-binstall
-      # for cargo-component / wasm-tools (same as .devcontainer/Dockerfile).
-      build-command: mise trust && mise install && mise x -- cargo binstall -y cargo-component wasm-tools && mise x -- pnpm install --frozen-lockfile && mise x -- pnpm --filter @wast/web-demo build
+      # Bare ubuntu runner, not the devcontainer image, so mise has to be
+      # trusted and its tools installed first. Everything past that lives in
+      # the build-web task.
+      build-command: mise trust && mise install && mise run build-web
       dist-dir: packages/web-demo/dist
