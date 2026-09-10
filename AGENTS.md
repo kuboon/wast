@@ -54,7 +54,7 @@ build+transpile plumbing the Node hosts share lives in
 | `wit/wast-core.wit` | `wast:core` package — `syntax-renderer`, `syntax-editor`, and `partial-manager` interfaces |
 | `wit-types/types.wit` | `wast:types` package — shared type vocabulary (`wast-component`, `wast-error`, …) `use`d by every other WIT package |
 | `wit-codec/codec.wit` | `wast:codec` package — `compile-wit` / `read` / `write` / `merge` |
-| `wit-compiler/compiler.wit` | `wast:compiler` package — `compile(component, world-wit) -> result<list<u8>, wast-error>` |
+| `wit-compiler/compiler.wit` | `wast:compiler` package — `compile` (Component), `compile-core` (bare core module, browser-instantiable), `emit-wat` (generated WAT text) |
 | `crates/wast-types/` | Shared serde types (rlib). Defines the `wast.json` schema (`WastDb`) |
 | `crates/wast-codec/` | Codec component: `WastComponent` ↔ `wast.json` / `syms.en.yaml` bytes, `world.wit` validation |
 | `crates/partial-manager/` | Extract/merge component (see semantics below) |
@@ -66,7 +66,7 @@ build+transpile plumbing the Node hosts share lives in
 | `crates/syntax-plugin/internal/syntax-core/` | Rlib: Rust scaffolding for plugins — shared `wit_types` bindings, `convert`, `RenderContext`, `TypePrinter`, `scaffold` editor-side (from_text) helpers |
 | `crates/demo-gen/` | Legacy generator for web-demo milestone demos (see Tech debt) |
 | `packages/vscode-extension/` | VS Code extension: TreeView, editable `wast://` virtual docs, compile command |
-| `packages/web-demo/` | Browser playground (jco-transpiled components), deployed to GitHub Pages |
+| `packages/web-demo/` | GitHub Pages site. The **playground** (`src/playground.js` + `src/samples.js`) compiles wast to a core wasm module in the browser and runs it; the syntax-plugin showcase and pre-built Components sit below it, collapsed |
 | `packages/mcp-server/` | MCP server exposing the structured write path as agent tools ([README](packages/mcp-server/README.md)) |
 | `packages/sample-wast/` | Canonical hand-authored sample (`wast.json` + `world.wit` + `syms.en.yaml`) |
 | `scripts/lib/components.mjs` | Shared cargo-component build + jco transpile helper for the host bundles |
@@ -168,11 +168,27 @@ compile time — which is why merge checks it.
 ```
 WastDb + synthesized WIT world
   → emit_core_module (core-only WAT)        # the hand-written part
-  → wat::parse_str → core .wasm
+  → wat::parse_str → core .wasm             # ← compile_core stops here
   → wit_component::embed_component_metadata
   → wit_component::ComponentEncoder         # shell: canon lift/lower, wiring
-  → Component .wasm
+  → Component .wasm                         # ← compile
 ```
+
+Three entry points on that one pipeline: `emit_wat` (the generated WAT text),
+`compile_core` (the core module), and `compile` (the Component). The middle
+one is what makes an in-browser demo possible — no browser can instantiate a
+Component Model binary, which is what jco exists to work around, but the core
+module underneath needs no host at all for an import-free program: it carries
+its own `memory` and *defines* `cabi_realloc` rather than importing it. Note
+that `compile`'s `world_wit` argument is unused; the world is synthesized
+from the `WastDb`, so no `world.wit` is needed to compile.
+
+Exports whose params and result each occupy a single core value are callable
+from JS with no glue. Compound types still cross by the Canonical ABI: a
+compound parameter flattens into several core values, and a `string` result
+returns a pointer to an (address, length) pair in that memory — about twenty
+lines of caller-side reading, which `packages/web-demo/src/playground.js`
+does.
 
 The compiler emits only the core module; the component shell is delegated to
 `wit-component` (pinned at 0.219 to match wasmtime 27's wasmparser). The IR

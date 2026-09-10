@@ -2,6 +2,8 @@
 #[rustfmt::skip]
 mod bindings;
 
+use std::collections::BTreeMap;
+
 use wast_pattern_analyzer::{ArithOp, CompareOp, Instruction};
 use wast_syntax_core::wit_types::*;
 
@@ -1590,16 +1592,59 @@ fn from_text_inner(text: &str, existing: &WastComponent) -> Result<WastComponent
     // trip the existing types match the rendered text exactly, so every
     // inline form maps back to its uid. For genuinely new types added by
     // the user, falls back to keeping the inline rendering as the ref.
-    let lookup = build_type_lookup(&existing.types);
+    let existing_lookup = build_type_lookup(&existing.types);
 
     let mut types: Vec<(TypeUid, WastTypeDef)> = Vec::new();
     for tf in &type_forms {
-        types.push(parse_type_form(tf, &lookup)?);
+        types.push(parse_type_form(tf, &existing_lookup)?);
     }
+
+    // Funcs resolve inline type refs against the existing component *and*
+    // the types this text declares. Without the second half a self-contained
+    // source could not name its own types: the inline form would fall
+    // through as a literal ref like `(option $u32)`, which is not a uid and
+    // which the compiler rejects.
+    let visible_types: Vec<(TypeUid, WastTypeDef)> = existing
+        .types
+        .iter()
+        .cloned()
+        .chain(types.iter().cloned())
+        .collect();
+    let lookup = build_type_lookup(&visible_types);
 
     let mut funcs: Vec<(FuncUid, WastFunc)> = Vec::new();
     for ff in &func_forms {
         funcs.push(parse_func_form(ff, &lookup)?);
+    }
+
+    // `(call $f (; $p ;) …)` carries each argument's param uid in a comment,
+    // which `to_text` always writes but a human writing lisp by hand will
+    // not. Bind any unnamed argument positionally instead, so a call reads
+    // `(call $square (local.get $x))` — the compiler resolves args by name,
+    // so leaving them empty would produce a body that cannot compile.
+    let params_by_func: BTreeMap<String, Vec<String>> = funcs
+        .iter()
+        .map(|(uid, f)| {
+            (
+                uid.clone(),
+                f.params.iter().map(|(p, _)| p.clone()).collect(),
+            )
+        })
+        .collect();
+    for (_, func) in funcs.iter_mut() {
+        let Some(body) = &func.body else { continue };
+        let Ok(mut instructions) = wast_pattern_analyzer::deserialize_body(body) else {
+            continue;
+        };
+        let mut changed = false;
+        for instr in &mut instructions {
+            if wast_pattern_analyzer::fill_call_arg_names(instr, &params_by_func) {
+                changed = true;
+            }
+        }
+        if changed {
+            func.body = Some(wast_pattern_analyzer::serialize_body(&instructions));
+        }
     }
 
     let syms = match syms_form {
@@ -1678,6 +1723,77 @@ mod tests {
             internal: vec![],
             local: vec![],
         }
+    }
+
+    #[test]
+    fn test_hand_written_call_binds_args_positionally() {
+        // `to_text` writes each call argument's param uid as a `(; $p ;)`
+        // comment, but a human writing lisp by hand won't. Unnamed args must
+        // still bind, because the compiler resolves them by name — leaving
+        // them empty produces a body that cannot compile.
+        let source = r#"(component
+  (func $square (internal $square) (param $x $u32) (result $u32)
+    (i64.mul (local.get $x) (local.get $x)))
+  (func $cube (export $cube) (param $x $u32) (result $u32)
+    (i64.mul (local.get $x) (call $square (local.get $x))))
+)"#;
+        let empty = WastComponent {
+            funcs: vec![],
+            types: vec![],
+            syms: make_empty_syms(),
+        };
+        let parsed = Component::from_text(source.to_string(), empty).unwrap();
+        let (_, cube) = parsed.funcs.iter().find(|(u, _)| u == "cube").unwrap();
+        let body = wast_pattern_analyzer::deserialize_body(cube.body.as_ref().unwrap()).unwrap();
+
+        let mut call_args = Vec::new();
+        for instr in &body {
+            let mut copy = instr.clone();
+            collect_call_args(&mut copy, &mut call_args);
+        }
+        assert_eq!(
+            call_args,
+            vec!["x".to_string()],
+            "the unnamed arg must take the callee's param uid"
+        );
+    }
+
+    /// Collect every `Call` argument name in an instruction tree.
+    fn collect_call_args(instr: &mut Instruction, out: &mut Vec<String>) {
+        if let Instruction::Call { args, .. } = instr {
+            out.extend(args.iter().map(|(n, _)| n.clone()));
+        }
+        wast_pattern_analyzer::for_each_child_mut(instr, &mut |child| {
+            collect_call_args(child, out)
+        });
+    }
+
+    #[test]
+    fn test_named_call_args_are_left_alone() {
+        // The rendered form stays authoritative: an explicit `(; $p ;)` name
+        // is never overwritten by the positional fallback.
+        let source = r#"(component
+  (func $f (internal $f) (param $a $u32) (param $b $u32) (result $u32)
+    (i64.add (local.get $a) (local.get $b)))
+  (func $g (export $g) (param $x $u32) (result $u32)
+    (call $f (; $b ;) (local.get $x) (; $a ;) (local.get $x)))
+)"#;
+        let empty = WastComponent {
+            funcs: vec![],
+            types: vec![],
+            syms: make_empty_syms(),
+        };
+        let parsed = Component::from_text(source.to_string(), empty).unwrap();
+        let (_, g) = parsed.funcs.iter().find(|(u, _)| u == "g").unwrap();
+        let body = wast_pattern_analyzer::deserialize_body(g.body.as_ref().unwrap()).unwrap();
+        let Instruction::Call { args, .. } = &body[0] else {
+            panic!("expected a call, got {:?}", body[0]);
+        };
+        assert_eq!(
+            args.iter().map(|(n, _)| n.as_str()).collect::<Vec<_>>(),
+            vec!["b", "a"],
+            "explicit arg names must survive in their written order"
+        );
     }
 
     #[test]

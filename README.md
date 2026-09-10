@@ -46,8 +46,9 @@ three hosts:
   `wast.json` files, virtual documents (`wast://`) that are editable under
   write syntaxes (`from_text → merge → write` save flow) and read-only under
   display syntaxes, and a compile command,
-- the **web demo** (`packages/web-demo/`) — a browser playground using
-  jco-transpiled components, deployed to GitHub Pages:
+- the **web demo** (`packages/web-demo/`) — a playground that compiles wast to
+  a **core wasm module in your browser and runs it right there**, with nothing
+  between the compiled module and the page; deployed to GitHub Pages:
   <https://kuboon.github.io/wast/>, and
 - the **MCP server** (`packages/mcp-server/`) — the structured write path as
   agent tools: read funcs as JSON, edit the IR, write it back validated.

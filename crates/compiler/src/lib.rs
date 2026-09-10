@@ -14,3 +14,19 @@ pub use error::CompileError;
 pub fn compile(db: &wast_types::WastDb, world_wit: &str) -> Result<Vec<u8>, CompileError> {
     emit::compile_component(db, world_wit)
 }
+
+/// Compile a `WastDb` into a bare **core** wasm module.
+///
+/// The Component Model binary `compile` produces needs a host that
+/// understands it (jco, wasmtime). This is the module underneath it, which a
+/// browser can instantiate as-is: no imports for an import-free program, its
+/// own `memory`, and `cabi_realloc` defined rather than imported.
+pub fn compile_core(db: &wast_types::WastDb) -> Result<Vec<u8>, CompileError> {
+    emit::compile_core_module(db)
+}
+
+/// The core module WAT the compiler generates, before it is assembled to
+/// bytes — the most direct view of what the emitter decided to do.
+pub fn emit_wat(db: &wast_types::WastDb) -> Result<String, CompileError> {
+    emit::emit_core_wat(db)
+}

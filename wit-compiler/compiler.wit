@@ -7,6 +7,25 @@ interface compiler {
   /// WASM Component. `world-wit` is the raw bytes of the world.wit file
   /// (UTF-8); the returned bytes are the encoded component (.wasm).
   compile: func(component: wast-component, world-wit: list<u8>) -> result<list<u8>, wast-error>;
+
+  /// Compile to a bare **core** wasm module — the module that sits inside
+  /// the Component `compile` produces, without the Component Model wrapper.
+  ///
+  /// This is the artifact a browser can use directly: an import-free program
+  /// instantiates with `WebAssembly.instantiate(bytes)` and no import object,
+  /// because the module carries its own memory and defines `cabi_realloc`
+  /// rather than importing it. Exports whose params and result each occupy a
+  /// single core value are callable from JS with no glue; compound types are
+  /// still passed by the Canonical ABI (pointer + length into that memory),
+  /// so those need the caller to read the memory itself.
+  ///
+  /// No `world.wit` is needed: the world is derived from the component.
+  compile-core: func(component: wast-component) -> result<list<u8>, wast-error>;
+
+  /// The core module WAT the compiler generates before assembling it to
+  /// bytes. Every local, ABI slot, and injected intrinsic is named there, so
+  /// it is the most direct answer to "what did the compiler actually do".
+  emit-wat: func(component: wast-component) -> result<string, wast-error>;
 }
 
 world compiler-world {

@@ -1657,7 +1657,7 @@ impl bindings::exports::wast::core::syntax_editor::Guest for Component {
                 if let Ok(mut instrs) = wast_pattern_analyzer::deserialize_body(body) {
                     let mut changed = false;
                     for instr in &mut instrs {
-                        if fixup_call_args(instr, &params_by_func) {
+                        if wast_pattern_analyzer::fill_call_arg_names(instr, &params_by_func) {
                             changed = true;
                         }
                     }
@@ -1678,38 +1678,6 @@ impl bindings::exports::wast::core::syntax_editor::Guest for Component {
             },
         })
     }
-}
-
-/// Recursively walk an instruction, filling in missing `Call` arg
-/// parameter names from the target func's signature. Returns true if any
-/// edit was made (so the caller knows to re-serialize the body).
-fn fixup_call_args(
-    instr: &mut Instruction,
-    params_by_func: &BTreeMap<String, Vec<String>>,
-) -> bool {
-    let mut changed = false;
-    if let Instruction::Call { func_uid, args } = instr
-        && let Some(param_names) = params_by_func.get(func_uid)
-    {
-        for (index, (name, _)) in args.iter_mut().enumerate() {
-            if name.is_empty()
-                && let Some(param_name) = param_names.get(index)
-            {
-                *name = param_name.clone();
-                changed = true;
-            }
-        }
-    }
-    // Recurse via the IR's own exhaustive child walk. Hand-rolling the match
-    // here meant a wildcard arm, and calls nested in list/tuple/record
-    // literals, variant payloads, match arms, and resource ops kept their
-    // empty arg names — bodies the compiler then rejected.
-    wast_pattern_analyzer::for_each_child_mut(instr, &mut |child| {
-        if fixup_call_args(child, params_by_func) {
-            changed = true;
-        }
-    });
-    changed
 }
 
 bindings::export!(Component with_types_in bindings);
@@ -2071,7 +2039,7 @@ mod tests {
         ];
 
         for mut instr in cases {
-            let changed = fixup_call_args(&mut instr, &params);
+            let changed = wast_pattern_analyzer::fill_call_arg_names(&mut instr, &params);
             assert!(changed, "expected a fixup in {instr:?}");
             let mut names = Vec::new();
             collect_call_arg_names(&instr, &mut names);

@@ -406,3 +406,198 @@ footer {
 footer a {
   color: var(--accent);
 }
+
+/* ---------------------------------------------------------------------------
+   Playground — compile in the browser, run what was compiled
+   --------------------------------------------------------------------------- */
+
+#playground-wrap {
+  margin-bottom: 2.5rem;
+}
+
+.pg-bar {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  flex-wrap: wrap;
+  margin-bottom: 0.6rem;
+}
+
+.pg-bar label {
+  font-weight: 600;
+  font-size: 0.9rem;
+}
+
+.pg-bar select {
+  padding: 0.35rem 0.5rem;
+  font-size: 0.9rem;
+}
+
+button.pg-primary {
+  padding: 0.4rem 1.1rem;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.pg-hint {
+  font-size: 0.78rem;
+  opacity: 0.55;
+}
+
+.pg-status {
+  font-size: 0.85rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.pg-status.good { color: #1a7f37; }
+.pg-status.bad { color: #b42318; }
+
+.pg-blurb {
+  margin: 0 0 0.9rem;
+  font-size: 0.9rem;
+  opacity: 0.8;
+  max-width: 68ch;
+}
+
+.pg-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 1rem;
+  align-items: start;
+}
+
+@media (max-width: 900px) {
+  .pg-grid { grid-template-columns: minmax(0, 1fr); }
+}
+
+.pg-pane h3 {
+  margin: 0 0 0.4rem;
+  font-size: 0.82rem;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  opacity: 0.6;
+}
+
+textarea.pg-editor {
+  width: 100%;
+  min-height: 22rem;
+  padding: 0.7rem;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.82rem;
+  line-height: 1.5;
+  tab-size: 2;
+  border: 1px solid rgba(128, 128, 128, 0.35);
+  border-radius: 6px;
+  resize: vertical;
+}
+
+.pg-run-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.pg-run-row {
+  border: 1px solid rgba(128, 128, 128, 0.28);
+  border-radius: 6px;
+  padding: 0.5rem 0.6rem;
+}
+
+.pg-run-head {
+  display: flex;
+  align-items: baseline;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+  margin-bottom: 0.35rem;
+}
+
+code.pg-fn { font-weight: 600; }
+
+.pg-sig {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.78rem;
+  opacity: 0.65;
+}
+
+.pg-run-controls {
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+  flex-wrap: wrap;
+}
+
+input.pg-args {
+  flex: 1 1 8rem;
+  min-width: 6rem;
+  padding: 0.3rem 0.45rem;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.82rem;
+}
+
+.pg-result {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.85rem;
+  font-weight: 600;
+}
+
+.pg-result.good { color: #1a7f37; }
+.pg-result.bad { color: #b42318; font-weight: 400; font-size: 0.78rem; }
+
+.pg-download { margin-top: 0.7rem; }
+
+a.pg-dl { font-size: 0.85rem; }
+
+.pg-details { margin-top: 0.7rem; }
+
+.pg-details summary {
+  cursor: pointer;
+  font-size: 0.85rem;
+  opacity: 0.75;
+}
+
+pre.pg-wat {
+  margin-top: 0.5rem;
+  max-height: 22rem;
+  overflow: auto;
+  padding: 0.6rem;
+  font-size: 0.74rem;
+  line-height: 1.45;
+  background: rgba(128, 128, 128, 0.08);
+  border-radius: 6px;
+}
+
+pre.pg-error {
+  white-space: pre-wrap;
+  padding: 0.6rem;
+  font-size: 0.8rem;
+  color: #b42318;
+  background: rgba(180, 35, 24, 0.07);
+  border-radius: 6px;
+}
+
+.pg-note {
+  font-size: 0.85rem;
+  opacity: 0.7;
+}
+
+/* Collapsed sections below the playground: keep their headings inline so the
+   disclosure triangle reads as part of the same line. */
+#plugin-showcase-wrap summary h2,
+#run-demos-wrap summary h2 {
+  display: inline;
+  font-size: 1.05rem;
+}
+
+#plugin-showcase-wrap,
+#run-demos-wrap {
+  margin-top: 1.6rem;
+}
+
+header { margin-bottom: 1.2rem; }
+
+/* Why a call takes more arguments than its signature shows. */
+.pg-abi-note {
+  font-size: 0.75rem;
+  opacity: 0.7;
+  margin-top: 0.3rem;
+}
