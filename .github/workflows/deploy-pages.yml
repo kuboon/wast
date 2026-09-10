@@ -7,50 +7,33 @@ on:
     paths:
       - "crates/**"
       - "packages/web-demo/**"
+      - "mise.toml"
+      - ".github/workflows/deploy-pages.yml"
+  pull_request:
+    # GitHub Actions' YAML parser has no anchors/aliases, so this list is a copy.
+    paths:
+      - "crates/**"
+      - "packages/web-demo/**"
+      - "mise.toml"
       - ".github/workflows/deploy-pages.yml"
 
+# A reusable workflow runs with the CALLER's token permissions, so these have to
+# be granted here — the callee's own permissions block can only narrow them.
 permissions:
   contents: read
   pages: write
   id-token: write
-
-concurrency:
-  group: deploy-pages
-  cancel-in-progress: false
+  pull-requests: write
 
 jobs:
-  build:
-    name: Build
-    runs-on: ubuntu-latest
-    env:
-      HOME: /root
-      # mise hits unauthenticated GitHub API rate limits without a token
-      GITHUB_TOKEN: ${{ github.token }}
-    defaults:
-      run:
-        shell: bash
-    container:
-      image: ghcr.io/kuboon/wast/wast-dev-container:latest
-      credentials:
-        username: ${{ github.actor }}
-        password: ${{ secrets.github_token }}
-    steps:
-      - uses: actions/checkout@v6
-      - name: Install pnpm deps
-        run: mise x -- pnpm install --frozen-lockfile
-      - name: Build web-demo
-        run: mise x -- pnpm --filter @wast/web-demo build
-      - uses: actions/upload-pages-artifact@v3
-        with:
-          path: packages/web-demo/dist
-
-  deploy:
-    name: Deploy
-    needs: build
-    runs-on: ubuntu-latest
-    environment:
-      name: github-pages
-      url: ${{ steps.deployment.outputs.page_url }}
-    steps:
-      - id: deployment
-        uses: actions/deploy-pages@v4
+  pages:
+    # Builds main at the Pages root and, on a PR, the PR branch under
+    # /<last-segment-of-branch-name>/, deploys both, and comments the preview
+    # URL on the PR. Concurrency (group: pages) is defined by the callee.
+    uses: kuboon/workflows/.github/workflows/github-page-with-preview.yaml@main
+    with:
+      # Bare ubuntu runner, not the devcontainer image, so mise has to be
+      # trusted and its tools installed first. Everything past that lives in
+      # the build-web task.
+      build-command: mise trust && mise install && mise run build-web
+      dist-dir: packages/web-demo/dist
