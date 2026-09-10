@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 
 /// Comparison operators for `Compare` instructions.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -350,6 +351,44 @@ pub fn for_each_child_mut(instr: &mut Instruction, visit: &mut dyn FnMut(&mut In
         | Instruction::FlagsCtor { .. }
         | Instruction::Nop => {}
     }
+}
+
+/// Fill in missing `Call` argument names positionally, from the callee's
+/// parameter list. Returns whether anything changed.
+///
+/// `Instruction::Call` carries `(param_uid, value)` pairs and the compiler
+/// resolves each argument **by name** against the callee's signature, so an
+/// argument with an empty name is a body that fails to compile. Surface
+/// syntaxes that write call arguments positionally — which is most of them —
+/// therefore parse to empty names and have to recover them here.
+///
+/// `params_by_func` maps a func uid to its parameter uids in order.
+pub fn fill_call_arg_names(
+    instr: &mut Instruction,
+    params_by_func: &BTreeMap<String, Vec<String>>,
+) -> bool {
+    let mut changed = false;
+    if let Instruction::Call { func_uid, args } = instr
+        && let Some(param_names) = params_by_func.get(func_uid)
+    {
+        for (index, (name, _)) in args.iter_mut().enumerate() {
+            if name.is_empty()
+                && let Some(param_name) = param_names.get(index)
+            {
+                *name = param_name.clone();
+                changed = true;
+            }
+        }
+    }
+    // Recurse via the exhaustive child walk rather than a hand-rolled match:
+    // a wildcard arm here is how calls nested in list/tuple/record literals,
+    // variant payloads, match arms, and resource ops kept their empty names.
+    for_each_child_mut(instr, &mut |child| {
+        if fill_call_arg_names(child, params_by_func) {
+            changed = true;
+        }
+    });
+    changed
 }
 
 /// Analyze a wast function body and detect high-level control flow patterns.

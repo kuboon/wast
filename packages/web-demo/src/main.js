@@ -3,6 +3,7 @@
 // Run — that keeps the initial page weight small.
 
 import { formatResult, parseInputField } from "./format.js";
+import { initPlayground } from "./playground.js";
 
 const MANIFEST_URL = new URL("../public/components/manifest.json", import.meta.url);
 
@@ -154,8 +155,11 @@ function exportOf(mod, name) {
 }
 
 async function main() {
-  // Plugin showcase is the primary content, so render it first (it also
-  // owns the sample picker everyone's eyes go to).
+  // The playground is the page's primary content: it compiles in the browser
+  // and runs what it compiled, so it goes up first.
+  await initPlayground();
+
+  // Then the syntax projections, behind a <details>.
   await initPluginShowcase();
 
   // Then the compile-and-run cards, which live behind a <details> below.

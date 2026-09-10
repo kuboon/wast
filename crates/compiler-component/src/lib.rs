@@ -127,6 +127,16 @@ impl bindings::exports::wast::compiler::compiler::Guest for Component {
         let db = component_to_db(component);
         wast_compiler::compile(&db, world_str).map_err(|e| err(e.to_string()))
     }
+
+    fn compile_core(component: WastComponent) -> Result<Vec<u8>, WastError> {
+        let db = component_to_db(component);
+        wast_compiler::compile_core(&db).map_err(|e| err(e.to_string()))
+    }
+
+    fn emit_wat(component: WastComponent) -> Result<String, WastError> {
+        let db = component_to_db(component);
+        wast_compiler::emit_wat(&db).map_err(|e| err(e.to_string()))
+    }
 }
 
 bindings::export!(Component with_types_in bindings);

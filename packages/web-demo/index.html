@@ -3,7 +3,7 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width,initial-scale=1" />
-    <title>WAST — syntax plugins + WASM Components</title>
+    <title>WAST — compile to WASM in your browser</title>
     <link rel="stylesheet" href="./src/styles.css" />
     <!--
       jco-transpiled syntax plugin components import from
@@ -27,74 +27,70 @@
   </head>
   <body>
     <header>
-      <h1>WAST <span class="subtitle">— one IR, pluggable surface syntaxes</span></h1>
+      <h1>WAST <span class="subtitle">— compile to WASM in your browser</span></h1>
       <p class="intro">
-        WAST is a high-level IR for WASM Components. The same
-        <strong>wast component</strong> (types + functions + bodies) renders
-        as multiple surface syntaxes via <code>to_text</code> plugins
-        (currently raw / ruby-like / ts-like / rust-like, more planned), and
-        compiles to a running WASM Component via <code>wit-component</code>.
+        WAST is a high-level IR for WebAssembly. The playground below runs the
+        whole toolchain in this page: your source is parsed, compiled to a
+        <strong>core wasm module</strong>, and instantiated right here — no
+        server, and nothing between the compiled module and the browser.
       </p>
-
-      <div class="overview">
-        <section class="architecture">
-          <h2>Architecture</h2>
-<pre class="diagram">text <──syntax plugin──> partial/full WastComponent
-partial WastComponent <──partial manager──> full WastComponent
-WastComponent <──file manager──> [wast, wit, syms]
-[wast, wit] --compiler--> wasm component</pre>
-        </section>
-
-        <section class="principles">
-          <h2>Key design principles</h2>
-          <ul>
-            <li>
-              <strong>Names are not code essence</strong> — all identifiers
-              are meaningless UIDs.
-            </li>
-            <li>
-              <strong>wasm generation requires only wast + wit</strong> —
-              syms are never needed.
-            </li>
-            <li>
-              <strong>Minimize identifier change cost</strong> — UIDs are
-              stable, display names are in syms.
-            </li>
-            <li>
-              <strong>WastComponent is the central type</strong> — partial
-              and full share the same type definition.
-            </li>
-          </ul>
-        </section>
-      </div>
+      <p class="intro">
+        That last part is the interesting bit. The compiler can emit a
+        WebAssembly <em>Component</em>, which no browser can instantiate
+        directly. It can also emit the core module inside it, and a program
+        with no imports needs no import object at all: it carries its own
+        memory and defines <code>cabi_realloc</code> rather than importing
+        it. So the output of a compile you just ran is callable from
+        JavaScript immediately, with no glue and no
+        <code>jco</code>.
+      </p>
 
       <p class="links">
         <a href="https://github.com/kuboon/wast">source on GitHub</a>
         ·
-        <a href="https://github.com/kuboon/wast/blob/main/crates/compiler/PLAN.md">PLAN.md</a>
+        <a href="https://github.com/kuboon/wast/blob/main/AGENTS.md">AGENTS.md</a>
+        ·
+        <a href="https://github.com/kuboon/wast/blob/main/crates/compiler/PLAN.md">compiler PLAN.md</a>
       </p>
     </header>
 
     <main>
+      <section id="playground-wrap">
+        <h2>Playground</h2>
+        <div id="playground"></div>
+      </section>
+
       <section id="plugin-showcase-wrap">
-        <h2>Syntax plugins · same IR, four surface syntaxes</h2>
-        <div id="plugin-showcase"></div>
+        <details>
+          <summary>
+            <h2>
+              One IR, several surface syntaxes
+              <span class="hint">(click to expand)</span>
+            </h2>
+          </summary>
+          <p class="desc">
+            The source above is one <em>projection</em> of the IR, not the IR
+            itself. Identifiers in a wast program are opaque uids and display
+            names live separately, so the same component renders into several
+            syntaxes. Every plugin renders; only some parse back.
+          </p>
+          <div id="plugin-showcase"></div>
+        </details>
       </section>
 
       <section id="run-demos-wrap">
         <details>
           <summary>
             <h2>
-              Compile &amp; run in the browser
+              Pre-built Components
               <span class="hint">(click to expand)</span>
             </h2>
           </summary>
           <p class="desc">
-            Each card below is the same wast component compiled to a WASM
-            Component, transpiled with <code>jco</code>, and imported as an ES
-            module in this page. Edit the inputs or pick a preset, then
-            <strong>Run</strong> to call the guest function. No server
-            round-trip.
+            These were compiled to full WASM <em>Components</em> at build time
+            and transpiled with <code>jco</code> — the path the playground
+            deliberately avoids. They cover the richer types the Canonical ABI
+            needs a host for.
           </p>
           <div id="demos"></div>
         </details>

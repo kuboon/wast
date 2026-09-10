@@ -151,20 +151,16 @@ pub fn wasi_cli_empty_run_wat() -> &'static str {
 "#
 }
 
-/// Compile a `WastDb` into a WASM Component binary.
+/// Generate the core module WAT text for a `WastDb`.
 ///
-/// Empty input returns the fixed WASI CLI empty-run component (verbatim WAT,
-/// then parsed to bytes). Otherwise:
-///  1. Emit a core-only `(module …)` with memory + cabi_realloc + funcs
-///  2. Synthesize a WIT world string from `db`'s exports/imports
-///  3. Embed the `component-type` custom section
-///  4. Wrap via `wit_component::ComponentEncoder`
-pub fn compile_component(db: &WastDb, _world_wit: &str) -> Result<Vec<u8>, CompileError> {
+/// This is stage 1 of the pipeline, exposed on its own because it is the
+/// most informative view of what the compiler actually did: the generated
+/// WAT names every local, every ABI slot, and every intrinsic the emitter
+/// decided to inject.
+pub fn emit_core_wat(db: &WastDb) -> Result<String, CompileError> {
     if db.funcs.is_empty() && db.types.is_empty() {
-        return wat::parse_str(wasi_cli_empty_run_wat())
-            .map_err(|e| CompileError::WatParse(e.to_string()));
+        return Ok(wasi_cli_empty_run_wat().to_string());
     }
-
     validate_db(db)?;
 
     let func_map: FuncMap = db
@@ -179,16 +175,52 @@ pub fn compile_component(db: &WastDb, _world_wit: &str) -> Result<Vec<u8>, Compi
         .collect::<BTreeMap<_, _>>();
 
     let literal_table = collect_literal_table(db)?;
-    let core_wat = emit_core_module(db, &func_map, &type_map, &literal_table)?;
-    let mut core_bytes = wat::parse_str(&core_wat).map_err(|e| {
+    emit_core_module(db, &func_map, &type_map, &literal_table)
+}
+
+/// Compile a `WastDb` into a bare **core** wasm module — no Component Model
+/// wrapper, no `component-type` custom section.
+///
+/// This is the same core module `compile_component` builds before handing it
+/// to `ComponentEncoder`, which makes it the artifact a browser can use
+/// directly: a program with no imports instantiates with
+/// `WebAssembly.instantiate(bytes)` and no import object at all, because the
+/// module carries its own `memory` and defines (rather than imports)
+/// `cabi_realloc`. Exports whose params and result each occupy one core
+/// value are then callable straight from JS with no glue.
+pub fn compile_core_module(db: &WastDb) -> Result<Vec<u8>, CompileError> {
+    let core_wat = emit_core_wat(db)?;
+    wat::parse_str(&core_wat).map_err(|e| {
         CompileError::WatParse(concise_with_detail(
             "generated core module",
             &e.to_string(),
             "WAT",
             &core_wat,
         ))
-    })?;
+    })
+}
 
+/// Compile a `WastDb` into a WASM Component binary.
+///
+/// Empty input returns the fixed WASI CLI empty-run component (verbatim WAT,
+/// then parsed to bytes). Otherwise:
+///  1. Emit a core-only `(module …)` with memory + cabi_realloc + funcs
+///  2. Synthesize a WIT world string from `db`'s exports/imports
+///  3. Embed the `component-type` custom section
+///  4. Wrap via `wit_component::ComponentEncoder`
+pub fn compile_component(db: &WastDb, _world_wit: &str) -> Result<Vec<u8>, CompileError> {
+    if db.funcs.is_empty() && db.types.is_empty() {
+        return wat::parse_str(wasi_cli_empty_run_wat())
+            .map_err(|e| CompileError::WatParse(e.to_string()));
+    }
+
+    let mut core_bytes = compile_core_module(db)?;
+
+    let type_map: TypeMap = db
+        .types
+        .iter()
+        .map(|r| (r.uid.clone(), &r.def.definition))
+        .collect::<BTreeMap<_, _>>();
     let wit_src = synthesize_world(db, &type_map)?;
     let mut resolve = Resolve::default();
     let pkg = resolve.push_str("generated.wit", &wit_src).map_err(|e| {
