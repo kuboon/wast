@@ -8,49 +8,29 @@ on:
       - "crates/**"
       - "packages/web-demo/**"
       - ".github/workflows/deploy-pages.yml"
+  pull_request:
+    paths:
+      - "crates/**"
+      - "packages/web-demo/**"
+      - ".github/workflows/deploy-pages.yml"
 
+# A reusable workflow runs with the CALLER's token permissions, so these have to
+# be granted here — the callee's own permissions block can only narrow them.
 permissions:
   contents: read
   pages: write
   id-token: write
-
-concurrency:
-  group: deploy-pages
-  cancel-in-progress: false
+  pull-requests: write
 
 jobs:
-  build:
-    name: Build
-    runs-on: ubuntu-latest
-    env:
-      HOME: /root
-      # mise hits unauthenticated GitHub API rate limits without a token
-      GITHUB_TOKEN: ${{ github.token }}
-    defaults:
-      run:
-        shell: bash
-    container:
-      image: ghcr.io/kuboon/wast/wast-dev-container:latest
-      credentials:
-        username: ${{ github.actor }}
-        password: ${{ secrets.github_token }}
-    steps:
-      - uses: actions/checkout@v6
-      - name: Install pnpm deps
-        run: mise x -- pnpm install --frozen-lockfile
-      - name: Build web-demo
-        run: mise x -- pnpm --filter @wast/web-demo build
-      - uses: actions/upload-pages-artifact@v3
-        with:
-          path: packages/web-demo/dist
-
-  deploy:
-    name: Deploy
-    needs: build
-    runs-on: ubuntu-latest
-    environment:
-      name: github-pages
-      url: ${{ steps.deployment.outputs.page_url }}
-    steps:
-      - id: deployment
-        uses: actions/deploy-pages@v4
+  pages:
+    # Builds main at the Pages root and, on a PR, the PR branch under
+    # /<last-segment-of-branch-name>/, deploys both, and comments the preview
+    # URL on the PR. Concurrency (group: pages) is defined by the callee.
+    uses: kuboon/workflows/.github/workflows/github-page-with-preview.yaml@main
+    with:
+      # Runs on a bare ubuntu runner rather than the devcontainer image, so the
+      # toolchain is set up here: mise for rust/node/pnpm, then cargo-binstall
+      # for cargo-component / wasm-tools (same as .devcontainer/Dockerfile).
+      build-command: mise trust && mise install && mise x -- cargo binstall -y cargo-component wasm-tools && mise x -- pnpm install --frozen-lockfile && mise x -- pnpm --filter @wast/web-demo build
+      dist-dir: packages/web-demo/dist
