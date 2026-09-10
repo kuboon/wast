@@ -1,6 +1,16 @@
 [tasks.build]
 run = "cargo component build --workspace && pnpm install --frozen-lockfile && pnpm build"
 
+[tasks.build-web]
+description = 'Build the web-demo static site into packages/web-demo/dist'
+run = [
+  # cargo-component/wasm-tools are not mise tools: the devcontainer binstalls
+  # them, a bare CI runner has to do it here.
+  'command -v cargo-component >/dev/null || cargo binstall -y cargo-component wasm-tools',
+  'pnpm install --frozen-lockfile',
+  'pnpm --filter @wast/web-demo build',
+]
+
 [tasks.bundle-components]
 run = "cd packages/vscode-extension && pnpm bundle-components"
 
