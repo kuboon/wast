@@ -1,0 +1,54 @@
+name: Publish compiler component
+
+# Publishes the wast:compiler WASM component to GHCR as an OCI artifact with
+# `wkg` (wasm-pkg-tools). Pull it with:
+#   wkg get wast:compiler@<version>   (after the same namespace config below)
+
+on:
+  workflow_dispatch:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  publish:
+    name: Build & publish
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      HOME: /root
+      GITHUB_TOKEN: ${{ github.token }}
+    defaults:
+      run:
+        shell: bash
+    container:
+      image: ghcr.io/kuboon/wast/wast-dev-container:latest
+      credentials:
+        username: ${{ github.actor }}
+        password: ${{ secrets.github_token }}
+    steps:
+    - uses: actions/checkout@v6
+    - name: Build component
+      run: mise x -- cargo component build --release -p wast-compiler-component
+    - name: Install wkg
+      run: mise x -- cargo binstall -y wkg
+    - name: Configure wkg for GHCR
+      env:
+        GHCR_USER: ${{ github.actor }}
+        GHCR_TOKEN: ${{ github.token }}
+      run: |
+        mkdir -p "$HOME/.config/wasm-pkg"
+        cat > "$HOME/.config/wasm-pkg/config.toml" <<EOF
+        [namespace_registries]
+        wast = { registry = "ghcr.io", metadata = { preferredProtocol = "oci", oci = { registry = "ghcr.io", namespacePrefix = "kuboon/wast/" } } }
+
+        [registry."ghcr.io".oci]
+        auth = { username = "${GHCR_USER}", password = "${GHCR_TOKEN}" }
+        EOF
+    - name: Publish
+      run: |
+        mise x -- wkg publish \
+          target/wasm32-wasip1/release/wast_compiler_component.wasm
