@@ -6,7 +6,8 @@ name: Publish wasm components
 #
 # To publish another component, add an entry to the matrix: `package` is the
 # cargo package that builds it, `wasm` the file name cargo-component emits
-# (the package name with `-` replaced by `_`).
+# (the package name with `-` replaced by `_`), `wit` the WIT package name it is
+# published as (the crate's `[package.metadata.component] package`).
 
 on:
   workflow_dispatch:
@@ -28,6 +29,7 @@ jobs:
         include:
         - package: wast-compiler-component
           wasm: wast_compiler_component.wasm
+          wit: wast:compiler
     env:
       HOME: /root
       GITHUB_TOKEN: ${{ github.token }}
@@ -60,5 +62,9 @@ jobs:
         EOF
     - name: Publish
       run: |
+        # The built component carries no version in its WIT package, so pass
+        # the crate version explicitly.
+        version=$(mise x -- cargo pkgid -p ${{ matrix.package }} | sed 's/.*[#@]//')
         mise x -- wkg publish \
-          target/wasm32-wasip1/release/${{ matrix.wasm }}
+          target/wasm32-wasip1/release/${{ matrix.wasm }} \
+          --package "${{ matrix.wit }}@${version}"
