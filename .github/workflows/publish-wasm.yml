@@ -52,7 +52,7 @@ jobs:
         mkdir -p "$HOME/.config/wasm-pkg"
         cat > "$HOME/.config/wasm-pkg/config.toml" <<EOF
         [namespace_registries]
-        wast = { registry = "ghcr.io", metadata = { preferredProtocol = "oci", oci = { registry = "ghcr.io", namespacePrefix = "kuboon/wast/" } } }
+        wast = { registry = "ghcr.io", metadata = { preferredProtocol = "oci", oci = { registry = "ghcr.io", namespacePrefix = "kuboon/" } } }
 
         [registry."ghcr.io".oci]
         auth = { username = "${GHCR_USER}", password = "${GHCR_TOKEN}" }
