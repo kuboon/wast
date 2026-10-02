@@ -1,13 +1,16 @@
 name: Publish wasm components
 
-# Publishes WASM components to GHCR as OCI artifacts with `wkg`
-# (wasm-pkg-tools). Pull one with the same namespace config as below:
+# Publishes WASM components to GHCR as OCI artifacts with
+# `cargo component publish`. Pull one with the same namespace config as below:
 #   wkg get wast:compiler@<version>
 #
-# To publish another component, add an entry to the matrix: `package` is the
-# cargo package that builds it, `wasm` the file name cargo-component emits
-# (the package name with `-` replaced by `_`), `wit` the WIT package name it is
-# published as (the crate's `[package.metadata.component] package`).
+# `wkg publish` can't be used here: it reads the package name and version from
+# the built wasm, which carries none (cargo-component encodes it as
+# `root:component`), and wkg 0.16 still fails on that even with `--package`.
+# `cargo component publish` takes the name from the crate's
+# `[package.metadata.component] package` and the version from its `version`.
+#
+# To publish another component, add its cargo package to the matrix.
 
 on:
   workflow_dispatch:
@@ -28,8 +31,6 @@ jobs:
       matrix:
         include:
         - package: wast-compiler-component
-          wasm: wast_compiler_component.wasm
-          wit: wast:compiler
     env:
       HOME: /root
       GITHUB_TOKEN: ${{ github.token }}
@@ -43,11 +44,7 @@ jobs:
         password: ${{ secrets.github_token }}
     steps:
     - uses: actions/checkout@v6
-    - name: Build component
-      run: mise x -- cargo component build --release -p ${{ matrix.package }}
-    - name: Install wkg
-      run: mise x -- cargo binstall -y wkg
-    - name: Configure wkg for GHCR
+    - name: Configure wasm-pkg for GHCR
       env:
         GHCR_USER: ${{ github.actor }}
         GHCR_TOKEN: ${{ github.token }}
@@ -55,16 +52,10 @@ jobs:
         mkdir -p "$HOME/.config/wasm-pkg"
         cat > "$HOME/.config/wasm-pkg/config.toml" <<EOF
         [namespace_registries]
-        wast = { registry = "ghcr.io", metadata = { preferredProtocol = "oci", oci = { registry = "ghcr.io", namespacePrefix = "kuboon/wast/" } } }
+        wast = { registry = "ghcr.io", metadata = { preferredProtocol = "oci", oci = { registry = "ghcr.io", namespacePrefix = "kuboon/" } } }
 
         [registry."ghcr.io".oci]
         auth = { username = "${GHCR_USER}", password = "${GHCR_TOKEN}" }
         EOF
     - name: Publish
-      run: |
-        # The built component carries no version in its WIT package, so pass
-        # the crate version explicitly.
-        version=$(mise x -- cargo pkgid -p ${{ matrix.package }} | sed 's/.*[#@]//')
-        mise x -- wkg publish \
-          target/wasm32-wasip1/release/${{ matrix.wasm }} \
-          --package "${{ matrix.wit }}@${version}"
+      run: mise x -- cargo component publish -p ${{ matrix.package }}
